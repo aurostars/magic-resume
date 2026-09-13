@@ -32,8 +32,7 @@ import {
   clearHistoryGroup,
   clearAllHistoryGroups,
 } from "./resumeHistory";
-import type { ResumeSyncData, WebDavBaseline } from "@/lib/webdav/types";
-import { LocalCasMismatchError } from "@/lib/webdav/errors";
+import type { MultiFileBaseline, ResumeSyncData } from "@/lib/webdav/types";
 import { canonicalizeSyncData, normalizeSyncData } from "@/lib/webdav/snapshot";
 
 interface PendingSync {
@@ -49,17 +48,18 @@ interface ResumeStore {
   future: Record<string, ResumeData[]>;
   _hasHydrated: boolean;
   _isApplyingSyncSnapshot: boolean;
-  webDavBaseline: WebDavBaseline | null;
+  webDavBaseline: MultiFileBaseline | null;
 
   setHasHydrated: (hasHydrated: boolean) => void;
   getSyncSnapshot: () => ResumeSyncData;
   applySyncSnapshot: (data: ResumeSyncData) => void;
-  commitWebDavSnapshot: (
-    data: ResumeSyncData,
-    baseline: WebDavBaseline,
-    expectedLocalToken: string,
-  ) => void;
-  setWebDavBaseline: (baseline: WebDavBaseline | null) => void;
+  getWebDavBaseline: () => MultiFileBaseline | null;
+  commitWebDavSync: (input: {
+    data: ResumeSyncData;
+    baseline: MultiFileBaseline;
+    expectedLocalToken: string;
+  }) => boolean;
+  clearWebDavBaseline: () => void;
   createResume: (templateId: string | null, isBlank?: boolean) => string;
   deleteResume: (resume: ResumeData) => void;
   duplicateResume: (resumeId: string) => string;
@@ -155,6 +155,60 @@ const createSafeLocalStorage = (): StateStorage => ({
   },
   removeItem: (name) => localStorage.removeItem(name),
 });
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const hasExactKeys = (value: Record<string, unknown>, keys: string[]): boolean => {
+  const actual = Object.keys(value).sort();
+  return actual.length === keys.length &&
+    actual.every((key, index) => key === [...keys].sort()[index]);
+};
+
+const HASH_PATTERN = /^[0-9a-f]{64}$/;
+const LOCAL_TOKEN_MISMATCH = Symbol("LOCAL_TOKEN_MISMATCH");
+
+const isMultiFileBaseline = (value: unknown): value is MultiFileBaseline => {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    "manifestRevision", "manifestHash", "activeResumeId", "entries",
+  ])) {
+    return false;
+  }
+  if (
+    typeof value.manifestRevision !== "number" ||
+    !Number.isInteger(value.manifestRevision) ||
+    value.manifestRevision < 0 ||
+    typeof value.manifestHash !== "string" ||
+    !HASH_PATTERN.test(value.manifestHash) ||
+    !(value.activeResumeId === null ||
+      (typeof value.activeResumeId === "string" && value.activeResumeId.length > 0)) ||
+    !isRecord(value.entries)
+  ) {
+    return false;
+  }
+
+  for (const [resumeId, entry] of Object.entries(value.entries)) {
+    if (
+      resumeId.length === 0 ||
+      !isRecord(entry) ||
+      !hasExactKeys(entry, ["contentHash", "deleted", "path"]) ||
+      typeof entry.contentHash !== "string" ||
+      !HASH_PATTERN.test(entry.contentHash) ||
+      typeof entry.deleted !== "boolean" ||
+      typeof entry.path !== "string" ||
+      !entry.path.startsWith(entry.deleted ? "trash/" : "resumes/") ||
+      entry.path.split("/").some((segment) => !segment || segment === "." || segment === "..")
+    ) {
+      return false;
+    }
+  }
+
+  if (value.activeResumeId !== null) {
+    const activeEntry = value.entries[value.activeResumeId];
+    if (!isRecord(activeEntry) || activeEntry.deleted !== false) return false;
+  }
+  return true;
+};
 
 const parseTimestamp = (value?: string): number | null => {
   if (!value) {
@@ -346,7 +400,11 @@ export const useResumeStore = create(
           set({ _isApplyingSyncSnapshot: false });
         }
       },
-      commitWebDavSnapshot: (incoming, baseline, expectedLocalToken) => {
+      getWebDavBaseline: () => {
+        const baseline = get().webDavBaseline;
+        return isMultiFileBaseline(baseline) ? baseline : null;
+      },
+      commitWebDavSync: ({ data: incoming, baseline, expectedLocalToken }) => {
         const normalized = normalizeSyncData(structuredClone(incoming));
         const resumes = Object.fromEntries(
           normalized.resumes.map((resume) => [resume.id, resume])
@@ -358,7 +416,7 @@ export const useResumeStore = create(
               activeResumeId: state.activeResumeId,
             });
             if (currentToken !== expectedLocalToken) {
-              throw new LocalCasMismatchError();
+              throw LOCAL_TOKEN_MISMATCH;
             }
             clearAllHistoryGroups([
               ...Object.keys(state.resumes),
@@ -372,17 +430,21 @@ export const useResumeStore = create(
                 : null,
               history: {},
               future: {},
-              webDavBaseline: baseline,
+              webDavBaseline: structuredClone(baseline),
               _isApplyingSyncSnapshot: true,
             };
           });
+        } catch (error) {
+          if (error === LOCAL_TOKEN_MISMATCH) return false;
+          throw error;
         } finally {
           if (get()._isApplyingSyncSnapshot) {
             set({ _isApplyingSyncSnapshot: false });
           }
         }
+        return true;
       },
-      setWebDavBaseline: (webDavBaseline) => set({ webDavBaseline }),
+      clearWebDavBaseline: () => set({ webDavBaseline: null }),
 
       createResume: (templateId = null, isBlank = false) => {
         const locale =
@@ -1081,6 +1143,17 @@ export const useResumeStore = create(
       storage: createJSONStorage<PersistedResumeStore>(() =>
         createSafeLocalStorage()
       ),
+      version: 1,
+      migrate: (persistedState, version) => {
+        const persisted = persistedState as Partial<PersistedResumeStore>;
+        return {
+          ...persisted,
+          webDavBaseline:
+            version < 1 || !isMultiFileBaseline(persisted.webDavBaseline)
+              ? null
+              : persisted.webDavBaseline,
+        } as PersistedResumeStore;
+      },
       partialize: (state): PersistedResumeStore => ({
         resumes: state.resumes,
         activeResumeId: state.activeResumeId,
@@ -1094,8 +1167,9 @@ export const useResumeStore = create(
         const resumes = persisted.resumes ?? currentState.resumes;
         const activeResumeId =
           persisted.activeResumeId ?? currentState.activeResumeId;
-        const webDavBaseline =
-          persisted.webDavBaseline ?? currentState.webDavBaseline;
+        const webDavBaseline = isMultiFileBaseline(persisted.webDavBaseline)
+          ? persisted.webDavBaseline
+          : null;
 
         return {
           ...currentState,

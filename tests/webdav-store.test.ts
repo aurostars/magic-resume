@@ -10,10 +10,25 @@ import {
   type PersistedWebDavState,
 } from "../src/store/useWebDavStore";
 
+useResumeStore.persist.setOptions({
+  storage: {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  },
+});
+
 const baseline = {
-  revision: "revision-1",
-  contentHash: "a".repeat(64),
-  syncedAt: "2026-09-12T12:00:00.000Z",
+  manifestRevision: 1,
+  manifestHash: "a".repeat(64),
+  activeResumeId: null,
+  entries: {
+    deleted: {
+      contentHash: "d".repeat(64),
+      deleted: true,
+      path: "trash/Deleted--delete.json",
+    },
+  },
 };
 
 const snapshot = {
@@ -169,6 +184,7 @@ test("clearCredentials aborts first, clears persisted and transient sync data, a
     remoteDirectory: "/private/",
   });
   store.getState().setAutoSyncEnabled(true);
+  const preservedResumes = useResumeStore.getState().resumes;
   useResumeStore.setState({ webDavBaseline: baseline });
   store.getState().beginRequest(controller);
   store.getState().setConflict({ local: conflictSide, cloud: conflictSide, snapshot });
@@ -182,32 +198,12 @@ test("clearCredentials aborts first, clears persisted and transient sync data, a
   const state = store.getState();
   assert.equal(state.deviceId, deviceId);
   assert.deepEqual(state.settings, createDefaultWebDavState(deviceId).settings);
-  assert.equal(useResumeStore.getState().webDavBaseline, null);
-  assert.equal(state.legacyBaseline, null);
+  assert.equal(useResumeStore.getState().getWebDavBaseline(), null);
+  assert.equal(useResumeStore.getState().resumes, preservedResumes);
   assert.equal(state.abortController, null);
   assert.equal(state.isSyncing, false);
   assert.equal(state.conflict, null);
   assert.equal(state.warning, null);
   assert.equal(state.error, null);
   assert.equal(state.status, "idle");
-});
-
-test("legacy persisted baseline is exposed once for migration and removed from WebDAV storage", async () => {
-  const legacy = memoryStorage({
-    state: {
-      settings: createDefaultWebDavState("legacy-device").settings,
-      deviceId: "legacy-device",
-      baseline,
-    } as PersistedWebDavState,
-    version: 0,
-  });
-  const store = createWebDavStore(legacy.storage);
-
-  await store.persist.rehydrate();
-  assert.equal(store.getState().legacyBaseline, baseline);
-  assert.equal("baseline" in store.getState(), false);
-  store.getState().clearLegacyBaseline();
-
-  assert.equal(store.getState().legacyBaseline, null);
-  assert.deepEqual(Object.keys(legacy.read()?.state ?? {}).sort(), ["deviceId", "settings"]);
 });

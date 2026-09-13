@@ -2,11 +2,33 @@ import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import { canonicalizeSyncData } from "../src/lib/webdav/snapshot";
 import { initialResumeState } from "../src/config/initialResumeData";
-import {
-  shouldPushHistoryEntry,
-} from "../src/store/resumeHistory";
+import { shouldPushHistoryEntry } from "../src/store/resumeHistory";
 import { useResumeStore } from "../src/store/useResumeStore";
+import type { MultiFileBaseline } from "../src/lib/webdav/types";
 import type { ResumeData } from "../src/types/resume";
+
+const hash = (character: string): string => character.repeat(64);
+
+const makeBaseline = (
+  manifestRevision = 1,
+  entries: MultiFileBaseline["entries"] = {
+    alpha: {
+      contentHash: hash("a"),
+      deleted: false,
+      path: "resumes/Alpha--alpha.json",
+    },
+    deleted: {
+      contentHash: hash("d"),
+      deleted: true,
+      path: "trash/Deleted--delete.json",
+    },
+  },
+): MultiFileBaseline => ({
+  manifestRevision,
+  manifestHash: hash("f"),
+  activeResumeId: Object.entries(entries).find(([, entry]) => !entry.deleted)?.[0] ?? null,
+  entries,
+});
 
 function makeResume(overrides: Partial<ResumeData> = {}): ResumeData {
   return {
@@ -21,6 +43,13 @@ function makeResume(overrides: Partial<ResumeData> = {}): ResumeData {
 }
 
 beforeEach(() => {
+  useResumeStore.persist.setOptions({
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    },
+  });
   useResumeStore.setState({
     resumes: {},
     activeResumeId: null,
@@ -64,13 +93,12 @@ test("applySyncSnapshot atomically replaces all synchronized resume state", () =
   const alpha = makeResume({ id: "alpha", title: "Alpha" });
   const beta = makeResume({ id: "beta", title: "Beta" });
   let updates = 0;
-  const unsubscribe = useResumeStore.subscribe(() => {
-    updates += 1;
-  });
+  const unsubscribe = useResumeStore.subscribe(() => { updates += 1; });
 
-  useResumeStore
-    .getState()
-    .applySyncSnapshot({ resumes: [beta, alpha], activeResumeId: "missing" });
+  useResumeStore.getState().applySyncSnapshot({
+    resumes: [beta, alpha],
+    activeResumeId: "missing",
+  });
   unsubscribe();
 
   const state = useResumeStore.getState();
@@ -89,9 +117,10 @@ test("applySyncSnapshot clones input and clears old and imported history groups"
   assert.equal(shouldPushHistoryEntry("old", "title"), true);
   assert.equal(shouldPushHistoryEntry("new", "title"), true);
 
-  useResumeStore
-    .getState()
-    .applySyncSnapshot({ resumes: [incoming], activeResumeId: "new" });
+  useResumeStore.getState().applySyncSnapshot({
+    resumes: [incoming],
+    activeResumeId: "new",
+  });
 
   incoming.title = "Mutated input";
   assert.notEqual(useResumeStore.getState().resumes.new.title, "Mutated input");
@@ -123,7 +152,7 @@ test("persist rehydration toggles runtime hydration state without persisting it"
     storage: {
       getItem: async () => ({
         state: { resumes: { hydrated }, activeResumeId: "hydrated" },
-        version: 0,
+        version: 1,
       }),
       setItem: async () => {},
       removeItem: async () => {},
@@ -136,130 +165,66 @@ test("persist rehydration toggles runtime hydration state without persisting it"
     assert.equal(useResumeStore.getState()._hasHydrated, true);
     assert.equal(useResumeStore.getState().activeResume, hydrated);
 
-    const partialize = useResumeStore.persist.getOptions().partialize;
-    assert.ok(partialize);
-    const persisted = partialize(useResumeStore.getState());
-    assert.deepEqual(Object.keys(persisted).sort(), [
+    const persisted = useResumeStore.persist.getOptions().partialize?.(
+      useResumeStore.getState(),
+    );
+    assert.deepEqual(Object.keys(persisted ?? {}).sort(), [
       "activeResumeId",
       "resumes",
       "webDavBaseline",
     ]);
-    assert.equal("_hasHydrated" in persisted, false);
-    assert.equal("_isApplyingSyncSnapshot" in persisted, false);
+    assert.equal("_hasHydrated" in (persisted ?? {}), false);
+    assert.equal("_isApplyingSyncSnapshot" in (persisted ?? {}), false);
   } finally {
     useResumeStore.persist.setOptions(originalOptions);
   }
 });
 
-test("commitWebDavSnapshot publishes matching snapshot and baseline in one guarded notification", () => {
-  const local = makeResume({ id: "local", title: "Local" });
-  const remote = makeResume({ id: "remote", title: "Remote" });
-  const nextBaseline = {
-    revision: "r2",
-    contentHash: "b".repeat(64),
-    syncedAt: "2026-09-12T12:00:00.000Z",
-  };
-  useResumeStore.setState({
-    resumes: { local },
-    activeResumeId: "local",
-    activeResume: local,
-    webDavBaseline: { revision: "r1", contentHash: "a".repeat(64), syncedAt: "old" },
-  });
-  const observations: Array<{ ids: string[]; revision: string | null; applying: boolean }> = [];
-  const snapshotSubscriberReads: Array<{ ids: string[]; revision: string | null }> = [];
-  const baselineSubscriberReads: Array<{ ids: string[]; revision: string | null }> = [];
-  const unsubscribe = useResumeStore.subscribe((state, previous) => {
-    if (
-      state.resumes !== previous.resumes ||
-      state.webDavBaseline !== previous.webDavBaseline ||
-      state._isApplyingSyncSnapshot !== previous._isApplyingSyncSnapshot
-    ) {
-      observations.push({
-        ids: Object.keys(state.resumes),
-        revision: state.webDavBaseline?.revision ?? null,
-        applying: state._isApplyingSyncSnapshot,
-      });
-    }
-  });
-  const unsubscribeSnapshot = useResumeStore.subscribe((state, previous) => {
-    if (state.resumes !== previous.resumes) {
-      snapshotSubscriberReads.push({
-        ids: Object.keys(state.resumes),
-        revision: state.webDavBaseline?.revision ?? null,
-      });
-    }
-  });
-  const unsubscribeBaseline = useResumeStore.subscribe((state, previous) => {
-    if (state.webDavBaseline !== previous.webDavBaseline) {
-      baselineSubscriberReads.push({
-        ids: Object.keys(state.resumes),
-        revision: state.webDavBaseline?.revision ?? null,
-      });
-    }
-  });
-
-  useResumeStore.getState().commitWebDavSnapshot(
-    { resumes: [remote], activeResumeId: "remote" },
-    nextBaseline,
-    canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
-  );
-  unsubscribe();
-  unsubscribeSnapshot();
-  unsubscribeBaseline();
-
-  assert.deepEqual(observations, [
-    { ids: ["remote"], revision: "r2", applying: true },
-    { ids: ["remote"], revision: "r2", applying: false },
-  ]);
-  assert.deepEqual(snapshotSubscriberReads, [
-    { ids: ["remote"], revision: "r2" },
-  ]);
-  assert.deepEqual(baselineSubscriberReads, [
-    { ids: ["remote"], revision: "r2" },
-  ]);
-  assert.equal(useResumeStore.getState()._isApplyingSyncSnapshot, false);
-});
-
-test("commitWebDavSnapshot CAS mismatch changes nothing and emits no notification", () => {
-  const local = makeResume({ id: "local" });
-  const oldBaseline = { revision: "r1", contentHash: "a".repeat(64), syncedAt: "old" };
-  useResumeStore.setState({
-    resumes: { local },
-    activeResumeId: "local",
-    activeResume: local,
-    webDavBaseline: oldBaseline,
-  });
-  let notifications = 0;
-  const unsubscribe = useResumeStore.subscribe(() => { notifications += 1; });
-
-  assert.throws(() => useResumeStore.getState().commitWebDavSnapshot(
-    { resumes: [makeResume({ id: "remote" })], activeResumeId: "remote" },
-    { revision: "r2", contentHash: "b".repeat(64), syncedAt: "new" },
-    "stale-token",
-  ), { name: "LocalCasMismatchError" });
-  unsubscribe();
-
-  assert.deepEqual(Object.keys(useResumeStore.getState().resumes), ["local"]);
-  assert.equal(useResumeStore.getState().webDavBaseline, oldBaseline);
-  assert.equal(useResumeStore.getState()._isApplyingSyncSnapshot, false);
-  assert.equal(notifications, 0);
-});
-
-test("rehydration restores resume snapshot and WebDAV baseline from one persisted value", async () => {
+test("persist and rehydrate preserve every multi-file baseline entry", async () => {
   const originalOptions = useResumeStore.persist.getOptions();
-  const hydrated = makeResume({ id: "hydrated" });
-  const hydratedBaseline = {
-    revision: "r7",
-    contentHash: "c".repeat(64),
-    syncedAt: "2026-09-12T12:00:00.000Z",
-  };
+  const hydrated = makeResume({ id: "alpha", title: "Alpha" });
+  const baseline = makeBaseline();
   useResumeStore.persist.setOptions({
     storage: {
       getItem: async () => ({
         state: {
-          resumes: { hydrated },
-          activeResumeId: "hydrated",
-          webDavBaseline: hydratedBaseline,
+          resumes: { alpha: hydrated },
+          activeResumeId: "alpha",
+          webDavBaseline: structuredClone(baseline),
+        },
+        version: 1,
+      }),
+      setItem: async () => {},
+      removeItem: async () => {},
+    },
+  });
+
+  try {
+    await useResumeStore.persist.rehydrate();
+    assert.deepEqual(useResumeStore.getState().getWebDavBaseline(), baseline);
+    assert.deepEqual(Object.keys(useResumeStore.getState().getWebDavBaseline()?.entries ?? {}), [
+      "alpha",
+      "deleted",
+    ]);
+  } finally {
+    useResumeStore.persist.setOptions(originalOptions);
+  }
+});
+
+test("migration discards an aggregate baseline while preserving resumes", async () => {
+  const originalOptions = useResumeStore.persist.getOptions();
+  const hydrated = makeResume({ id: "legacy" });
+  useResumeStore.persist.setOptions({
+    storage: {
+      getItem: async () => ({
+        state: {
+          resumes: { legacy: hydrated },
+          activeResumeId: "legacy",
+          webDavBaseline: {
+            revision: "old-revision",
+            contentHash: hash("a"),
+            syncedAt: "2026-09-12T12:00:00.000Z",
+          },
         },
         version: 0,
       }),
@@ -271,23 +236,146 @@ test("rehydration restores resume snapshot and WebDAV baseline from one persiste
   try {
     await useResumeStore.persist.rehydrate();
     const state = useResumeStore.getState();
+    assert.equal(state.resumes.legacy, hydrated);
     assert.equal(state.activeResume, hydrated);
-    assert.equal(state.webDavBaseline, hydratedBaseline);
-    const persisted = useResumeStore.persist.getOptions().partialize?.(state);
-    assert.deepEqual(Object.keys(persisted ?? {}).sort(), [
-      "activeResumeId",
-      "resumes",
-      "webDavBaseline",
-    ]);
+    assert.equal(state.getWebDavBaseline(), null);
   } finally {
     useResumeStore.persist.setOptions(originalOptions);
   }
 });
 
-test("commitWebDavSnapshot resets guard when a real subscriber throws", () => {
+test("rehydration discards a malformed multi-file baseline without discarding resumes", async () => {
+  const originalOptions = useResumeStore.persist.getOptions();
+  const hydrated = makeResume({ id: "safe" });
+  useResumeStore.persist.setOptions({
+    storage: {
+      getItem: async () => ({
+        state: {
+          resumes: { safe: hydrated },
+          activeResumeId: "safe",
+          webDavBaseline: {
+            ...makeBaseline(),
+            entries: {
+              safe: { contentHash: "not-a-hash", deleted: false, path: "../escape.json" },
+            },
+          },
+        },
+        version: 1,
+      }),
+      setItem: async () => {},
+      removeItem: async () => {},
+    },
+  });
+
+  try {
+    await useResumeStore.persist.rehydrate();
+    const state = useResumeStore.getState();
+    assert.equal(state.resumes.safe, hydrated);
+    assert.equal(state.getWebDavBaseline(), null);
+  } finally {
+    useResumeStore.persist.setOptions(originalOptions);
+  }
+});
+
+test("commitWebDavSync publishes matching resume data and baseline in one set", () => {
+  const local = makeResume({ id: "local", title: "Local" });
+  const remote = makeResume({ id: "remote", title: "Remote" });
+  const nextBaseline = makeBaseline(2, {
+    remote: { contentHash: hash("b"), deleted: false, path: "resumes/Remote--remote.json" },
+  });
+  useResumeStore.setState({
+    resumes: { local },
+    activeResumeId: "local",
+    activeResume: local,
+    webDavBaseline: makeBaseline(),
+  });
+  const synchronizedObservations: Array<{ ids: string[]; revision: number | null }> = [];
+  const unsubscribe = useResumeStore.subscribe((state, previous) => {
+    if (state.resumes !== previous.resumes || state.webDavBaseline !== previous.webDavBaseline) {
+      synchronizedObservations.push({
+        ids: Object.keys(state.resumes),
+        revision: state.getWebDavBaseline()?.manifestRevision ?? null,
+      });
+    }
+  });
+
+  const committed = useResumeStore.getState().commitWebDavSync({
+    data: { resumes: [remote], activeResumeId: "remote" },
+    baseline: nextBaseline,
+    expectedLocalToken: canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
+  });
+  unsubscribe();
+
+  assert.equal(committed, true);
+  assert.deepEqual(synchronizedObservations, [{ ids: ["remote"], revision: 2 }]);
+  assert.equal(useResumeStore.getState()._isApplyingSyncSnapshot, false);
+});
+
+test("commitWebDavSync token mismatch returns false with zero mutation", () => {
+  const local = makeResume({ id: "local" });
+  const oldBaseline = makeBaseline();
+  useResumeStore.setState({
+    resumes: { local },
+    activeResumeId: "local",
+    activeResume: local,
+    history: { local: [structuredClone(local)] },
+    future: { local: [structuredClone(local)] },
+    webDavBaseline: oldBaseline,
+  });
+  const before = useResumeStore.getState();
+  const originalOptions = useResumeStore.persist.getOptions();
+  let persistedWrites = 0;
+  useResumeStore.persist.setOptions({
+    storage: {
+      getItem: () => null,
+      setItem: () => { persistedWrites += 1; },
+      removeItem: () => {},
+    },
+  });
+  let notifications = 0;
+  const unsubscribe = useResumeStore.subscribe(() => { notifications += 1; });
+
+  try {
+    const committed = useResumeStore.getState().commitWebDavSync({
+      data: { resumes: [makeResume({ id: "remote" })], activeResumeId: "remote" },
+      baseline: makeBaseline(2),
+      expectedLocalToken: "stale-token",
+    });
+
+    const after = useResumeStore.getState();
+    assert.equal(committed, false);
+    assert.equal(after, before);
+    assert.equal(after.webDavBaseline, oldBaseline);
+    assert.equal(notifications, 0);
+    assert.equal(persistedWrites, 0);
+    assert.equal(shouldPushHistoryEntry("local", "title"), true);
+  } finally {
+    unsubscribe();
+    useResumeStore.persist.setOptions(originalOptions);
+  }
+});
+
+test("clearWebDavBaseline clears only the authoritative baseline", () => {
+  const local = makeResume({ id: "local" });
+  useResumeStore.setState({
+    resumes: { local },
+    activeResumeId: "local",
+    activeResume: local,
+    webDavBaseline: makeBaseline(),
+  });
+
+  useResumeStore.getState().clearWebDavBaseline();
+
+  const state = useResumeStore.getState();
+  assert.equal(state.getWebDavBaseline(), null);
+  assert.equal(state.resumes.local, local);
+  assert.equal(state.activeResume, local);
+});
+
+test("commitWebDavSync restores the guard in finally when a subscriber throws", () => {
   const local = makeResume({ id: "local" });
   const remote = makeResume({ id: "remote" });
-  const nextBaseline = { revision: "r2", contentHash: "b".repeat(64), syncedAt: "new" };
+  const nextBaseline = makeBaseline(2);
   useResumeStore.setState({
     resumes: { local },
     activeResumeId: "local",
@@ -298,94 +386,15 @@ test("commitWebDavSnapshot resets guard when a real subscriber throws", () => {
     throw new Error("subscriber failed");
   });
 
-  assert.throws(() => useResumeStore.getState().commitWebDavSnapshot(
-    { resumes: [remote], activeResumeId: "remote" },
-    nextBaseline,
-    canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
-  ), /subscriber failed/);
+  assert.throws(() => useResumeStore.getState().commitWebDavSync({
+    data: { resumes: [remote], activeResumeId: "remote" },
+    baseline: nextBaseline,
+    expectedLocalToken: canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
+  }), /subscriber failed/);
   unsubscribe();
 
   const state = useResumeStore.getState();
   assert.equal(state._isApplyingSyncSnapshot, false);
   assert.deepEqual(Object.keys(state.resumes), ["remote"]);
-  assert.equal(state.webDavBaseline, nextBaseline);
-});
-
-test("commitWebDavSnapshot resets guard when persistence throws", () => {
-  const originalOptions = useResumeStore.persist.getOptions();
-  const local = makeResume({ id: "local" });
-  const remote = makeResume({ id: "remote" });
-  const nextBaseline = { revision: "r2", contentHash: "b".repeat(64), syncedAt: "new" };
-  useResumeStore.setState({
-    resumes: { local },
-    activeResumeId: "local",
-    activeResume: local,
-    webDavBaseline: null,
-  });
-  useResumeStore.persist.setOptions({
-    storage: {
-      getItem: () => null,
-      setItem: () => { throw new Error("persist failed"); },
-      removeItem: () => {},
-    },
-  });
-
-  try {
-    assert.throws(() => useResumeStore.getState().commitWebDavSnapshot(
-      { resumes: [remote], activeResumeId: "remote" },
-      nextBaseline,
-      canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
-    ), /persist failed/);
-    const state = useResumeStore.getState();
-    assert.equal(state._isApplyingSyncSnapshot, false);
-    assert.deepEqual(Object.keys(state.resumes), ["remote"]);
-    assert.equal(state.webDavBaseline, nextBaseline);
-  } finally {
-    useResumeStore.persist.setOptions(originalOptions);
-  }
-});
-
-test("applySyncSnapshot resets guard when a real subscriber throws", () => {
-  const remote = makeResume({ id: "remote" });
-  const baseline = { revision: "r1", contentHash: "a".repeat(64), syncedAt: "old" };
-  useResumeStore.setState({ webDavBaseline: baseline });
-  const unsubscribe = useResumeStore.subscribe(() => {
-    throw new Error("subscriber failed");
-  });
-
-  assert.throws(() => useResumeStore.getState().applySyncSnapshot(
-    { resumes: [remote], activeResumeId: "remote" },
-  ), /subscriber failed/);
-  unsubscribe();
-
-  const state = useResumeStore.getState();
-  assert.equal(state._isApplyingSyncSnapshot, false);
-  assert.deepEqual(Object.keys(state.resumes), ["remote"]);
-  assert.equal(state.webDavBaseline, baseline);
-});
-
-test("applySyncSnapshot resets guard when persistence throws", () => {
-  const originalOptions = useResumeStore.persist.getOptions();
-  const remote = makeResume({ id: "remote" });
-  const baseline = { revision: "r1", contentHash: "a".repeat(64), syncedAt: "old" };
-  useResumeStore.setState({ webDavBaseline: baseline });
-  useResumeStore.persist.setOptions({
-    storage: {
-      getItem: () => null,
-      setItem: () => { throw new Error("persist failed"); },
-      removeItem: () => {},
-    },
-  });
-
-  try {
-    assert.throws(() => useResumeStore.getState().applySyncSnapshot(
-      { resumes: [remote], activeResumeId: "remote" },
-    ), /persist failed/);
-    const state = useResumeStore.getState();
-    assert.equal(state._isApplyingSyncSnapshot, false);
-    assert.deepEqual(Object.keys(state.resumes), ["remote"]);
-    assert.equal(state.webDavBaseline, baseline);
-  } finally {
-    useResumeStore.persist.setOptions(originalOptions);
-  }
+  assert.deepEqual(state.getWebDavBaseline(), nextBaseline);
 });

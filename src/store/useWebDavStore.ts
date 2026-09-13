@@ -9,7 +9,6 @@ import type { WebDavErrorCode } from "../lib/webdav/errors";
 import type {
   CloudSnapshotV1,
   SnapshotValidationCode,
-  WebDavBaseline,
 } from "../lib/webdav/types";
 import { useResumeStore } from "./useResumeStore";
 export type { WebDavBaseline } from "../lib/webdav/types";
@@ -53,7 +52,6 @@ export interface PersistedWebDavState {
 }
 
 export interface WebDavState extends PersistedWebDavState {
-  legacyBaseline: WebDavBaseline | null;
   isSyncing: boolean;
   abortController: AbortController | null;
   conflict: WebDavConflict | null;
@@ -64,7 +62,6 @@ export interface WebDavState extends PersistedWebDavState {
   setAutoSyncEnabled: (enabled: boolean) => void;
   beginRequest: (controller: AbortController, status?: "testing" | "syncing") => void;
   finishRequest: (status?: WebDavStatus) => void;
-  clearLegacyBaseline: () => void;
   setConflict: (conflict: WebDavConflict | null) => void;
   setWarning: (warning: WebDavSafeError | null) => void;
   setError: (error: WebDavSafeError | null) => void;
@@ -85,7 +82,6 @@ export const createDefaultWebDavState = (
 ): Omit<WebDavState, keyof WebDavActions> => ({
   settings: defaultSettings(),
   deviceId,
-  legacyBaseline: null,
   isSyncing: false,
   abortController: null,
   conflict: null,
@@ -100,7 +96,6 @@ type WebDavActions = Pick<
   | "setAutoSyncEnabled"
   | "beginRequest"
   | "finishRequest"
-  | "clearLegacyBaseline"
   | "setConflict"
   | "setWarning"
   | "setError"
@@ -138,7 +133,6 @@ export const createWebDavStore = (
           set({ abortController, isSyncing: true, status, error: null, warning: null }),
         finishRequest: (status = "idle") =>
           set({ abortController: null, isSyncing: false, status }),
-        clearLegacyBaseline: () => set({ legacyBaseline: null }),
         setConflict: (conflict) => set({ conflict, status: conflict ? "conflict" : "idle" }),
         setWarning: (warning) =>
           set({
@@ -161,10 +155,9 @@ export const createWebDavStore = (
           }),
         clearCredentials: () => {
           get().abortController?.abort();
-          useResumeStore.getState().setWebDavBaseline(null);
+          useResumeStore.getState().clearWebDavBaseline();
           set({
             settings: defaultSettings(),
-            legacyBaseline: null,
             abortController: null,
             isSyncing: false,
             conflict: null,
@@ -180,17 +173,6 @@ export const createWebDavStore = (
           storage ??
           createJSONStorage<PersistedWebDavState>(() => localStorage),
         partialize: selectPersistedWebDavState,
-        merge: (persistedState, currentState) => {
-          const legacy = persistedState as Partial<PersistedWebDavState> & {
-            baseline?: WebDavBaseline | null;
-          };
-          const { baseline, ...persisted } = legacy;
-          return {
-            ...currentState,
-            ...persisted,
-            legacyBaseline: baseline ?? null,
-          };
-        },
       },
     ),
   );
