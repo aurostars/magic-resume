@@ -1,9 +1,46 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBuilder } from "vite";
 import { MIAOBI_ASSET_BASE_PLACEHOLDER } from "../../vite.miaobi.config";
 export { injectMiaobiRuntime } from "../../miaobi/runtime-config";
+
+export async function replaceDirectory(
+  stagedDirectory: string,
+  outputDirectory: string,
+): Promise<void> {
+  const backupDirectory = `${outputDirectory}.backup-${randomUUID()}`;
+  let hasBackup = false;
+
+  try {
+    await rename(outputDirectory, backupDirectory);
+    hasBackup = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  try {
+    await rename(stagedDirectory, outputDirectory);
+  } catch (error) {
+    if (hasBackup) {
+      await rename(backupDirectory, outputDirectory);
+    }
+    throw error;
+  }
+
+  if (hasBackup) {
+    await rm(backupDirectory, { recursive: true, force: true });
+  }
+}
 
 export async function buildMiaobiSpa(input: {
   outputDirectory: string;
@@ -14,9 +51,16 @@ export async function buildMiaobiSpa(input: {
   }
 
   const outputDirectory = resolve(input.outputDirectory);
-  const temporaryRoot = resolve(".tmp");
-  await mkdir(temporaryRoot, { recursive: true });
-  const temporaryDirectory = await mkdtemp(join(temporaryRoot, "miaobi-build-"));
+  const outputParentDirectory = dirname(outputDirectory);
+  await mkdir(outputParentDirectory, { recursive: true });
+  const temporaryDirectory = await mkdtemp(
+    join(outputParentDirectory, ".miaobi-build-"),
+  );
+  await symlink(
+    resolve("node_modules"),
+    join(temporaryDirectory, "node_modules"),
+    "dir",
+  );
   const stagedClientDirectory = join(temporaryDirectory, "client");
   const generatedShellPath = join(stagedClientDirectory, "_shell.html");
   const stagedShellPath = join(stagedClientDirectory, "index.html");
@@ -38,9 +82,7 @@ export async function buildMiaobiSpa(input: {
       "utf8",
     );
     await rm(generatedShellPath);
-    await rm(outputDirectory, { recursive: true, force: true });
-    await mkdir(dirname(outputDirectory), { recursive: true });
-    await rename(stagedClientDirectory, outputDirectory);
+    await replaceDirectory(stagedClientDirectory, outputDirectory);
     return {
       shellPath,
       assetDirectory: join(outputDirectory, "assets"),

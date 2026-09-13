@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { register } from "node:module";
 import test from "node:test";
+import { JSDOM } from "jsdom";
 import {
   buildMiaobiSpa,
   injectMiaobiRuntime,
+  replaceDirectory,
 } from "../scripts/miaobi/build-spa";
 
 const ASSET_BASE_PLACEHOLDER = "https://miaobi.invalid/__ASSET_BASE__/";
@@ -68,6 +70,87 @@ test("runtime injection precedes application scripts and cannot terminate its sc
   assert.ok(injected.includes(assignment));
   assert.ok(injected.indexOf(assignment) < injected.indexOf('<script type="module"'));
   assert.doesNotMatch(injected, /<\/script>\?value/);
+});
+
+test("an injected built shell bootstraps Miaobi navigation with hash history", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-resume-spa-bootstrap-"));
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const dom = new JSDOM("", {
+    url: "https://magic-resume.test/",
+    runScripts: "outside-only",
+  });
+
+  try {
+    const { shellPath } = await buildMiaobiSpa({
+      outputDirectory: join(directory, "client"),
+      assetBasePlaceholder: ASSET_BASE_PLACEHOLDER,
+    });
+    const shell = injectMiaobiRuntime(await readFile(shellPath, "utf8"), {
+      platform: "miaobi",
+      apiFunctionUrl: "https://api.example.test/faas",
+      assetBaseUrl: "https://assets.example.test/app/",
+    });
+    const document = new JSDOM(shell).window.document;
+    const runtimeScript = [...document.scripts].find((script) =>
+      script.textContent.includes("window.__MAGIC_RESUME_RUNTIME__="),
+    );
+    assert.ok(runtimeScript);
+
+    Object.defineProperties(globalThis, {
+      window: { configurable: true, value: dom.window },
+      document: { configurable: true, value: dom.window.document },
+    });
+    dom.window.eval(runtimeScript.textContent);
+
+    const { createAppHistory } = await import("../src/config/runtime-endpoints");
+    const history = createAppHistory();
+    history.push("/app/settings");
+    await Promise.resolve();
+
+    assert.equal(dom.window.location.pathname, "/");
+    assert.equal(dom.window.location.hash, "#/app/settings");
+  } finally {
+    if (originalWindow === undefined) {
+      Reflect.deleteProperty(globalThis, "window");
+    } else {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+    }
+    if (originalDocument === undefined) {
+      Reflect.deleteProperty(globalThis, "document");
+    } else {
+      Object.defineProperty(globalThis, "document", {
+        configurable: true,
+        value: originalDocument,
+      });
+    }
+    dom.window.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed directory replacement restores the previous output", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-resume-spa-swap-"));
+  const outputDirectory = join(directory, "client");
+  const missingStagedDirectory = join(directory, "missing-client");
+
+  try {
+    await mkdir(outputDirectory);
+    await writeFile(join(outputDirectory, "sentinel.txt"), "previous-output");
+
+    await assert.rejects(
+      replaceDirectory(missingStagedDirectory, outputDirectory),
+    );
+    assert.equal(
+      await readFile(join(outputDirectory, "sentinel.txt"), "utf8"),
+      "previous-output",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("the root document and standalone SPA share AppBody without nested documents", async () => {
