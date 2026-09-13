@@ -98,3 +98,20 @@ test("a handler failure returns a stable error without serializing the exception
   });
   assert.equal(text.includes(secret), false);
 });
+
+test("a malformed logical path returns a stable safe response", async () => {
+  const secret = "http://[invalid-secret";
+  const response = await handleApiRequest(
+    new Request("https://app.example/api/faas/shared", { method: "POST" }),
+    secret,
+    dependencies(),
+  );
+  const text = await response.text();
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(JSON.parse(text), {
+    error: "Invalid API path",
+    code: "invalidPath",
+  });
+  assert.equal(text.includes(secret), false);
+});

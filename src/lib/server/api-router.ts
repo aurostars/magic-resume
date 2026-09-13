@@ -44,7 +44,12 @@ export async function handleApiRequest(
   dependencies: ApiRouterDependencies = defaultDependencies,
 ): Promise<Response> {
   const requestUrl = new URL(request.url);
-  const logicalUrl = logicalPath ? new URL(logicalPath, requestUrl.origin) : requestUrl;
+  let logicalUrl: URL;
+  try {
+    logicalUrl = logicalPath ? new URL(logicalPath, requestUrl.origin) : requestUrl;
+  } catch {
+    return jsonError(400, "Invalid API path", "invalidPath");
+  }
   const route = routes[logicalUrl.pathname as ApiRoutePath];
   if (!route) return jsonError(404, "Not found", "notFound");
   if (request.method !== route.method) {

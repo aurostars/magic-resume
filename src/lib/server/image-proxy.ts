@@ -15,6 +15,28 @@ const ERROR_MESSAGES = {
 
 type ErrorCode = keyof typeof ERROR_MESSAGES;
 
+export interface ImageProxyTransport {
+  fetch(target: URL, init: RequestInit): Promise<Response>;
+}
+
+export interface PinnedAddressTransportDependencies {
+  /** Resolve every A/AAAA candidate before connecting. */
+  resolveAll(hostname: string): Promise<readonly string[]>;
+  /** Connect exclusively to one of addresses; implementations must not resolve target.hostname again. */
+  connectToValidatedAddresses(
+    target: URL,
+    addresses: readonly string[],
+    init: RequestInit,
+  ): Promise<Response>;
+}
+
+export interface ImageProxyDependencies {
+  transport: ImageProxyTransport;
+  timeoutSignal?: (milliseconds: number) => AbortSignal;
+}
+
+class BlockedTargetError extends Error {}
+
 function errorResponse(status: number, code: ErrorCode) {
   return Response.json({ error: ERROR_MESSAGES[code], code }, { status });
 }
@@ -71,8 +93,19 @@ function isBlockedHostname(hostname: string) {
 
   const ipv6 = expandIPv6(normalized);
   if (!ipv6) return false;
-  if (ipv6.every((word) => word === 0) || ipv6.slice(0, 7).every((word) => word === 0) && ipv6[7] === 1) return true;
-  if ((ipv6[0] & 0xfe00) === 0xfc00 || (ipv6[0] & 0xffc0) === 0xfe80 || (ipv6[0] & 0xff00) === 0xff00) return true;
+  if (
+    ipv6.every((word) => word === 0) ||
+    (ipv6.slice(0, 7).every((word) => word === 0) && ipv6[7] === 1)
+  ) {
+    return true;
+  }
+  if (
+    (ipv6[0] & 0xfe00) === 0xfc00 ||
+    (ipv6[0] & 0xffc0) === 0xfe80 ||
+    (ipv6[0] & 0xff00) === 0xff00
+  ) {
+    return true;
+  }
   if (ipv6.slice(0, 5).every((word) => word === 0) && ipv6[5] === 0xffff) {
     return isBlockedIPv4([
       ipv6[6] >> 8,
@@ -84,6 +117,37 @@ function isBlockedHostname(hostname: string) {
   return false;
 }
 
+function isIpAddress(hostname: string) {
+  return parseIPv4(hostname) !== undefined || expandIPv6(hostname) !== undefined;
+}
+
+export function createPinnedAddressTransport(
+  dependencies: PinnedAddressTransportDependencies,
+): ImageProxyTransport {
+  return {
+    async fetch(target, init) {
+      const addresses = isIpAddress(target.hostname)
+        ? [target.hostname.replace(/^\[|\]$/g, "")]
+        : await dependencies.resolveAll(target.hostname);
+      if (
+        addresses.length === 0 ||
+        addresses.some((address) => !isIpAddress(address) || isBlockedHostname(address))
+      ) {
+        throw new BlockedTargetError();
+      }
+      return dependencies.connectToValidatedAddresses(target, [...addresses], init);
+    },
+  };
+}
+
+export function createCloudflareFetchTransport(
+  fetcher?: typeof fetch,
+): ImageProxyTransport {
+  return {
+    fetch: (target, init) => (fetcher ?? globalThis.fetch)(target, init),
+  };
+}
+
 function parseTarget(rawUrl: string): URL | undefined {
   try {
     const target = new URL(rawUrl);
@@ -91,6 +155,7 @@ function parseTarget(rawUrl: string): URL | undefined {
       (target.protocol !== "http:" && target.protocol !== "https:") ||
       target.username ||
       target.password ||
+      target.port ||
       isBlockedHostname(target.hostname)
     ) {
       return undefined;
@@ -101,16 +166,36 @@ function parseTarget(rawUrl: string): URL | undefined {
   }
 }
 
+async function cancelBodySafely(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Cancellation is best-effort and must never replace the stable proxy error.
+  }
+}
+
+async function cancelReaderSafely(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  try {
+    await reader.cancel();
+  } catch {
+    // Cancellation is best-effort and must never replace the stable proxy error.
+  }
+}
+
 async function imageResponse(response: Response, signal: AbortSignal): Promise<Response> {
-  if (!response.ok) return errorResponse(502, "upstreamError");
+  if (!response.ok) {
+    await cancelBodySafely(response);
+    return errorResponse(502, "upstreamError");
+  }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("image/")) {
+    await cancelBodySafely(response);
     return errorResponse(415, "invalidContentType");
   }
 
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_RESPONSE_BYTES) {
-    await response.body?.cancel();
+    await cancelBodySafely(response);
     return errorResponse(413, "imageTooLarge");
   }
   if (!response.body) return errorResponse(400, "emptyImage");
@@ -124,17 +209,23 @@ async function imageResponse(response: Response, signal: AbortSignal): Promise<R
       if (done) break;
       total += value.byteLength;
       if (total > MAX_IMAGE_RESPONSE_BYTES) {
-        await reader.cancel();
+        await cancelReaderSafely(reader);
         return errorResponse(413, "imageTooLarge");
       }
       chunks.push(value);
     }
+    if (total === 0) {
+      await cancelReaderSafely(reader);
+      return errorResponse(400, "emptyImage");
+    }
   } catch (error) {
+    await cancelReaderSafely(reader);
     const aborted = signal.aborted ||
       (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name));
     return errorResponse(aborted ? 504 : 502, aborted ? "timeout" : "upstreamError");
+  } finally {
+    reader.releaseLock();
   }
-  if (total === 0) return errorResponse(400, "emptyImage");
 
   const body = new Uint8Array(total);
   let offset = 0;
@@ -156,7 +247,10 @@ async function imageResponse(response: Response, signal: AbortSignal): Promise<R
   });
 }
 
-export async function handleImageProxy(request: Request): Promise<Response> {
+export async function handleImageProxy(
+  request: Request,
+  dependencies?: ImageProxyDependencies,
+): Promise<Response> {
   const rawUrl = new URL(request.url).searchParams.get("url");
   if (!rawUrl) return errorResponse(400, "invalidUrl");
 
@@ -172,15 +266,17 @@ export async function handleImageProxy(request: Request): Promise<Response> {
     return errorResponse(validSyntax ? 403 : 400, validSyntax ? "blockedTarget" : "invalidUrl");
   }
 
+  const timeoutSignal = dependencies?.timeoutSignal ?? AbortSignal.timeout.bind(AbortSignal);
   const signal = combineAbortSignals([
     request.signal,
-    AbortSignal.timeout(IMAGE_PROXY_TIMEOUT_MS),
+    timeoutSignal(IMAGE_PROXY_TIMEOUT_MS),
   ]);
   let current = target;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     let response: Response;
     try {
-      response = await fetch(current, {
+      if (!dependencies) throw new BlockedTargetError();
+      response = await dependencies.transport.fetch(current, {
         redirect: "manual",
         signal,
         headers: {
@@ -191,6 +287,9 @@ export async function handleImageProxy(request: Request): Promise<Response> {
         },
       });
     } catch (error) {
+      if (error instanceof BlockedTargetError) {
+        return errorResponse(403, "blockedTarget");
+      }
       const aborted = signal.aborted ||
         (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name));
       return errorResponse(aborted ? 504 : 502, aborted ? "timeout" : "upstreamError");
@@ -199,6 +298,7 @@ export async function handleImageProxy(request: Request): Promise<Response> {
       return imageResponse(response, signal);
     }
 
+    await cancelBodySafely(response);
     const location = response.headers.get("location");
     if (!location || redirects === 5) return errorResponse(502, "upstreamError");
     let redirected: URL;
