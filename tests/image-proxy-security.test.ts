@@ -675,3 +675,53 @@ test("the pinned transport rejects IPv6 addresses that are not proven globally r
     assert.equal(connected, false, address);
   }
 });
+
+test("a direct deprecated 192.88.99.0/24 address is rejected before connecting", async () => {
+  let connected = false;
+  const transport = createPinnedAddressTransport({
+    resolveAll: async () => {
+      assert.fail("an IPv4 literal must not require DNS resolution");
+    },
+    connectToValidatedAddresses: async () => {
+      connected = true;
+      return new Response(Uint8Array.of(1), {
+        headers: { "Content-Type": "image/png" },
+      });
+    },
+  });
+
+  const response = await proxy(
+    new Request(
+      "https://app.example/api/proxy/image?url=http%3A%2F%2F192.88.99.2%2Frelay.png",
+    ),
+    { transport },
+  );
+
+  assert.equal(connected, false);
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, "blockedTarget");
+});
+
+test("NAT64 embedding 192.88.99.2 is rejected before connecting", async () => {
+  let connected = false;
+  const transport = createPinnedAddressTransport({
+    resolveAll: async () => ["64:ff9b::c058:6302"],
+    connectToValidatedAddresses: async () => {
+      connected = true;
+      return new Response(Uint8Array.of(1), {
+        headers: { "Content-Type": "image/png" },
+      });
+    },
+  });
+
+  const response = await proxy(
+    new Request(
+      "https://app.example/api/proxy/image?url=https%3A%2F%2Fimages.example.test%2Frelay.png",
+    ),
+    { transport },
+  );
+
+  assert.equal(connected, false);
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, "blockedTarget");
+});

@@ -50,9 +50,9 @@ function parseIPv4(hostname: string): number[] | undefined {
     : undefined;
 }
 
-function isBlockedIPv4(bytes: number[]) {
+function isGloballyRoutableIPv4(bytes: number[]) {
   const [a, b, c] = bytes;
-  return (
+  return !(
     a === 0 ||
     a === 10 ||
     a === 127 ||
@@ -61,6 +61,7 @@ function isBlockedIPv4(bytes: number[]) {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 0 && c === 0) ||
     (a === 192 && b === 0 && c === 2) ||
+    (a === 192 && b === 88 && c === 99) ||
     (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && c === 100) ||
@@ -91,7 +92,7 @@ function isGloballyRoutableIPv6(words: number[]) {
     words[1] === 0xff9b &&
     words.slice(2, 6).every((word) => word === 0)
   ) {
-    return !isBlockedIPv4([
+    return isGloballyRoutableIPv4([
       words[6] >> 8,
       words[6] & 0xff,
       words[7] >> 8,
@@ -115,7 +116,7 @@ function isGloballyRoutableIPv6(words: number[]) {
 function isGloballyRoutableAddress(hostname: string) {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const ipv4 = parseIPv4(normalized);
-  if (ipv4) return !isBlockedIPv4(ipv4);
+  if (ipv4) return isGloballyRoutableIPv4(ipv4);
   const ipv6 = expandIPv6(normalized);
   return ipv6 !== undefined && isGloballyRoutableIPv6(ipv6);
 }
