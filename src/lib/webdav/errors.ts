@@ -10,6 +10,8 @@ export type WebDavErrorCode =
   | "QUOTA"
   | "MOVE_UNSUPPORTED"
   | "REMOTE_CAS_MISMATCH"
+  | "REMOTE_CONTENT_MISMATCH"
+  | "INVALID_REMOTE_RESUME"
   | "SERVER"
   | "UNKNOWN";
 

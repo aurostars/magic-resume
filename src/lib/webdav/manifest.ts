@@ -57,8 +57,16 @@ const validateBody = (candidate: unknown): ManifestV2Body => {
     if (!isNonEmptyString(id) || !isEntry(entry)) {
       throw new ManifestValidationError("MANIFEST_SHAPE");
     }
-    const expectedPath = `${entry.deleted ? "trash" : "resumes"}/${id}.json`;
-    if (entry.path !== expectedPath || paths.has(entry.path)) {
+    const directory = entry.deleted ? "trash" : "resumes";
+    const fileName = entry.path.split("/").at(-1) ?? "";
+    const shortId = id.trim().toLowerCase().slice(0, 6);
+    const hasExpectedName = fileName === `${id}.json` || fileName.endsWith(`--${shortId}.json`);
+    if (
+      !entry.path.startsWith(`${directory}/`) ||
+      entry.path.split("/").length !== 2 ||
+      !hasExpectedName ||
+      paths.has(entry.path)
+    ) {
       throw new ManifestValidationError("MANIFEST_SHAPE");
     }
     paths.add(entry.path);

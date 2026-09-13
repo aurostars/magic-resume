@@ -1,357 +1,270 @@
-import type { RemotePrecondition, WebDavClientApi } from "./client";
-import { LocalCasMismatchError, WebDavError } from "./errors";
+import { executeSyncPlan } from "./executor";
+import { WebDavError } from "./errors";
 export { LocalCasMismatchError } from "./errors";
+import { parseManifest } from "./manifest";
+import { planSync } from "./planner";
 import {
-  calculateContentHash,
-  canonicalizeSyncData,
-  createCloudSnapshot,
-  parseCloudSnapshot,
-} from "./snapshot";
-import type { CloudSnapshotV1, ResumeSyncData, WebDavBaseline } from "./types";
+  calculateResumeHash,
+  getResumeRelativePath,
+  parseResumeJson,
+} from "./resume-codec";
+import type { WebDavResumeRepository } from "./repository";
+import { canonicalizeSyncData } from "./snapshot";
+import type {
+  ManifestV2,
+  MultiFileBaseline,
+  CloudSnapshotV1,
+  ResumeSyncConflict,
+  ResumeSyncData,
+  SyncPlan,
+} from "./types";
 
-export type SyncDecision = "upload" | "download" | "none" | "conflict";
-
-export const decideSync = (
-  localHash: string,
-  cloud: Pick<CloudSnapshotV1, "revision" | "contentHash"> | null,
-  baseline: WebDavBaseline | null,
-): SyncDecision => {
-  if (!cloud) return "upload";
-  if (!baseline) return cloud.contentHash === localHash ? "none" : "conflict";
-  const localChanged = localHash !== baseline.contentHash;
-  const cloudChanged = cloud.revision !== baseline.revision;
-  if (localChanged && cloudChanged) {
-    return cloud.contentHash === localHash ? "none" : "conflict";
-  }
-  if (localChanged) return "upload";
-  if (cloudChanged) return "download";
-  return "none";
+export type ConflictDecision = {
+  resumeId: string;
+  resolution: "keep-local" | "use-cloud";
 };
 
 export interface CoordinatorDependencies {
-  client: WebDavClientApi;
+  repository: Pick<WebDavResumeRepository,
+    "ensureLayout" | "readManifest" | "readResume" | "listResumeCandidates" |
+    "writeResumeAtomic" | "moveResumeAtomic" | "publishManifest">;
   getLocalData: () => ResumeSyncData;
-  /** Compare the current local token and commit both values in one synchronous transaction. */
-  commitDownloadedSnapshot: (
+  getBaseline: () => MultiFileBaseline | null;
+  commit: (
     data: ResumeSyncData,
-    baseline: WebDavBaseline,
+    baseline: MultiFileBaseline,
     expectedLocalToken: string,
   ) => void;
-  getBaseline: () => WebDavBaseline | null;
-  setBaseline: (baseline: WebDavBaseline) => void;
   deviceId: string;
-  remoteDirectory: string;
   now: () => string;
-  createRevision: () => string;
 }
 
-interface InspectedLocal {
+export interface SyncWarning {
+  code: "INVALID_REMOTE_RESUME";
+}
+
+interface SyncInspectionBase {
   localData: ResumeSyncData;
-  localHash: string;
   localToken: string;
+  localHashes: Record<string, string>;
+  manifest: ManifestV2 | null;
+  remoteEtag: string | null;
+  plan: SyncPlan;
+  conflicts: ResumeSyncConflict[];
+  warnings: SyncWarning[];
+  discoveredRemoteFiles: boolean;
 }
 
-export type SyncInspection = InspectedLocal & {
-  remoteEtag: string | null;
-} & (
-  | { decision: "upload"; cloud: CloudSnapshotV1 | null }
-  | { decision: "download"; cloud: CloudSnapshotV1 }
-  | { decision: "none"; cloud: CloudSnapshotV1 | null }
-  | {
-      decision: "conflict";
-      cloud: CloudSnapshotV1 | null;
-      reason?: "LOCAL_CHANGED" | "LOCAL_CAS_MISMATCH" | "REMOTE_CAS_MISMATCH";
-    }
+export type SyncInspection = SyncInspectionBase & (
+  | { decision: "upload" | "download" | "none" }
+  | { decision: "conflict" }
 );
 
-export interface SyncExecutionResult {
+export type SyncExecutionResult = {
   status: "uploaded" | "downloaded" | "unchanged";
-  warning: "NON_ATOMIC_UPLOAD" | null;
-}
-
-export interface SyncDeferredResult {
+  warning: null;
+  syncedCount: number;
+};
+export type SyncDeferredResult = {
   status: "deferred";
   warning: null;
-  reason: "LOCAL_UNSTABLE" | "REMOTE_MISSING_AFTER_CAS";
+  reason: "LOCAL_CHANGED" | "REMOTE_CHANGED";
+};
+export type SyncConflictResult = SyncInspection & { decision: "conflict" };
+export type SyncExecuteResult = SyncExecutionResult | SyncDeferredResult | SyncConflictResult;
+
+const compareIds = (left: string, right: string): number => left.localeCompare(right);
+
+function decisionFor(plan: SyncPlan): SyncInspection["decision"] {
+  if (plan.conflicts.length > 0) return "conflict";
+  if (plan.uploads.length > 0 || plan.trashMoves.length > 0) return "upload";
+  if (plan.downloads.length > 0 || plan.remoteDeletions.length > 0) return "download";
+  return "none";
 }
 
-export type SyncExecuteResult =
-  | SyncExecutionResult
-  | SyncDeferredResult
-  | Extract<SyncInspection, { decision: "conflict" }>;
-
-const withoutTrailingSlash = (path: string): string => path.replace(/\/+$/, "");
+async function localHashes(data: ResumeSyncData): Promise<Record<string, string>> {
+  const pairs = await Promise.all(data.resumes.map(async (resume) => [
+    resume.id,
+    await calculateResumeHash(resume),
+  ] as const));
+  return Object.fromEntries(pairs);
+}
 
 export class WebDavSyncCoordinator {
-  private readonly directory: string;
-  private readonly finalPath: string;
+  constructor(private readonly dependencies: CoordinatorDependencies) {}
 
-  constructor(private readonly dependencies: CoordinatorDependencies) {
-    this.directory = `${withoutTrailingSlash(dependencies.remoteDirectory)}/`;
-    this.finalPath = `${this.directory}magic-resume.json`;
-  }
-
-  async inspect(signal?: AbortSignal): Promise<SyncInspection> {
+  async inspect(_signal?: AbortSignal): Promise<SyncInspection> {
     const localData = this.dependencies.getLocalData();
     const localToken = canonicalizeSyncData(localData);
-    const localHash = await calculateContentHash(localData);
-    const remote = await this.dependencies.client.getTextWithMetadata(this.finalPath, signal);
-    const cloud = remote === null ? null : await parseCloudSnapshot(remote.text);
-    const remoteEtag = remote?.etag ?? null;
-    const decision = decideSync(localHash, cloud, this.dependencies.getBaseline());
+    const hashes = await localHashes(localData);
+    const remoteFile = await this.dependencies.repository.readManifest();
+    let manifest = remoteFile ? await parseManifest(remoteFile.text) : null;
+    const warnings: SyncWarning[] = [];
+    let discoveredRemoteFiles = false;
 
-    if (decision === "download") {
-      if (cloud === null) throw new Error("Cloud snapshot required");
-      return { decision, cloud, remoteEtag, localData, localHash, localToken };
+    if (manifest) {
+      const entries = structuredClone(manifest.entries);
+      const indexedPaths = new Set(Object.values(entries).map((entry) => entry.path));
+      for (const candidate of await this.dependencies.repository.listResumeCandidates()) {
+        if (indexedPaths.has(candidate.path)) continue;
+        const file = await this.dependencies.repository.readResume(candidate.path);
+        if (!file) continue;
+        try {
+          const discovered = parseResumeJson(file.text);
+          const contentHash = await calculateResumeHash(discovered);
+          const existing = entries[discovered.id];
+          if (existing?.contentHash === contentHash) continue;
+          entries[discovered.id] = {
+            path: candidate.path,
+            contentHash,
+            updatedAt: discovered.updatedAt,
+            deleted: false,
+          };
+          discoveredRemoteFiles = true;
+        } catch {
+          warnings.push({ code: "INVALID_REMOTE_RESUME" });
+        }
+      }
+      if (discoveredRemoteFiles) manifest = { ...manifest, entries };
     }
-    return { decision, cloud, remoteEtag, localData, localHash, localToken };
+
+    const plan = planSync({
+      local: localData,
+      localHashes: hashes,
+      remote: manifest,
+      baseline: this.dependencies.getBaseline(),
+    });
+    return {
+      decision: decisionFor(plan),
+      localData,
+      localToken,
+      localHashes: hashes,
+      manifest,
+      remoteEtag: remoteFile?.etag ?? null,
+      plan,
+      conflicts: plan.conflicts,
+      warnings,
+      discoveredRemoteFiles,
+    };
   }
 
-  async execute(signal?: AbortSignal): Promise<SyncExecuteResult> {
-    let inspection = await this.inspect(signal);
+  async execute(
+    decisionOrSignal?: ConflictDecision | AbortSignal,
+    signal?: AbortSignal,
+  ): Promise<SyncExecuteResult> {
+    const decision = decisionOrSignal instanceof AbortSignal ? undefined : decisionOrSignal;
+    const requestSignal = decisionOrSignal instanceof AbortSignal ? decisionOrSignal : signal;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const currentLocalData = this.dependencies.getLocalData();
-      const currentLocalToken = canonicalizeSyncData(currentLocalData);
-      const currentLocalHash = await calculateContentHash(currentLocalData);
-      const stableLocalToken = canonicalizeSyncData(this.dependencies.getLocalData());
+      requestSignal?.throwIfAborted();
+      const inspection = await this.inspect(requestSignal);
+      const plan = decision ? this.resolve(inspection.plan, decision) : inspection.plan;
+      if (plan.conflicts.length > 0) {
+        return { ...inspection, decision: "conflict", plan, conflicts: plan.conflicts };
+      }
+      const intendedStatus = plan.uploads.length > 0 || plan.trashMoves.length > 0 ||
+          inspection.manifest === null || inspection.discoveredRemoteFiles
+        ? "uploaded"
+        : plan.downloads.length > 0 || plan.remoteDeletions.length > 0
+        ? "downloaded"
+        : "unchanged";
+      const baseline = this.dependencies.getBaseline();
       if (
-        currentLocalToken !== inspection.localToken ||
-        currentLocalHash !== inspection.localHash ||
-        stableLocalToken !== currentLocalToken
+        intendedStatus === "unchanged" &&
+        inspection.manifest !== null &&
+        baseline?.manifestHash === inspection.manifest.manifestHash
       ) {
-        if (attempt < 2) {
-          inspection = await this.inspect(signal);
-          continue;
-        }
-        const latestDecision = decideSync(
-          currentLocalHash,
-          inspection.cloud,
-          this.dependencies.getBaseline(),
-        );
-        if (inspection.cloud && latestDecision === "conflict") {
-          return {
-            decision: "conflict",
-            reason: "LOCAL_CHANGED",
-            cloud: inspection.cloud,
-            remoteEtag: inspection.remoteEtag,
-            localData: currentLocalData,
-            localHash: currentLocalHash,
-            localToken: currentLocalToken,
-          };
-        }
+        return { status: "unchanged", warning: null, syncedCount: 0 };
+      }
+      const result = await executeSyncPlan({
+        repository: this.dependencies.repository,
+        plan,
+        localData: inspection.localData,
+        remoteManifest: inspection.manifest,
+        remoteManifestEtag: inspection.remoteEtag,
+        expectedLocalToken: inspection.localToken,
+        deviceId: this.dependencies.deviceId,
+        now: this.dependencies.now,
+        commit: this.dependencies.commit,
+        forceManifestPublish: inspection.discoveredRemoteFiles,
+      });
+      if (result.kind === "conflict") {
+        return { ...inspection, decision: "conflict", plan, conflicts: result.conflicts };
+      }
+      if (result.kind === "deferred") {
+        if (attempt < 2) continue;
         return {
           status: "deferred",
           warning: null,
-          reason: "LOCAL_UNSTABLE",
+          reason: result.reason === "local-changed" ? "LOCAL_CHANGED" : "REMOTE_CHANGED",
         };
       }
-
-      switch (inspection.decision) {
-        case "upload":
-          try {
-            return await this.upload(
-              inspection.localData,
-              inspection.cloud?.revision ?? null,
-              this.preconditionFor(inspection.cloud, inspection.remoteEtag),
-              signal,
-            );
-          } catch (error) {
-            if (!(error instanceof WebDavError) || error.code !== "REMOTE_CAS_MISMATCH") {
-              throw error;
-            }
-            return this.refreshRemoteConflict(signal);
-          }
-        case "download":
-          try {
-            return this.commitCloud(inspection.cloud, currentLocalToken);
-          } catch (error) {
-            if (!(error instanceof LocalCasMismatchError)) throw error;
-            return {
-              decision: "conflict",
-              reason: "LOCAL_CAS_MISMATCH",
-              cloud: inspection.cloud,
-              remoteEtag: inspection.remoteEtag,
-              localData: currentLocalData,
-              localHash: currentLocalHash,
-              localToken: currentLocalToken,
-            };
-          }
-        case "none":
-          if (inspection.cloud) this.updateBaseline(inspection.cloud);
-          return { status: "unchanged", warning: null };
-        case "conflict":
-          return inspection;
-      }
+      return {
+        status: intendedStatus,
+        warning: null,
+        syncedCount: result.syncedCount,
+      };
     }
     throw new WebDavError("UNKNOWN");
   }
 
-  async keepLocal(
+  /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
+  keepLocal(
     cloud: Pick<CloudSnapshotV1, "revision">,
-    expectedEtagOrSignal?: string | null | AbortSignal,
+    _expectedEtagOrSignal?: string | null | AbortSignal,
     signal?: AbortSignal,
   ): Promise<SyncExecuteResult> {
-    const expectedEtag = expectedEtagOrSignal instanceof AbortSignal
-      ? undefined
-      : expectedEtagOrSignal;
-    const requestSignal = expectedEtagOrSignal instanceof AbortSignal
-      ? expectedEtagOrSignal
-      : signal;
-    if (expectedEtag === undefined) throw new WebDavError("REMOTE_CAS_MISMATCH");
-    const current = await this.inspect(requestSignal);
-    if (
-      current.cloud?.revision !== cloud.revision ||
-      current.remoteEtag !== expectedEtag
-    ) {
-      return { ...current, decision: "conflict", reason: "REMOTE_CAS_MISMATCH" };
-    }
-    try {
-      return await this.upload(
-        this.dependencies.getLocalData(),
-        cloud.revision,
-        this.preconditionFor(current.cloud, current.remoteEtag),
-        requestSignal,
-      );
-    } catch (error) {
-      if (!(error instanceof WebDavError) || error.code !== "REMOTE_CAS_MISMATCH") {
-        throw error;
-      }
-      return this.refreshRemoteConflict(requestSignal);
-    }
+    return this.execute({ resumeId: cloud.revision, resolution: "keep-local" }, signal);
   }
 
-  async useCloud(
-    cloud: CloudSnapshotV1,
-    expectedEtagOrSignal?: string | null | AbortSignal,
+  /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
+  useCloud(
+    cloud: Pick<CloudSnapshotV1, "revision">,
+    _expectedEtagOrSignal?: string | null | AbortSignal,
     signal?: AbortSignal,
   ): Promise<SyncExecuteResult> {
-    const expectedEtag = expectedEtagOrSignal instanceof AbortSignal
-      ? undefined
-      : expectedEtagOrSignal;
-    const requestSignal = expectedEtagOrSignal instanceof AbortSignal
-      ? expectedEtagOrSignal
-      : signal;
-    requestSignal?.throwIfAborted();
-    if (expectedEtag === undefined) throw new WebDavError("REMOTE_CAS_MISMATCH");
-    const current = await this.inspect(requestSignal);
-    if (
-      current.cloud?.revision !== cloud.revision ||
-      current.remoteEtag !== expectedEtag
-    ) {
-      return { ...current, decision: "conflict", reason: "REMOTE_CAS_MISMATCH" };
-    }
-    const expectedLocalToken = canonicalizeSyncData(this.dependencies.getLocalData());
-    const validated = await parseCloudSnapshot(JSON.stringify(cloud));
-    requestSignal?.throwIfAborted();
-    try {
-      return this.commitCloud(validated, expectedLocalToken);
-    } catch (error) {
-      if (!(error instanceof LocalCasMismatchError)) throw error;
-      const currentLocalData = this.dependencies.getLocalData();
-      return {
-        decision: "conflict",
-        reason: "LOCAL_CAS_MISMATCH",
-        cloud: validated,
-        remoteEtag: current.remoteEtag,
-        localData: currentLocalData,
-        localHash: await calculateContentHash(currentLocalData),
-        localToken: canonicalizeSyncData(currentLocalData),
-      };
-    }
+    return this.execute({ resumeId: cloud.revision, resolution: "use-cloud" }, signal);
   }
 
-  private commitCloud(
-    cloud: CloudSnapshotV1,
-    expectedLocalToken: string,
-  ): SyncExecutionResult {
-    this.dependencies.commitDownloadedSnapshot(
-      cloud.data,
-      this.baselineFor(cloud),
-      expectedLocalToken,
-    );
-    return { status: "downloaded", warning: null };
-  }
-
-  private async upload(
-    localData: ResumeSyncData,
-    parentRevision: string | null,
-    precondition: RemotePrecondition,
-    signal?: AbortSignal,
-  ): Promise<SyncExecutionResult> {
-    const revision = this.dependencies.createRevision();
-    const snapshot = await createCloudSnapshot(localData, {
-      revision,
-      parentRevision,
-      updatedAt: this.dependencies.now(),
-      deviceId: this.dependencies.deviceId,
-    });
-    const content = JSON.stringify(snapshot);
-    const temporaryPath = `${this.directory}magic-resume.${revision}.tmp`;
-    let warning: SyncExecutionResult["warning"] = null;
-
-    await this.dependencies.client.ensureDirectory(this.directory, signal);
-    try {
-      await this.dependencies.client.putText(temporaryPath, content, signal);
-      try {
-        await this.dependencies.client.move(
-          temporaryPath,
-          this.finalPath,
-          precondition,
-          signal,
-        );
-      } catch (error) {
-        if (!(error instanceof WebDavError) || error.code !== "MOVE_UNSUPPORTED") throw error;
-        await this.dependencies.client.putText(this.finalPath, content, precondition, signal);
-        warning = "NON_ATOMIC_UPLOAD";
-      }
-    } finally {
-      const cleanupController = new AbortController();
-      const cleanupTimer = setTimeout(() => cleanupController.abort(), 2_000);
-      try {
-        await this.dependencies.client.delete(temporaryPath, cleanupController.signal);
-      } catch {
-        // Temporary-file cleanup is best effort and must not mask the transfer result.
-      } finally {
-        clearTimeout(cleanupTimer);
-      }
-    }
-
-    this.updateBaseline(snapshot);
-    return { status: "uploaded", warning };
-  }
-
-  private preconditionFor(
-    cloud: CloudSnapshotV1 | null,
-    remoteEtag: string | null,
-  ): RemotePrecondition {
-    if (!cloud) return { kind: "missing" };
-    if (!remoteEtag) throw new WebDavError("REMOTE_CAS_MISMATCH");
-    return { kind: "match", etag: remoteEtag };
-  }
-
-  private async refreshRemoteConflict(signal?: AbortSignal): Promise<SyncExecuteResult> {
-    const latest = await this.inspect(signal);
-    if (!latest.cloud) {
-      return {
-        status: "deferred",
-        warning: null,
-        reason: "REMOTE_MISSING_AFTER_CAS",
-      };
-    }
-    return { ...latest, decision: "conflict", reason: "REMOTE_CAS_MISMATCH" };
-  }
-
-  private baselineFor(
-    snapshot: Pick<CloudSnapshotV1, "revision" | "contentHash">,
-  ): WebDavBaseline {
-    return {
-      revision: snapshot.revision,
-      contentHash: snapshot.contentHash,
-      syncedAt: this.dependencies.now(),
+  private resolve(plan: SyncPlan, decision: ConflictDecision): SyncPlan {
+    const conflict = plan.conflicts.find((item) => item.resumeId === decision.resumeId);
+    if (!conflict) return plan;
+    const next: SyncPlan = {
+      ...plan,
+      uploads: [...plan.uploads],
+      downloads: [...plan.downloads],
+      trashMoves: [...plan.trashMoves],
+      remoteDeletions: [...plan.remoteDeletions],
+      conflicts: plan.conflicts.filter((item) => item !== conflict),
     };
-  }
-
-  private updateBaseline(snapshot: Pick<CloudSnapshotV1, "revision" | "contentHash">): void {
-    this.dependencies.setBaseline(this.baselineFor(snapshot));
+    if (decision.resolution === "keep-local") {
+      if (conflict.local) {
+        const path = getResumeRelativePath(conflict.local);
+        next.uploads.push({
+          resume: conflict.local,
+          path,
+          previousPath: conflict.remoteEntry && !conflict.remoteEntry.deleted &&
+              conflict.remoteEntry.path !== path
+            ? conflict.remoteEntry.path
+            : null,
+        });
+      } else if (conflict.remoteEntry && !conflict.remoteEntry.deleted) {
+        next.trashMoves.push({
+          resumeId: conflict.resumeId,
+          from: conflict.remoteEntry.path,
+          to: `trash/${conflict.remoteEntry.path.split("/").at(-1)}`,
+        });
+      }
+    } else if (!conflict.remoteEntry || conflict.remoteEntry.deleted) {
+      next.remoteDeletions.push(conflict.resumeId);
+    } else {
+      next.downloads.push({
+        resumeId: conflict.resumeId,
+        path: conflict.remoteEntry.path,
+        contentHash: conflict.remoteEntry.contentHash,
+      });
+    }
+    next.uploads.sort((a, b) => compareIds(a.resume.id, b.resume.id));
+    next.downloads.sort((a, b) => compareIds(a.resumeId, b.resumeId));
+    return next;
   }
 }

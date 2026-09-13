@@ -8,6 +8,7 @@ import type { WebDavClientConfig } from "../lib/webdav/client";
 import type { WebDavErrorCode } from "../lib/webdav/errors";
 import type {
   CloudSnapshotV1,
+  ManifestValidationCode,
   SnapshotValidationCode,
 } from "../lib/webdav/types";
 import { useResumeStore } from "./useResumeStore";
@@ -42,7 +43,7 @@ export interface WebDavConflict {
 }
 
 export interface WebDavSafeError {
-  code: WebDavErrorCode | SnapshotValidationCode;
+  code: WebDavErrorCode | ManifestValidationCode | SnapshotValidationCode;
   status: number | null;
 }
 

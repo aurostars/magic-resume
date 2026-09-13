@@ -1,19 +1,21 @@
 import { useEffect } from "react";
 import { WebDavClient } from "../lib/webdav/client";
+import { WebDavResumeRepository } from "../lib/webdav/repository";
+import { LocalCasMismatchError, WebDavError } from "../lib/webdav/errors";
 import {
   WebDavSyncCoordinator,
   type SyncInspection,
 } from "../lib/webdav/coordinator";
 import { WebDavSyncController } from "../lib/webdav/controller";
-import { WebDavError } from "../lib/webdav/errors";
 import {
+  ManifestValidationError,
   SnapshotValidationError,
+  type MultiFileBaseline,
   type ResumeSyncData,
 } from "../lib/webdav/types";
 import { useResumeStore } from "../store/useResumeStore";
 import {
   useWebDavStore,
-  type WebDavBaseline,
   type WebDavConflict,
   type WebDavSafeError,
   type WebDavSettings,
@@ -55,7 +57,7 @@ const toSafeError = (error: unknown): WebDavSafeError => {
   if (error instanceof WebDavError) {
     return { code: error.code, status: error.status };
   }
-  if (error instanceof SnapshotValidationError) {
+  if (error instanceof SnapshotValidationError || error instanceof ManifestValidationError) {
     return { code: error.code, status: null };
   }
   return { code: "UNKNOWN", status: null };
@@ -71,7 +73,9 @@ const createConflict = (
   inspection: Extract<SyncInspection, { decision: "conflict" }>,
   deviceId: string,
 ): WebDavConflict => {
-  if (!inspection.cloud) throw new WebDavError("UNKNOWN");
+  const conflict = inspection.conflicts[0];
+  const manifest = inspection.manifest;
+  if (!conflict || !manifest) throw new WebDavError("UNKNOWN");
   return {
     local: {
       updatedAt: latestResumeTimestamp(inspection.localData),
@@ -79,11 +83,19 @@ const createConflict = (
       resumeCount: inspection.localData.resumes.length,
     },
     cloud: {
-      updatedAt: inspection.cloud.updatedAt,
-      deviceId: inspection.cloud.deviceId,
-      resumeCount: inspection.cloud.data.resumes.length,
+      updatedAt: manifest.updatedAt,
+      deviceId: manifest.deviceId,
+      resumeCount: Object.values(manifest.entries).filter((entry) => !entry.deleted).length,
     },
-    snapshot: inspection.cloud,
+    snapshot: {
+      schemaVersion: 1,
+      revision: conflict.resumeId,
+      parentRevision: null,
+      updatedAt: manifest.updatedAt,
+      deviceId: manifest.deviceId,
+      contentHash: manifest.manifestHash,
+      data: inspection.localData,
+    },
     remoteEtag: inspection.remoteEtag,
   };
 };
@@ -91,21 +103,15 @@ const createConflict = (
 /** Commit the validated cloud data and its baseline inside the Resume Store transaction. */
 export const commitDownloadedSnapshot = (
   data: ResumeSyncData,
-  baseline: WebDavBaseline,
+  baseline: MultiFileBaseline,
   expectedLocalToken: string,
 ): void => {
-  useResumeStore
-    .getState()
-    .commitWebDavSnapshot(data, baseline, expectedLocalToken);
-};
-
-const migrateLegacyBaseline = (): void => {
-  const legacy = useWebDavStore.getState().legacyBaseline;
-  if (!legacy) return;
-  if (!useResumeStore.getState().webDavBaseline) {
-    useResumeStore.getState().setWebDavBaseline(legacy);
-  }
-  useWebDavStore.getState().clearLegacyBaseline();
+  const committed = useResumeStore.getState().commitWebDavSync({
+    data,
+    baseline,
+    expectedLocalToken,
+  });
+  if (!committed) throw new LocalCasMismatchError();
 };
 
 export const createConfiguredController = (
@@ -113,7 +119,6 @@ export const createConfiguredController = (
   deviceId: string,
 ): WebDavSyncController | null => {
   if (!useResumeStore.getState()._hasHydrated || !isConfigured(settings)) return null;
-  migrateLegacyBaseline();
 
   let client: WebDavClient;
   try {
@@ -127,16 +132,17 @@ export const createConfiguredController = (
     useWebDavStore.getState().setError(toSafeError(error));
     return null;
   }
-  const coordinator = new WebDavSyncCoordinator({
-    client,
-    getLocalData: () => useResumeStore.getState().getSyncSnapshot(),
-    commitDownloadedSnapshot,
-    getBaseline: () => useResumeStore.getState().webDavBaseline,
-    setBaseline: (baseline) => useResumeStore.getState().setWebDavBaseline(baseline),
+  const repository = new WebDavResumeRepository(client, {
     deviceId,
     remoteDirectory: settings.remoteDirectory,
+  });
+  const coordinator = new WebDavSyncCoordinator({
+    repository,
+    getLocalData: () => useResumeStore.getState().getSyncSnapshot(),
+    getBaseline: () => useResumeStore.getState().getWebDavBaseline(),
+    commit: commitDownloadedSnapshot,
+    deviceId,
     now: () => new Date().toISOString(),
-    createRevision: () => crypto.randomUUID(),
   });
 
   return new WebDavSyncController({
