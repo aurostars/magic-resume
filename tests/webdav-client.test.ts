@@ -396,3 +396,67 @@ test("rejects base URL userinfo without sending or exposing it", async () => {
   assert.equal(exposed.includes("embedded-password"), false);
   assert.deepEqual(calls, []);
 });
+
+test("PROPFIND Depth one lists decoded direct child files with ETags", async () => {
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+    <d:multistatus xmlns:d="DAV:">
+      <d:response><d:href>/root/magic-resume/resumes/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+      <d:response><d:href>/root/magic-resume/resumes/CV%20one.json</d:href><d:propstat><d:prop><d:getetag>&quot;r1&quot;</d:getetag><d:resourcetype/></d:prop></d:propstat></d:response>
+      <d:response><d:href>https://dav.example.test/root/magic-resume/resumes/%E5%8F%A6%E4%B8%80%E4%BB%BD.json</d:href><d:propstat><d:prop><d:getetag>W/&quot;r2&quot;</d:getetag><d:resourcetype/></d:prop></d:propstat></d:response>
+      <d:response><d:href>/root/magic-resume/resumes/folder/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+      <d:response><d:href>/root/magic-resume/resumes/nested/ignored.json</d:href><d:propstat><d:prop><d:getetag>&quot;nested&quot;</d:getetag><d:resourcetype/></d:prop></d:propstat></d:response>
+    </d:multistatus>`;
+  const { calls, fetchImpl } = recordingFetch(() => new Response(xml, {
+    status: 207,
+    headers: { "Content-Type": "application/xml" },
+  }));
+
+  const files = await clientWith(fetchImpl).listCollection("/magic-resume/resumes/");
+
+  assert.deepEqual(files, [
+    { path: "CV one.json", etag: '"r1"' },
+    { path: "另一份.json", etag: 'W/"r2"' },
+  ]);
+  assert.equal(calls[0].init.method, "PROPFIND");
+  assert.equal(new Headers(calls[0].init.headers).get("Depth"), "1");
+});
+
+test("PROPFIND rejects a multistatus href outside the requested collection", async () => {
+  const xml = `<d:multistatus xmlns:d="DAV:">
+    <d:response><d:href>/root/magic-resume/resumes/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+    <d:response><d:href>/root/private/secret.json</d:href><d:propstat><d:prop><d:getetag>&quot;secret&quot;</d:getetag></d:prop></d:propstat></d:response>
+  </d:multistatus>`;
+  const { fetchImpl } = recordingFetch(() => new Response(xml, { status: 207 }));
+
+  await expectWebDavError(
+    clientWith(fetchImpl).listCollection("/magic-resume/resumes/"),
+    "UNKNOWN",
+    null,
+  );
+});
+
+test("PROPFIND rejects cross-origin absolute hrefs", async () => {
+  const xml = `<d:multistatus xmlns:d="DAV:">
+    <d:response><d:href>https://attacker.example/root/magic-resume/resumes/stolen.json</d:href><d:propstat><d:prop><d:getetag>&quot;x&quot;</d:getetag></d:prop></d:propstat></d:response>
+  </d:multistatus>`;
+  const { fetchImpl } = recordingFetch(() => new Response(xml, { status: 207 }));
+
+  await expectWebDavError(
+    clientWith(fetchImpl).listCollection("/magic-resume/resumes/"),
+    "UNKNOWN",
+    null,
+  );
+});
+
+test("MOVE Destination never includes base URL query or configured credentials", async () => {
+  const { calls, fetchImpl } = recordingFetch();
+
+  await clientWith(fetchImpl).move("/from.tmp", "/to.json", { kind: "missing" });
+
+  const destination = new Headers(calls[0].init.headers).get("Destination") ?? "";
+  assert.equal(destination, "https://dav.example.test/root/to.json");
+  assert.equal(destination.includes("token=secret"), false);
+  assert.equal(destination.includes("%C3%BCser"), false);
+  assert.equal(destination.includes("p%C3%A4ss"), false);
+  assert.equal(destination.includes("@"), false);
+});

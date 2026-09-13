@@ -16,9 +16,15 @@ export interface RemoteText {
   etag: string | null;
 }
 
+export interface RemoteCollectionFile {
+  path: string;
+  etag: string | null;
+}
+
 export interface WebDavClientApi {
   options(path: string, signal?: AbortSignal): Promise<void>;
   propfind(path: string, signal?: AbortSignal): Promise<boolean>;
+  listCollection(path: string, signal?: AbortSignal): Promise<RemoteCollectionFile[]>;
   ensureDirectory(path: string, signal?: AbortSignal): Promise<void>;
   getText(path: string, signal?: AbortSignal): Promise<string | null>;
   getTextWithMetadata(path: string, signal?: AbortSignal): Promise<RemoteText | null>;
@@ -87,6 +93,37 @@ function statusError(status: number, kind: RequestKind): WebDavError {
   return new WebDavError(code, status);
 }
 
+function decodeXmlText(value: string): string {
+  return value.replace(/&(?:#(\d+)|#x([0-9a-f]+)|amp|lt|gt|quot|apos);/gi, (entity, decimal, hex) => {
+    if (decimal) return String.fromCodePoint(Number(decimal));
+    if (hex) return String.fromCodePoint(Number.parseInt(hex, 16));
+    const named: Record<string, string> = {
+      "&amp;": "&",
+      "&lt;": "<",
+      "&gt;": ">",
+      "&quot;": '"',
+      "&apos;": "'",
+    };
+    return named[entity.toLowerCase()] ?? entity;
+  });
+}
+
+function elementText(xml: string, localName: string): string | null {
+  const match = xml.match(new RegExp(
+    `<(?:[\\w.-]+:)?${localName}\\b[^>]*>([\\s\\S]*?)<\\/(?:[\\w.-]+:)?${localName}\\s*>`,
+    "i",
+  ));
+  return match ? decodeXmlText(match[1].trim()) : null;
+}
+
+function responseElements(xml: string): string[] {
+  const pattern = /<(?:[\w.-]+:)?response\b[^>]*>[\s\S]*?<\/(?:[\w.-]+:)?response\s*>/gi;
+  const responses: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(xml)) !== null) responses.push(match[0]);
+  return responses;
+}
+
 export class WebDavClient implements WebDavClientApi {
   private readonly baseUrl: URL;
   private readonly authorization: string;
@@ -113,6 +150,49 @@ export class WebDavClient implements WebDavClientApi {
     if (response.status === 404) return false;
     this.requireSuccess(response);
     return true;
+  }
+
+  async listCollection(path: string, signal?: AbortSignal): Promise<RemoteCollectionFile[]> {
+    const collectionUrl = this.remoteUrl(path);
+    if (!collectionUrl.pathname.endsWith("/")) throw new WebDavError("UNKNOWN");
+    return this.request(
+      path,
+      { method: "PROPFIND", headers: { Depth: "1" } },
+      signal,
+      async (response) => {
+        this.requireSuccess(response);
+        const files: RemoteCollectionFile[] = [];
+        for (const item of responseElements(await response.text())) {
+          const href = elementText(item, "href");
+          if (href === null) throw new WebDavError("UNKNOWN");
+
+          let resourceUrl: URL;
+          try {
+            resourceUrl = new URL(href, collectionUrl);
+          } catch {
+            throw new WebDavError("UNKNOWN");
+          }
+          if (
+            resourceUrl.origin !== collectionUrl.origin ||
+            !resourceUrl.pathname.startsWith(collectionUrl.pathname)
+          ) {
+            throw new WebDavError("UNKNOWN");
+          }
+
+          const encodedRelativePath = resourceUrl.pathname.slice(collectionUrl.pathname.length);
+          if (encodedRelativePath === "") continue;
+          let relativePath: string;
+          try {
+            relativePath = decodeURIComponent(encodedRelativePath);
+          } catch {
+            throw new WebDavError("UNKNOWN");
+          }
+          if (relativePath.includes("/") || /<(?:[\w.-]+:)?collection\b/i.test(item)) continue;
+          files.push({ path: relativePath, etag: elementText(item, "getetag") });
+        }
+        return files;
+      },
+    );
   }
 
   async ensureDirectory(path: string, signal?: AbortSignal): Promise<void> {
