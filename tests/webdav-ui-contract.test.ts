@@ -80,9 +80,10 @@ const requiredKeys = [
   "clearConfirmBody", "cancel", "confirm", "localStorageWarning", "dedicatedAccountHint",
   "lastSyncedAt", "neverSynced", "syncing", "success", "nonAtomicWarning", "authError",
   "forbiddenError", "networkError", "timeoutError", "directoryError", "quotaError",
-  "corruptSnapshotError", "newerSnapshotError", "unknownError", "conflictTitle", "conflictBody",
-  "localVersion", "cloudVersion", "resumeCount", "device", "updatedAt", "useLocal",
-  "useCloud", "dismiss",
+  "corruptSnapshotError", "newerSnapshotError", "unknownError", "perResumeJsonDescription",
+  "credentialsLocalDescription", "clearKeepsFilesDescription", "syncedResumeCount", "conflictTitle",
+  "conflictBody", "bothModified", "deleteVsModify", "localUpdatedAt", "remoteUpdatedAt",
+  "notAvailable", "keepLocal", "useCloud",
 ].sort();
 
 const renderLocalized = (child: React.ReactElement, messages: typeof en = en) =>
@@ -94,6 +95,7 @@ const renderLocalized = (child: React.ReactElement, messages: typeof en = en) =>
 
 const resetStores = () => {
   useWebDavStore.getState().clearCredentials();
+  useWebDavStore.setState({ conflicts: [], syncedResumeCount: 0, lastSyncedAt: null });
   useResumeStore.setState({ webDavBaseline: null });
 };
 
@@ -210,80 +212,59 @@ test("clear confirmation is a trapped modal, closes with Escape, restores focus,
 });
 
 const conflict = {
-  local: { updatedAt: "2026-09-12T08:00:00.000Z", deviceId: "local-device", resumeCount: 2 },
-  cloud: { updatedAt: "2026-09-12T09:00:00.000Z", deviceId: "cloud-device", resumeCount: 3 },
-  snapshot: {
-    schemaVersion: 1 as const, revision: "r1", parentRevision: null,
-    updatedAt: "2026-09-12T09:00:00.000Z", deviceId: "cloud-device",
-    contentHash: "a".repeat(64), data: { resumes: [], activeResumeId: null },
-  },
-  remoteEtag: '"etag-r1"',
-  manifestRevision: 1,
+  resumeId: "full-id",
+  title: "产品经理简历",
+  kind: "both-modified" as const,
+  localUpdatedAt: "2026-09-12T08:00:00.000Z",
+  remoteUpdatedAt: "2026-09-12T09:00:00.000Z",
+  local: null,
+  remoteEntry: null,
 };
 
-test("conflict dialog traps focus, closes on Escape without choosing a side, and restores focus", async () => {
+test("conflict dialog traps focus and Escape keeps the unresolved conflict visible", async () => {
   const user = userEvent.setup({ document });
-  const opener = document.createElement("button");
-  opener.textContent = "Open conflict";
-  document.body.append(opener);
-  opener.focus();
   const calls: string[] = [];
-  const Harness = () => {
-    const [current, setCurrent] = React.useState<typeof conflict | null>(conflict);
-    return React.createElement(WebDavConflictDialog, {
-      conflict: current,
-      isBusy: false,
-      onUseLocal: async () => { calls.push("local"); },
-      onUseCloud: async () => { calls.push("cloud"); },
-      onDismiss: () => { calls.push("dismiss"); setCurrent(null); },
-    });
-  };
-  renderLocalized(React.createElement(Harness));
+  renderLocalized(React.createElement(WebDavConflictDialog, {
+    conflict,
+    isBusy: false,
+    onKeepLocal: async () => { calls.push("local"); },
+    onUseCloud: async () => { calls.push("cloud"); },
+  }));
 
-  const dialog = screen.getByRole("dialog", { name: "Choose which resume version to keep" });
+  const dialog = screen.getByRole("dialog", { name: "Resolve resume sync conflict" });
   assert.equal(dialog.getAttribute("aria-modal"), "true");
-  assert.match(dialog.textContent ?? "", /local-device/);
-  assert.match(dialog.textContent ?? "", /cloud-device/);
-  assert.ok(opener.closest("[aria-hidden='true']"), "background is hidden while modal is open");
-  const dismiss = within(dialog).getByRole("button", { name: "Dismiss" });
-  const useLocal = within(dialog).getByRole("button", { name: "Use local version" });
+  assert.match(dialog.textContent ?? "", /产品经理简历/);
+  const keepLocal = within(dialog).getByRole("button", { name: "Keep local version" });
   const useCloud = within(dialog).getByRole("button", { name: "Use cloud version" });
-  await waitFor(() => assert.ok(document.activeElement === dismiss));
   useCloud.focus();
   fireEvent.keyDown(useCloud, { key: "Tab" });
-  assert.ok(document.activeElement === dismiss);
-  dismiss.focus();
-  fireEvent.keyDown(dismiss, { key: "Tab", shiftKey: true });
-  assert.ok(document.activeElement === useCloud);
-  assert.ok(useLocal);
+  assert.ok(document.activeElement === keepLocal);
 
   await user.keyboard("{Escape}");
-  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  assert.deepEqual(calls, ["dismiss"]);
-  await waitFor(() => assert.ok(document.activeElement === opener));
+  assert.ok(screen.getByRole("dialog", { name: "Resolve resume sync conflict" }));
+  assert.deepEqual(calls, []);
 });
 
-test("conflict choices are actionable and all conflict actions are disabled while busy", async () => {
+test("conflict choices identify the resume and all conflict actions are disabled while busy", async () => {
   const user = userEvent.setup({ document });
-  const calls: string[] = [];
+  const calls: Array<[string, string]> = [];
   const props = {
     conflict,
     isBusy: false,
-    onUseLocal: async () => { calls.push("local"); },
-    onUseCloud: async () => { calls.push("cloud"); },
-    onDismiss: () => { calls.push("dismiss"); },
+    onKeepLocal: async (resumeId: string) => { calls.push(["local", resumeId]); },
+    onUseCloud: async (resumeId: string) => { calls.push(["cloud", resumeId]); },
   };
   const view = renderLocalized(React.createElement(WebDavConflictDialog, props));
-  await user.click(screen.getByRole("button", { name: "Use local version" }));
+  await user.click(screen.getByRole("button", { name: "Keep local version" }));
   await user.click(screen.getByRole("button", { name: "Use cloud version" }));
-  assert.deepEqual(calls, ["local", "cloud"]);
+  assert.deepEqual(calls, [["local", "full-id"], ["cloud", "full-id"]]);
 
   view.rerender(React.createElement(
     NextIntlClientProvider,
     { locale: "en", messages: en },
     React.createElement(WebDavConflictDialog, { ...props, isBusy: true }),
   ));
-  for (const name of ["Dismiss", "Use local version", "Use cloud version"]) {
+  for (const name of ["Keep local version", "Use cloud version"]) {
     assert.equal(screen.getByRole("button", { name }).hasAttribute("disabled"), true);
   }
 });
@@ -310,24 +291,22 @@ test("conflict dates follow the active i18n locale explicitly", () => {
   const english = renderLocalized(React.createElement(WebDavConflictDialog, {
     conflict,
     isBusy: false,
-    onUseLocal: async () => {},
+    onKeepLocal: async () => {},
     onUseCloud: async () => {},
-    onDismiss: () => {},
   }));
   const englishTime = document.querySelector("time")?.textContent;
   english.unmount();
   const chinese = renderLocalized(React.createElement(WebDavConflictDialog, {
     conflict,
     isBusy: false,
-    onUseLocal: async () => {},
+    onKeepLocal: async () => {},
     onUseCloud: async () => {},
-    onDismiss: () => {},
   }), zh);
   const chineseTime = document.querySelector("time")?.textContent;
 
   assert.notEqual(englishTime, chineseTime);
-  assert.equal(englishTime, new Date(conflict.local.updatedAt).toLocaleString("en"));
-  assert.equal(chineseTime, new Date(conflict.local.updatedAt).toLocaleString("zh"));
+  assert.equal(englishTime, new Date(conflict.localUpdatedAt).toLocaleString("en"));
+  assert.equal(chineseTime, new Date(conflict.localUpdatedAt).toLocaleString("zh"));
 });
 
 
@@ -375,5 +354,57 @@ test("Providers starts WebDAV once after either store hydration order and aborts
     }
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("actual Chinese settings resolves the named resume and keeps unresolved conflicts open on Escape", async () => {
+  const user = userEvent.setup({ document });
+  const productResume = {
+    resumeId: "full-id",
+    title: "产品经理简历",
+    kind: "both-modified" as const,
+    localUpdatedAt: "2026-09-12T08:00:00.000Z",
+    remoteUpdatedAt: "2026-09-12T09:00:00.000Z",
+    local: null,
+    remoteEntry: null,
+  };
+  const resolveCalls: Array<{ resumeId: string; resolution: string }> = [];
+  useWebDavStore.setState({
+    settings: {
+      baseUrl: "https://dav.example.test/path?private=secret",
+      username: "alice",
+      password: "password-should-not-render",
+      remoteDirectory: "/magic-resume/",
+      autoSyncEnabled: true,
+    },
+    conflicts: [productResume],
+    syncedResumeCount: 3,
+    lastSyncedAt: "2026-09-12T10:00:00.000Z",
+    status: "success",
+    error: null,
+    warning: null,
+  } as any);
+  const controller = {
+    testConnection: async () => {},
+    syncNow: async () => {},
+    dismissConflict: () => {},
+    resolveConflict: async (resumeId: string, resolution: string) => {
+      resolveCalls.push({ resumeId, resolution });
+    },
+  };
+
+  renderLocalized(React.createElement(WebDavSection, { controllerProvider: () => controller as any }), zh);
+
+  assert.match(screen.getByText("产品经理简历").textContent ?? "", /产品经理简历/);
+  assert.ok(screen.getByText("共同步 3 份简历"));
+  assert.ok(screen.getByText(/每份简历保存为一个 JSON 文件/));
+  await user.keyboard("{Escape}");
+  assert.ok(screen.getByRole("dialog"), "Escape must not hide an unresolved conflict");
+  await user.click(screen.getByRole("button", { name: "保留本地版本" }));
+  assert.deepEqual(resolveCalls, [{ resumeId: "full-id", resolution: "keep-local" }]);
+  for (const role of ["status", "alert"] as const) {
+    const message = screen.queryByRole(role)?.textContent ?? "";
+    assert.doesNotMatch(message, /password-should-not-render|private=secret/);
   }
 });

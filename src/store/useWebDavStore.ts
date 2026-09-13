@@ -9,6 +9,7 @@ import type { WebDavErrorCode } from "../lib/webdav/errors";
 import type {
   CloudSnapshotV1,
   ManifestValidationCode,
+  ResumeSyncConflict,
   SnapshotValidationCode,
 } from "../lib/webdav/types";
 import { useResumeStore } from "./useResumeStore";
@@ -56,7 +57,11 @@ export interface PersistedWebDavState {
 export interface WebDavState extends PersistedWebDavState {
   isSyncing: boolean;
   abortController: AbortController | null;
+  /** @deprecated Compatibility with aggregate conflict state. */
   conflict: WebDavConflict | null;
+  conflicts: ResumeSyncConflict[];
+  syncedResumeCount: number;
+  lastSyncedAt: string | null;
   status: WebDavStatus;
   error: WebDavSafeError | null;
   warning: WebDavSafeError | null;
@@ -65,6 +70,8 @@ export interface WebDavState extends PersistedWebDavState {
   beginRequest: (controller: AbortController, status?: "testing" | "syncing") => void;
   finishRequest: (status?: WebDavStatus) => void;
   setConflict: (conflict: WebDavConflict | null) => void;
+  setConflicts: (conflicts: ResumeSyncConflict[]) => void;
+  completeSync: (syncedResumeCount: number, lastSyncedAt?: string) => void;
   setWarning: (warning: WebDavSafeError | null) => void;
   setError: (error: WebDavSafeError | null) => void;
   clearTransientState: () => void;
@@ -87,6 +94,9 @@ export const createDefaultWebDavState = (
   isSyncing: false,
   abortController: null,
   conflict: null,
+  conflicts: [],
+  syncedResumeCount: 0,
+  lastSyncedAt: null,
   status: "idle",
   error: null,
   warning: null,
@@ -99,6 +109,8 @@ type WebDavActions = Pick<
   | "beginRequest"
   | "finishRequest"
   | "setConflict"
+  | "setConflicts"
+  | "completeSync"
   | "setWarning"
   | "setError"
   | "clearTransientState"
@@ -135,7 +147,20 @@ export const createWebDavStore = (
           set({ abortController, isSyncing: true, status, error: null, warning: null }),
         finishRequest: (status = "idle") =>
           set({ abortController: null, isSyncing: false, status }),
-        setConflict: (conflict) => set({ conflict, status: conflict ? "conflict" : "idle" }),
+        setConflict: (conflict) => set({
+          conflict,
+          conflicts: [],
+          status: conflict ? "conflict" : "idle",
+        }),
+        setConflicts: (conflicts) => set({
+          conflict: null,
+          conflicts,
+          status: conflicts.length > 0 ? "conflict" : "idle",
+        }),
+        completeSync: (syncedResumeCount, lastSyncedAt = new Date().toISOString()) => set({
+          syncedResumeCount,
+          lastSyncedAt,
+        }),
         setWarning: (warning) =>
           set({
             warning: sanitizeSafeError(warning),
@@ -151,6 +176,9 @@ export const createWebDavStore = (
             abortController: null,
             isSyncing: false,
             conflict: null,
+            conflicts: [],
+            syncedResumeCount: 0,
+            lastSyncedAt: null,
             status: "idle",
             error: null,
             warning: null,
@@ -163,6 +191,9 @@ export const createWebDavStore = (
             abortController: null,
             isSyncing: false,
             conflict: null,
+            conflicts: [],
+            syncedResumeCount: 0,
+            lastSyncedAt: null,
             status: "idle",
             error: null,
             warning: null,

@@ -159,10 +159,14 @@ export const createConfiguredController = (
       isAutoSyncEnabled: () => useWebDavStore.getState().settings.autoSyncEnabled,
       isOnline: () => typeof navigator === "undefined" || navigator.onLine,
       isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
-      hasConflict: () => useWebDavStore.getState().conflict !== null,
-      begin: (requestController) => useWebDavStore.getState().beginRequest(requestController),
-      complete: (warning) => {
+      hasConflict: () => {
         const store = useWebDavStore.getState();
+        return store.conflicts.length > 0 || store.conflict !== null;
+      },
+      begin: (requestController) => useWebDavStore.getState().beginRequest(requestController),
+      complete: (warning, syncedCount) => {
+        const store = useWebDavStore.getState();
+        if (syncedCount !== undefined) store.completeSync(syncedCount);
         if (warning) {
           store.setWarning({ code: "MOVE_UNSUPPORTED", status: null });
           store.finishRequest("warning");
@@ -181,12 +185,21 @@ export const createConfiguredController = (
         store.finishRequest("error");
         store.setError(toSafeError(error));
       },
+      setConflicts: (conflicts) => {
+        const store = useWebDavStore.getState();
+        store.finishRequest("conflict");
+        store.setConflicts(conflicts);
+      },
       setConflict: (conflict) => {
         const store = useWebDavStore.getState();
         store.finishRequest("conflict");
         store.setConflict(conflict);
       },
-      clearConflict: () => useWebDavStore.getState().setConflict(null),
+      clearConflict: () => {
+        const store = useWebDavStore.getState();
+        store.setConflicts([]);
+        store.setConflict(null);
+      },
     },
   });
 };

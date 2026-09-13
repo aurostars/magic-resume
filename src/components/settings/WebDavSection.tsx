@@ -15,7 +15,6 @@ import { Label } from "@/components/ui/label";
 import { getWebDavSyncController } from "@/hooks/useWebDavSync";
 import type { WebDavSyncController } from "@/lib/webdav/controller";
 import { useLocale, useTranslations } from "@/i18n/compat/client";
-import { useResumeStore } from "@/store/useResumeStore";
 import {
   useWebDavStore,
   type WebDavSafeError,
@@ -25,7 +24,7 @@ import { WebDavConflictDialog } from "./WebDavConflictDialog";
 
 type ControllerApi = Pick<
   WebDavSyncController,
-  "testConnection" | "syncNow" | "dismissConflict" | "resolveConflict"
+  "testConnection" | "syncNow" | "resolveConflict"
 >;
 
 export interface WebDavSectionProps {
@@ -68,20 +67,17 @@ export const WebDavSection = ({
   const t = useTranslations("dashboard.settings.webdav");
   const locale = useLocale();
   const settings = useWebDavStore((state) => state.settings);
-  const { isSyncing, status, error, warning, conflict, setSettings, clearCredentials } =
-    useWebDavStore((state) => state);
-  const lastSyncedAt = useResumeStore((state) => state.webDavBaseline?.syncedAt ?? null);
+  const {
+    isSyncing, status, error, warning, conflicts, syncedResumeCount, lastSyncedAt,
+    setSettings, clearCredentials,
+  } = useWebDavStore((state) => state);
   const [draft, setDraft] = useState(settings);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const clearCancelRef = useRef<HTMLButtonElement>(null);
   const clearTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const [dismissedConflict, setDismissedConflict] = useState<typeof conflict>(null);
 
   useEffect(() => setDraft(settings), [settings]);
-  useEffect(() => {
-    if (conflict !== dismissedConflict) setDismissedConflict(null);
-  }, [conflict, dismissedConflict]);
 
   const updateDraft = (field: keyof WebDavSettings, value: string | boolean) => {
     setDraft((current) => ({ ...current, [field]: value }));
@@ -108,10 +104,13 @@ export const WebDavSection = ({
     }
   };
 
-  const resolve = async (choice: "local" | "cloud") => {
-    setPendingAction(`resolve:${choice}`);
+  const resolve = async (
+    resumeId: string,
+    resolution: "keep-local" | "use-cloud",
+  ) => {
+    setPendingAction(`resolve:${resumeId}`);
     try {
-      await controllerProvider()?.resolveConflict(choice);
+      await controllerProvider()?.resolveConflict(resumeId, resolution);
     } catch {
       // The controller has already reduced failures to safe store state.
     } finally {
@@ -193,9 +192,18 @@ export const WebDavSection = ({
             </div>
           </div>
 
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            {lastSyncedAt ? t("lastSyncedAt", { time: new Date(lastSyncedAt).toLocaleString(locale) }) : t("neverSynced")}
-          </p>
+          <div className="space-y-1 text-sm text-gray-600 dark:text-gray-300">
+            <p>{t("perResumeJsonDescription")}</p>
+            <p>{t("credentialsLocalDescription")}</p>
+            <p>{t("clearKeepsFilesDescription")}</p>
+          </div>
+
+          <div className="space-y-1 text-sm text-gray-600 dark:text-gray-300">
+            <p>{t("syncedResumeCount", { count: syncedResumeCount })}</p>
+            <p>
+              {lastSyncedAt ? t("lastSyncedAt", { time: new Date(lastSyncedAt).toLocaleString(locale) }) : t("neverSynced")}
+            </p>
+          </div>
           {statusMessage && (
             <p role={error ? "alert" : "status"} className={error ? "text-sm text-red-600" : "text-sm text-gray-600 dark:text-gray-300"}>
               {statusMessage}
@@ -271,11 +279,10 @@ export const WebDavSection = ({
       </Dialog>
 
       <WebDavConflictDialog
-        conflict={conflict === dismissedConflict ? null : conflict}
+        conflict={conflicts[0] ?? null}
         isBusy={busy}
-        onDismiss={() => { controllerProvider()?.dismissConflict(); setDismissedConflict(conflict); }}
-        onUseLocal={() => resolve("local")}
-        onUseCloud={() => resolve("cloud")}
+        onKeepLocal={(resumeId) => resolve(resumeId, "keep-local")}
+        onUseCloud={(resumeId) => resolve(resumeId, "use-cloud")}
       />
     </>
   );

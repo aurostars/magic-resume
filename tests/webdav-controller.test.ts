@@ -838,6 +838,21 @@ test("configured controller downloads immutable objects through real stores with
     assert.equal(useResumeStore.getState()._isApplyingSyncSnapshot, false);
     assert.equal(useResumeStore.getState().webDavBaseline?.manifestHash, manifest.manifestHash);
     assert.equal(requests.some((request) => request.includes(manifest.entries.remote.objectPath)), true);
+    assert.equal(useWebDavStore.getState().syncedResumeCount, 2);
+    const appliedAt = useWebDavStore.getState().lastSyncedAt;
+    assert.ok(appliedAt);
+
+    await controller.syncNow("manual");
+    assert.equal(useWebDavStore.getState().syncedResumeCount, 0);
+    assert.ok(useWebDavStore.getState().lastSyncedAt);
+    assert.ok(useWebDavStore.getState().lastSyncedAt! >= appliedAt);
+    assert.doesNotMatch(
+      JSON.stringify({
+        syncedResumeCount: useWebDavStore.getState().syncedResumeCount,
+        lastSyncedAt: useWebDavStore.getState().lastSyncedAt,
+      }),
+      /secret|dongxing|dav\.example|remote-device/,
+    );
     cleanup();
   } finally {
     globalThis.fetch = originalFetch;
@@ -1185,4 +1200,161 @@ test("local stabilization deferral stays dirty without conflict, UNKNOWN error, 
   s.controller.notifyOnline();
   await s.controller.whenIdle();
   assert.equal(s.calls(), 2, "dirty deferral remains retryable");
+});
+
+
+test("resolving one resume keeps unrelated conflicts visible and pauses dirty follow-up", async () => {
+  const productResume = makeIntegratedResume("full-id", "产品经理简历");
+  const designResume = makeIntegratedResume("design-id", "设计师简历");
+  const conflicts = [
+    {
+      resumeId: productResume.id,
+      title: productResume.title,
+      kind: "both-modified" as const,
+      localUpdatedAt: "2026-09-12T08:00:00.000Z",
+      remoteUpdatedAt: "2026-09-12T09:00:00.000Z",
+      local: productResume,
+      remoteEntry: {
+        objectPath: `objects/full-id/${"a".repeat(64)}.json`,
+        mirrorPath: "resumes/product.json",
+        contentHash: "a".repeat(64),
+        updatedAt: "2026-09-12T09:00:00.000Z",
+        deleted: false,
+      },
+    },
+    {
+      resumeId: designResume.id,
+      title: designResume.title,
+      kind: "delete-vs-modify" as const,
+      localUpdatedAt: designResume.updatedAt,
+      remoteUpdatedAt: null,
+      local: designResume,
+      remoteEntry: null,
+    },
+  ];
+  const manifest = {
+    schemaVersion: 2 as const,
+    revision: 7,
+    parentRevision: 6,
+    updatedAt: "2026-09-12T09:00:00.000Z",
+    deviceId: "cloud-device",
+    activeResumeId: productResume.id,
+    entries: {},
+    manifestHash: "b".repeat(64),
+  };
+  const inspection = {
+    decision: "conflict" as const,
+    localData: { resumes: [productResume, designResume], activeResumeId: productResume.id },
+    localToken: "token",
+    localHashes: {},
+    manifest,
+    persistedManifest: manifest,
+    remoteEtag: '"manifest-7"',
+    plan: {
+      uploads: [], downloads: [], trashMoves: [], remoteDeletions: [],
+      conflicts, nextActiveResumeId: productResume.id,
+    },
+    conflicts,
+    warnings: [],
+    discoveredRemoteFiles: false,
+  };
+  let visibleConflicts: typeof conflicts = [];
+  const decisions: unknown[] = [];
+  let executeCalls = 0;
+  const resolution = deferred<SyncExecuteResult>();
+  const controller = new WebDavSyncController({
+    coordinator: {
+      inspect: async () => inspection,
+      execute: async (decisionOrSignal?: unknown) => {
+        executeCalls += 1;
+        if (decisionOrSignal instanceof AbortSignal || decisionOrSignal === undefined) {
+          return executeCalls === 1 ? inspection : completed;
+        }
+        decisions.push(decisionOrSignal);
+        return resolution.promise;
+      },
+    },
+    client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
+    remoteDirectory: "/sync/",
+    isApplyingRemote: () => false,
+    createConflict: () => conflict,
+    state: {
+      isConfigured: () => true,
+      isHydrated: () => true,
+      isAutoSyncEnabled: () => true,
+      isOnline: () => true,
+      isVisible: () => true,
+      hasConflict: () => visibleConflicts.length > 0,
+      begin: () => {},
+      complete: () => {},
+      defer: () => {},
+      fail: () => {},
+      setConflict: () => {},
+      clearConflict: () => { visibleConflicts = []; },
+      setConflicts: (next: typeof conflicts) => { visibleConflicts = next; },
+    } as SyncControllerState,
+  } as any);
+
+  await controller.syncNow("manual");
+  assert.deepEqual(visibleConflicts.map((item) => item.resumeId), ["full-id", "design-id"]);
+
+  const resolving = controller.resolveConflict("full-id", "keep-local");
+  controller.notifyLocalChange();
+  controller.notifyLocalChange();
+  resolution.resolve({ ...inspection, conflicts: [conflicts[1]], plan: { ...inspection.plan, conflicts: [conflicts[1]] } });
+  await resolving;
+  await controller.whenIdle();
+
+  assert.deepEqual(decisions, [{
+    resumeId: "full-id",
+    resolution: "keep-local",
+    seenRemoteEtag: '"manifest-7"',
+    seenManifestRevision: 7,
+  }]);
+  assert.deepEqual(visibleConflicts.map((item) => item.resumeId), ["design-id"]);
+  assert.equal(executeCalls, 2, "a remaining conflict must keep automatic follow-up paused");
+});
+
+test("successful applied and no-op syncs publish only count and completion time state", async () => {
+  const completions: Array<{ warning: unknown; syncedCount: unknown }> = [];
+  let call = 0;
+  const controller = new WebDavSyncController({
+    coordinator: {
+      inspect: async () => conflictResult as any,
+      execute: async () => {
+        call += 1;
+        return call === 1
+          ? { status: "downloaded", warning: null, syncedCount: 3 } as const
+          : { status: "unchanged", warning: null, syncedCount: 0 } as const;
+      },
+    },
+    client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
+    remoteDirectory: "/sync/?token=private",
+    isApplyingRemote: () => false,
+    createConflict: () => conflict,
+    state: {
+      isConfigured: () => true,
+      isHydrated: () => true,
+      isAutoSyncEnabled: () => true,
+      isOnline: () => true,
+      isVisible: () => true,
+      hasConflict: () => false,
+      begin: () => {},
+      complete: (warning: unknown, syncedCount?: number) => { completions.push({ warning, syncedCount }); },
+      defer: () => {},
+      fail: () => {},
+      setConflict: () => {},
+      clearConflict: () => {},
+      setConflicts: () => {},
+    } as SyncControllerState,
+  } as any);
+
+  await controller.syncNow("manual");
+  await controller.syncNow("manual");
+
+  assert.deepEqual(completions, [
+    { warning: null, syncedCount: 3 },
+    { warning: null, syncedCount: 0 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(completions), /private|token|resume/i);
 });
