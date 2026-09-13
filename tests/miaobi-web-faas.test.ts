@@ -21,10 +21,12 @@ test("GET serves the finalized HTML with no-store security headers and a narrow 
   assert.equal(response.headers.get("Cache-Control"), "no-store");
   assert.equal(response.headers.get("Content-Type"), "text/html; charset=utf-8");
   assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
+  assert.equal(response.headers.get("X-Magic-Resume-Faas"), "magic-resume-web");
   const csp = response.headers.get("Content-Security-Policy") ?? "";
   assert.match(csp, /default-src 'none'/);
   assert.match(csp, /script-src 'unsafe-inline' https:\/\/tos\.example\.test\/magic-resume\/releases\/release\//);
-  assert.match(csp, /connect-src https:\/\/api\.example\.test\/faas/);
+  assert.match(csp, /connect-src https:(?:;|$)/);
+  assert.doesNotMatch(csp, /connect-src[^;]*api\.example\.test/);
   assert.doesNotMatch(csp, /workers\.dev|\*/);
 });
 

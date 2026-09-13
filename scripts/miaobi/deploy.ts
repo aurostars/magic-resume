@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import config from "../../miaobi.config.json" with { type: "json" };
 import { injectMiaobiRuntime } from "../../miaobi/runtime-config";
 import { MIAOBI_ASSET_BASE_PLACEHOLDER } from "../../vite.miaobi.config";
 import { buildWebFaas } from "./build-web-faas";
-import { createMagicBuilderRunner, MagicBuilderError, runMagicBuilderJson } from "./magic-builder";
+import { createMagicBuilderRunner, MagicBuilderError, runMagicBuilderObject } from "./magic-builder";
 import { createReleaseId, publishAssets } from "./publish-assets";
 import type { MagicBuilderRunner } from "./types";
 
@@ -42,25 +43,159 @@ function codedError(code: string): Error & { code: string } {
   return error;
 }
 
-function validatePublishedUrl(value: string): string {
+const PLATFORM_ORIGIN = "https://magic.solutionsuite.cn";
+const RESOURCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function validateResourceId(value: unknown): string {
+  if (typeof value !== "string" || !RESOURCE_ID_PATTERN.test(value)) {
+    throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+  }
+  return value;
+}
+
+function validatePublishedUrl(value: string, expectedPath: string): string {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error();
+    if (
+      url.origin !== PLATFORM_ORIGIN || url.username || url.password ||
+      url.pathname !== expectedPath || url.search || url.hash
+    ) {
+      throw new Error();
+    }
     return url.toString();
   } catch {
     throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
   }
 }
 
-async function priorState(statePath: string): Promise<MiaobiDeploymentState | undefined> {
+type TrustedState = {
+  directory: string;
+  path: string;
+  device: number;
+  inode: number;
+};
+
+async function rejectSymlinkAncestors(path: string): Promise<void> {
+  const absolutePath = resolve(path);
+  const root = parse(absolutePath).root;
+  let current = root;
+  for (const component of relative(root, absolutePath).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) throw codedError("MIAOBI_STATE_FAILED");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      break;
+    }
+  }
+}
+
+async function trustedState(statePath: string): Promise<TrustedState> {
+  const directory = dirname(statePath);
+  await rejectSymlinkAncestors(directory);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(directory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+  await chmod(directory, 0o700);
+  return { directory, path: statePath, device: metadata.dev, inode: metadata.ino };
+}
+
+async function assertStateIdentity(state: TrustedState): Promise<void> {
   try {
-    const value = JSON.parse(await readFile(statePath, "utf8")) as MiaobiDeploymentState;
-    return value.schemaVersion === 1 ? value : undefined;
+    const metadata = await lstat(state.directory);
+    if (
+      metadata.isSymbolicLink() || !metadata.isDirectory() ||
+      metadata.dev !== state.device || metadata.ino !== state.inode
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+}
+
+function parsePriorState(value: unknown): MiaobiDeploymentState {
+  const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
+  const expectedKeys = [
+    "apiFaasId", "apiFaasUrl", "deployedAt", "pageId", "releaseId",
+    "schemaVersion", "webFaasId", "webFaasUrl",
+  ].sort();
+  if (
+    typeof value !== "object" || value === null ||
+    JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
+    (value as { schemaVersion?: unknown }).schemaVersion !== 1 ||
+    (value as { pageId?: unknown }).pageId !== deployConfig.pageId ||
+    typeof (value as { releaseId?: unknown }).releaseId !== "string" ||
+    !/^[0-9a-f]{12}-\d{14}$/.test((value as { releaseId: string }).releaseId) ||
+    typeof (value as { deployedAt?: unknown }).deployedAt !== "string"
+  ) {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+  const state = value as MiaobiDeploymentState;
+  if (new Date(state.deployedAt).toISOString() !== state.deployedAt) {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+  try {
+    validatePublishedUrl(state.apiFaasUrl, `/api/faas/${validateResourceId(state.apiFaasId)}`);
+    validatePublishedUrl(state.webFaasUrl, `/api/faas/${validateResourceId(state.webFaasId)}`);
+  } catch {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+  return state;
+}
+
+async function priorState(state: TrustedState): Promise<MiaobiDeploymentState | undefined> {
+  await assertStateIdentity(state);
+  let handle;
+  try {
+    handle = await open(state.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    if (error instanceof SyntaxError) throw codedError("MIAOBI_STATE_FAILED");
-    throw error;
+    throw codedError("MIAOBI_STATE_FAILED");
   }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw codedError("MIAOBI_STATE_FAILED");
+    return parsePriorState(JSON.parse(await handle.readFile("utf8")));
+  } catch {
+    throw codedError("MIAOBI_STATE_FAILED");
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseFaasPublishResponse(value: unknown): { id: string; url: string } {
+  if (
+    typeof value !== "object" || value === null ||
+    typeof (value as { id?: unknown }).id !== "string" ||
+    typeof (value as { faas_url?: unknown }).faas_url !== "string"
+  ) {
+    throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+  }
+  const id = validateResourceId((value as { id?: unknown }).id);
+  return {
+    id,
+    url: validatePublishedUrl(
+      (value as { faas_url: string }).faas_url,
+      `/api/faas/${id}`,
+    ),
+  };
+}
+
+function validatePagePublishResponse(value: unknown): void {
+  if (
+    typeof value !== "object" || value === null ||
+    (value as { id?: unknown }).id !== deployConfig.pageId ||
+    typeof (value as { html_box_url?: unknown }).html_box_url !== "string"
+  ) {
+    throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+  }
+  validatePublishedUrl(
+    (value as { html_box_url: string }).html_box_url,
+    `/html-box/${deployConfig.pageId}`,
+  );
 }
 
 async function publishFaas(
@@ -69,11 +204,12 @@ async function publishFaas(
   name: string,
   existingId?: string,
 ): Promise<{ id: string; url: string }> {
-  const selector = existingId ? ["--id", existingId] : ["--name", name];
-  const result = await runMagicBuilderJson(runner, [
+  const selector = existingId
+    ? ["--name", name, "--id", existingId]
+    : ["--name", name];
+  return parseFaasPublishResponse(await runMagicBuilderObject(runner, [
     "faas", "publish", bundlePath, ...selector, "--format", "json", "--quiet",
-  ]);
-  return { id: result.id, url: validatePublishedUrl(result.url) };
+  ]));
 }
 
 async function readBodyPrefix(response: Response, limit = 4096): Promise<string> {
@@ -93,47 +229,121 @@ async function readBodyPrefix(response: Response, limit = 4096): Promise<string>
   }
 }
 
-async function checkHealth(url: string, kind: "api" | "web"): Promise<void> {
-  const target = kind === "api"
-    ? new URL("?__path=%2F__miaobi_health__", url).toString()
-    : url;
-  let response: Response;
+type HealthCheck = {
+  url: string;
+  kind: "api" | "web";
+  apiFaasUrl: string;
+  assetBaseUrl: string;
+  fetch: typeof globalThis.fetch;
+  timeoutMs: number;
+};
+
+type WebRuntimeMarker = {
+  platform?: unknown;
+  apiFunctionUrl?: unknown;
+  assetBaseUrl?: unknown;
+};
+
+function webRuntimeFrom(body: string): WebRuntimeMarker | undefined {
+  const match = body.match(/window\.__MAGIC_RESUME_RUNTIME__=(\{[^<]+\})<\/script>/);
+  if (!match) return undefined;
   try {
-    response = await fetch(target, { method: "GET", redirect: "error" });
+    return JSON.parse(match[1]) as WebRuntimeMarker;
   } catch {
-    throw codedError("MIAOBI_HEALTH_FAILED");
+    return undefined;
   }
-  const body = await readBodyPrefix(response);
-  const healthy = kind === "api"
-    ? response.status === 404 && body.includes('"code":"notFound"')
-    : response.status === 200 && body.includes("window.__MAGIC_RESUME_RUNTIME__");
-  if (!healthy) throw codedError("MIAOBI_HEALTH_FAILED");
 }
 
-function pageHtml(webFaasUrl: string): string {
-  const safeUrl = validatePublishedUrl(webFaasUrl);
+async function checkHealth(check: HealthCheck): Promise<void> {
+  const target = check.kind === "api"
+    ? new URL("?__path=%2F__miaobi_health__", check.url).toString()
+    : check.url;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), check.timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await check.fetch(target, {
+      method: "GET",
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const body = await readBodyPrefix(response);
+    if (check.kind === "api") {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        throw codedError("MIAOBI_HEALTH_FAILED");
+      }
+      if (
+        response.status !== 404 ||
+        response.headers.get("X-Magic-Resume-Faas") !== "magic-resume-api" ||
+        typeof payload !== "object" || payload === null ||
+        (payload as { code?: unknown }).code !== "notFound"
+      ) {
+        throw codedError("MIAOBI_HEALTH_FAILED");
+      }
+      return;
+    }
+    const runtime = webRuntimeFrom(body);
+    if (
+      response.status !== 200 ||
+      response.headers.get("X-Magic-Resume-Faas") !== "magic-resume-web" ||
+      runtime?.platform !== "miaobi" ||
+      runtime.apiFunctionUrl !== check.apiFaasUrl ||
+      runtime.assetBaseUrl !== check.assetBaseUrl
+    ) {
+      throw codedError("MIAOBI_HEALTH_FAILED");
+    }
+  } catch {
+    throw codedError("MIAOBI_HEALTH_FAILED");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function pageHtml(webFaasUrl: string, webFaasId: string): string {
+  const safeUrl = validatePublishedUrl(webFaasUrl, `/api/faas/${validateResourceId(webFaasId)}`);
   const scriptUrl = JSON.stringify(safeUrl).replace(/</g, "\\u003c");
   const linkUrl = safeUrl.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   return `<!doctype html><meta charset="utf-8"><script>location.replace(${scriptUrl})</script><a href="${linkUrl}">打开魔方简历</a>`;
 }
 
-async function stageState(statePath: string, state: MiaobiDeploymentState): Promise<string> {
-  await mkdir(dirname(statePath), { recursive: true });
-  const temporaryPath = `${statePath}.tmp-${randomUUID()}`;
+async function stageState(state: TrustedState, value: MiaobiDeploymentState): Promise<string> {
+  await assertStateIdentity(state);
+  const temporaryPath = `${state.path}.tmp-${randomUUID()}`;
+  let handle;
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+    handle = await open(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
     return temporaryPath;
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
     throw error;
+  } finally {
+    await handle?.close();
   }
 }
 
-async function commitState(temporaryPath: string, statePath: string): Promise<void> {
+async function commitState(
+  temporaryPath: string,
+  state: TrustedState,
+): Promise<void> {
   try {
-    await rename(temporaryPath, statePath);
+    await assertStateIdentity(state);
+    const metadata = await lstat(temporaryPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.dev !== state.device) {
+      throw codedError("MIAOBI_STATE_FAILED");
+    }
+    await rename(temporaryPath, state.path);
+  } catch {
+    throw codedError("MIAOBI_STATE_FAILED");
   } finally {
-    await rm(temporaryPath, { force: true });
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -141,10 +351,13 @@ export async function deployMiaobi(options: {
   runner: MagicBuilderRunner;
   gitCommit: string;
   now: Date;
+  fetch?: typeof globalThis.fetch;
+  healthTimeoutMs?: number;
 }): Promise<MiaobiDeploymentState> {
   try {
     const { outputDirectory, statePath } = deploymentPaths();
-    const previous = await priorState(statePath);
+    const stateStorage = await trustedState(statePath);
+    const previous = await priorState(stateStorage);
     const releaseId = createReleaseId(options.gitCommit, options.now);
     const manifest = await publishAssets({
       directory: resolve(outputDirectory, "client/assets"),
@@ -173,11 +386,17 @@ export async function deployMiaobi(options: {
       previous?.webFaasId,
     );
 
-    await checkHealth(api.url, "api");
-    await checkHealth(web.url, "web");
+    const health = {
+      apiFaasUrl: api.url,
+      assetBaseUrl: manifest.baseUrl,
+      fetch: options.fetch ?? globalThis.fetch,
+      timeoutMs: options.healthTimeoutMs ?? 10_000,
+    };
+    await checkHealth({ ...health, url: api.url, kind: "api" });
+    await checkHealth({ ...health, url: web.url, kind: "web" });
 
     const pagePath = resolve(outputDirectory, "page.html");
-    await writeFile(pagePath, pageHtml(web.url), { encoding: "utf8", mode: 0o600 });
+    await writeFile(pagePath, pageHtml(web.url, web.id), { encoding: "utf8", mode: 0o600 });
     const state: MiaobiDeploymentState = {
       schemaVersion: 1,
       releaseId,
@@ -188,16 +407,16 @@ export async function deployMiaobi(options: {
       pageId: deployConfig.pageId,
       deployedAt: options.now.toISOString(),
     };
-    const stagedStatePath = await stageState(statePath, state);
+    const stagedStatePath = await stageState(stateStorage, state);
     try {
-      await runMagicBuilderJson(options.runner, [
+      validatePagePublishResponse(await runMagicBuilderObject(options.runner, [
         "page", "publish", pagePath,
         "--title", deployConfig.title,
         "--id", deployConfig.pageId,
         "--format", "json",
         "--quiet",
-      ]);
-      await commitState(stagedStatePath, statePath);
+      ]));
+      await commitState(stagedStatePath, stateStorage);
     } finally {
       await rm(stagedStatePath, { force: true }).catch(() => undefined);
     }

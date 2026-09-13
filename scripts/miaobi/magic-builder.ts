@@ -129,10 +129,10 @@ function parseSingleJsonObject(output: string): unknown {
   throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
 }
 
-export async function runMagicBuilderJson(
+export async function runMagicBuilderObject(
   runner: MagicBuilderRunner,
   args: string[],
-): Promise<{ id: string; url: string }> {
+): Promise<unknown> {
   let result: { stdout: string; stderr: string };
   try {
     result = await runner.run(args);
@@ -140,8 +140,14 @@ export async function runMagicBuilderJson(
     if (error instanceof MagicBuilderError) throw error;
     throw new MagicBuilderError("MIAOBI_CLI_FAILED");
   }
+  return parseSingleJsonObject(result.stdout);
+}
 
-  const parsed = parseSingleJsonObject(result.stdout);
+export async function runMagicBuilderJson(
+  runner: MagicBuilderRunner,
+  args: string[],
+): Promise<{ id: string; url: string }> {
+  const parsed = await runMagicBuilderObject(runner, args);
   if (
     typeof parsed !== "object" ||
     parsed === null ||

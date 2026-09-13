@@ -12,6 +12,7 @@ test("a POST FaaS request reaches the selected API route", async () => {
   );
 
   assert.equal(response.status, 400);
+  assert.equal(response.headers.get("X-Magic-Resume-Faas"), "magic-resume-api");
   assert.deepEqual(await response.json(), {
     code: "invalidProvider",
     error: {

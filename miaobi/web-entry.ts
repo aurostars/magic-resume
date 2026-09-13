@@ -16,14 +16,13 @@ function runtimeConfigFrom(html: string): RuntimeConfig {
 function cspFor(html: string): string {
   const config = runtimeConfigFrom(html);
   const assetSource = new URL(config.assetBaseUrl).toString();
-  const apiSource = new URL(config.apiFunctionUrl).toString();
   return [
     "default-src 'none'",
     `script-src 'unsafe-inline' ${assetSource}`,
     `style-src 'unsafe-inline' ${assetSource}`,
     `img-src data: blob: ${assetSource}`,
     `font-src data: ${assetSource}`,
-    `connect-src ${apiSource}`,
+    "connect-src https:",
     "worker-src blob:",
     "base-uri 'none'",
     "form-action 'none'",
@@ -37,6 +36,7 @@ export function createWebFaasHandler(html: string) {
     "Content-Security-Policy": cspFor(html),
     "Content-Type": "text/html; charset=utf-8",
     "X-Content-Type-Options": "nosniff",
+    "X-Magic-Resume-Faas": "magic-resume-web",
   };
 
   return async (request: Request): Promise<Response> => {
