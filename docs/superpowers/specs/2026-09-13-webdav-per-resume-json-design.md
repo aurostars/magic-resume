@@ -161,10 +161,11 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 1. 在任何 repository 调用前校验 `expectedLocalToken`；不匹配则零网络操作并 deferred/replan。
 2. 创建必要目录（包括 `objects/`）。
 3. 创建并回读验证所有新的不可变 `objects/<id>/<hash>.json`；既有对象只校验、永不覆盖。
-4. 下载从 `objectPath` 读取并验证；发布前再次校验本地 token。
-5. 使用读取清单时获得的 ETag CAS 发布 `manifest.json`，这是远端事务提交点。
-6. 仅在清单成功后尽力更新 `resumes/` / `trash/` 可读镜像。
-7. 原子提交本地 Resume Store 与同步基线。
+4. 下载从 `objectPath` 读取并验证；构造最终清单后，在发布前逐一回读并严格校验其全部 live `objectPath` 的 JSON、完整 ID 与内容哈希。缺失对象触发 `remote-changed` 重规划，损坏或不匹配对象 fail closed。
+5. 在发布窗口订阅本地 snapshot token，并将本地变化与外部取消合并到专用 AbortController；本地变化会中止清单请求，发布返回后还必须再次核验 token。
+6. 使用读取清单时获得的 ETag CAS 发布 `manifest.json`，这是远端事务提交点。若服务端忽略 abort 仍提交，在确认最新清单仍是本轮版本后，用其新 ETag CAS 恢复旧清单；首次同步则条件删除本轮清单。无法确认或恢复时安全 deferred，不覆盖未知远端状态。
+7. 仅在清单成功且发布窗口核验稳定后，尽力更新 `resumes/` / `trash/` 可读镜像；所有对象、移动及镜像修复操作都传播调用方 AbortSignal。
+8. 原子提交本地 Resume Store 与同步基线。
 
 清单 CAS 失败时不执行镜像操作；本轮新对象只是安全孤儿，旧清单仍完整指向旧对象。镜像失败不回滚清单，因为后续同步可从不可变对象修复镜像。
 
@@ -203,7 +204,8 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 - 不在当前清单中的文件先进行严格 `ResumeData` 校验。
 - 文件内 `id` 与现有条目不重复时，作为新简历候选导入。
 - 文件内 `id` 已存在但路径不同，按同一简历的远端修改处理，不能创建重复简历。
-- 无效 JSON、无效 `ResumeData`、路径异常或 ID 冲突文件被忽略，并显示不含文件内容的安全提示。
+- 同一完整 ID 的多个未索引文件若内容哈希相同，则按路径排序确定性去重；若哈希不同，则报告安全的 ambiguity warning 且本轮不导入该 ID，禁止按枚举顺序 last-write-wins。
+- 无效 JSON、无效 `ResumeData`、路径异常或 ID 冲突文件被忽略，并显示不含文件内容或路径的安全提示。
 - `trash/` 不参与自动导入，避免恢复已删除简历。
 
 ## 重命名
@@ -235,7 +237,7 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 - 两侧同时修改同一简历且哈希不同：产生该简历的冲突。
 - 两侧结果哈希相同：视为无冲突。
 - 每个冲突携带 `localUpdatedAt: string | null` 与 `remoteUpdatedAt: string | null`。本地值来自 `ResumeData.updatedAt`；远端 live/tombstone 值来自 entry `updatedAt`；远端 hard deletion（`remoteEntry: null`）使用 `manifest.updatedAt`。
-- 冲突决策携带用户看到的 manifest ETag/revision；应用前必须重读校验，陈旧对话框只能 deferred/replan。
+- 冲突决策必须同时携带用户看到的 `seenRemoteEtag`（字段必传，可为 `null`）与 `seenManifestRevision`；应用前必须重读并同时校验。缺字段、ETag 不同或 revision 不同（包括 ETag 为 `null` 时 revision 变化）只能 deferred/replan。
 
 冲突对话框展示具体简历标题，并提供：
 
@@ -261,7 +263,7 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 - 内容哈希不一致：不写入本地，提示远端文件被修改或损坏。
 - Manifest 校验失败：停止同步，不覆盖远端。
 - ETag/CAS 冲突：重新规划，达到有限重试次数后返回可重试错误。
-- 垃圾箱移动失败：保留当前文件与删除意图，下次重试。
+- WebDAV `DELETE` 的非 2xx 响应必须作为安全错误返回；仅 repository 临时文件清理可显式捕获并 best-effort。首次同步发布回滚使用带 `If-Match` 的条件删除。
 - 远端缺少可靠条件请求支持：延续现有 fail-closed 策略，不执行可能覆盖并发数据的写入。
 - 错误状态只保存安全 `code/status`；不得包含凭据、完整 URL 查询、响应正文或简历内容。
 - WebDAV 必须使用 HTTPS，localhost 开发例外沿用现有规则。

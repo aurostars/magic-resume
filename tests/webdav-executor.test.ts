@@ -29,37 +29,53 @@ class FakeRepository {
   manifestEtag: string | null = null;
   failPublish = false;
   failMirror = false;
+  ignorePublishAbort = false;
   onWrite: ((path: string) => void) | null = null;
+  onPublish: ((signal?: AbortSignal) => void) | null = null;
+  seenSignals: Array<AbortSignal | undefined> = [];
 
-  async ensureLayout() { this.calls.push("ensure-layout"); }
-  async ensureObjectDirectory(id: string) { this.calls.push(`ensure-object:${id}`); }
-  async readResume(path: string) {
-    this.calls.push(`read:${path}`);
+  async ensureLayout(signal?: AbortSignal) { this.calls.push("ensure-layout"); this.seenSignals.push(signal); }
+  async ensureObjectDirectory(id: string, signal?: AbortSignal) { this.calls.push(`ensure-object:${id}`); this.seenSignals.push(signal); }
+  async readManifest(signal?: AbortSignal) {
+    this.calls.push("read-manifest"); this.seenSignals.push(signal);
+    return this.manifestText === null ? null : { path: "manifest.json", text: this.manifestText, etag: this.manifestEtag };
+  }
+  async readResume(path: string, signal?: AbortSignal) {
+    this.calls.push(`read:${path}`); this.seenSignals.push(signal);
     const file = this.files.get(path);
     return file ? { path, ...file } : null;
   }
-  async writeResumeAtomic(path: string, text: string) {
-    this.calls.push(`write:${path}`);
+  async writeResumeAtomic(path: string, text: string, _etag?: string | null, signal?: AbortSignal) {
+    this.calls.push(`write:${path}`); this.seenSignals.push(signal);
     if (this.failMirror && (path.startsWith("resumes/") || path.startsWith("trash/"))) {
       throw new WebDavError("SERVER", 503);
     }
     this.files.set(path, { text, etag: `etag:${path}` });
     this.onWrite?.(path);
   }
-  async moveResumeAtomic(from: string, to: string) {
-    this.calls.push(`move:${from}->${to}`);
+  async moveResumeAtomic(from: string, to: string, _etag?: string | null, signal?: AbortSignal) {
+    this.calls.push(`move:${from}->${to}`); this.seenSignals.push(signal);
     if (this.failMirror) throw new WebDavError("SERVER", 503);
     const file = this.files.get(from);
     if (file) { this.files.set(to, file); this.files.delete(from); }
   }
-  async publishManifest(text: string, expectedEtag: string | null) {
-    this.calls.push(`publish:${expectedEtag}`);
+  async publishManifest(text: string, expectedEtag: string | null, signal?: AbortSignal) {
+    this.calls.push(`publish:${expectedEtag}`); this.seenSignals.push(signal);
+    this.onPublish?.(signal);
+    if (signal?.aborted && !this.ignorePublishAbort) throw signal.reason;
     if (this.failPublish) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
     this.manifestText = text;
+    this.manifestEtag = '"published"';
+  }
+  async deleteManifest(expectedEtag: string, signal?: AbortSignal) {
+    this.calls.push(`delete-manifest:${expectedEtag}`); this.seenSignals.push(signal);
+    if (this.manifestEtag !== expectedEtag) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
+    this.manifestText = null;
+    this.manifestEtag = null;
   }
 }
 
-const entryFor = async (item: ResumeData, mirrorPath = `resumes/${item.id}.json`) => {
+const entryFor = async (item: ResumeData, mirrorPath = `resumes/${item.title}--${item.id.slice(0, 6).toLowerCase()}.json`) => {
   const contentHash = await calculateResumeHash(item);
   return {
     objectPath: objectPath(item.id, contentHash), mirrorPath,
@@ -77,18 +93,27 @@ const setup = (options: { local?: ResumeSyncData; remote?: ManifestV2 | null; pl
   repository.manifestEtag = remote ? '"manifest-etag"' : null;
   const commits: Array<{ data: ResumeSyncData; baseline: MultiFileBaseline }> = [];
   let localToken = "stable-token";
+  const listeners = new Set<() => void>();
   return {
     repository,
     commits,
-    setLocalToken: (value: string) => { localToken = value; },
+    setLocalToken: (value: string) => {
+      localToken = value;
+      for (const listener of [...listeners]) listener();
+    },
     input: {
       repository,
       plan: options.plan ?? emptyPlan(),
       localData: structuredClone(options.local ?? data()),
       remoteManifest: remote,
+      previousManifest: remote,
       remoteManifestEtag: repository.manifestEtag,
       expectedLocalToken: "stable-token",
       getLocalToken: () => localToken,
+      subscribeLocalToken: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
       deviceId: "device-a",
       now: () => NOW,
       commit: (next: ResumeSyncData, baseline: MultiFileBaseline) => {
@@ -128,7 +153,7 @@ test("uploads and verifies immutable objects, publishes manifest, then writes re
   assert.deepEqual(state.repository.calls, [
     "ensure-layout", `ensure-object:${item.id}`,
     `read:${objectPath(item.id, hash)}`, `write:${objectPath(item.id, hash)}`,
-    `read:${objectPath(item.id, hash)}`, "publish:null",
+    `read:${objectPath(item.id, hash)}`, `read:${objectPath(item.id, hash)}`, "publish:null",
     "read:resumes/Readable--resume.json", "write:resumes/Readable--resume.json", "read:resumes/Readable--resume.json",
   ]);
   const published = JSON.parse(state.repository.manifestText!) as ManifestV2;
@@ -240,4 +265,103 @@ test("local change after immutable object write prevents manifest publication an
   assert.equal(state.repository.files.has(objectPath(item.id, hash)), true);
   assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
   assert.equal(state.repository.calls.some((call) => call.startsWith("write:resumes/")), false);
+});
+
+
+test("validates every live immutable object before publishing the final manifest", async () => {
+  const existing = resume("existing");
+  const existingEntry = await entryFor(existing);
+  const remote = await manifest({ existing: existingEntry }, "existing");
+  const added = resume("added");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: added, mirrorPath: "resumes/Added--added.json", previousMirrorPath: null }];
+  plan.nextActiveResumeId = "existing";
+  const missing = setup({ local: data(existing, added), remote, plan });
+
+  assert.deepEqual(await executeSyncPlan(missing.input), { kind: "deferred", reason: "remote-changed" });
+  assert.equal(missing.repository.calls.some((call) => call.startsWith("publish:")), false);
+
+  const corrupt = setup({ local: data(existing, added), remote, plan });
+  corrupt.repository.files.set(existingEntry.objectPath, { text: "{broken", etag: '"bad"' });
+  await assert.rejects(executeSyncPlan(corrupt.input), (error: unknown) =>
+    error instanceof WebDavError && error.code === "REMOTE_CONTENT_MISMATCH");
+  assert.equal(corrupt.repository.calls.some((call) => call.startsWith("publish:")), false);
+});
+
+test("local change after publication subscription but before request prevents manifest publication", async () => {
+  const item = resume("before-request");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Before--before.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  state.input.subscribeLocalToken = (listener: () => void) => {
+    state.setLocalToken("changed-before-request");
+    listener();
+    return () => undefined;
+  };
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
+  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
+});
+
+test("in-flight local change aborts manifest publication", async () => {
+  const item = resume("in-flight");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/In-flight--in-fli.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  state.repository.onPublish = () => state.setLocalToken("changed-in-flight");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
+  assert.equal(state.repository.manifestText, null);
+  assert.equal(state.repository.calls.includes("read-manifest"), true);
+});
+
+test("server success despite abort is detected and first-sync manifest is conditionally deleted", async () => {
+  const item = resume("ignored-abort");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Ignored--ignore.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  state.repository.ignorePublishAbort = true;
+  state.repository.onPublish = () => state.setLocalToken("changed-but-server-commits");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
+  assert.equal(state.repository.manifestText, null);
+  assert.equal(state.repository.calls.includes('delete-manifest:"published"'), true);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("write:resumes/")), false);
+});
+
+test("server success despite abort restores the old manifest using the new ETag", async () => {
+  const old = resume("same-id", "Old");
+  const oldEntry = await entryFor(old);
+  const remote = await manifest({ [old.id]: oldEntry }, old.id);
+  const changed = resume(old.id, "Changed");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: changed, mirrorPath: "resumes/Changed--same-i.json", previousMirrorPath: oldEntry.mirrorPath }];
+  plan.nextActiveResumeId = old.id;
+  const state = setup({ local: data(changed), remote, plan });
+  seed(state.repository, oldEntry.objectPath, old);
+  const original = state.repository.manifestText;
+  state.repository.ignorePublishAbort = true;
+  let publishes = 0;
+  state.repository.onPublish = () => {
+    if (publishes++ === 0) state.setLocalToken("changed-but-server-commits");
+  };
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
+  assert.equal(state.repository.manifestText, original);
+  assert.equal(state.repository.calls.includes('publish:"published"'), true);
+});
+
+test("executor forwards AbortSignal to object writes, moves, and mirror repair", async () => {
+  const item = resume("signals");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Signals--signal.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  const controller = new AbortController();
+  state.input.signal = controller.signal;
+
+  await executeSyncPlan(state.input);
+
+  assert.equal(state.repository.seenSignals.length > 0, true);
+  assert.equal(state.repository.seenSignals.every((signal) => signal === controller.signal || signal !== undefined), true);
+  assert.equal(state.repository.seenSignals.includes(undefined), false);
 });

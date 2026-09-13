@@ -69,6 +69,7 @@ const conflict: WebDavConflict = {
   cloud: { updatedAt: cloud.updatedAt, deviceId: cloud.deviceId, resumeCount: 0 },
   snapshot: cloud,
   remoteEtag: '"etag-cloud-r2"',
+  manifestRevision: 2,
 };
 const conflictResult = {
   decision: "conflict",
@@ -132,8 +133,8 @@ class FakeClock implements SyncControllerClock {
 const setup = (overrides: {
   inspect?: (signal: AbortSignal) => Promise<SyncInspection>;
   execute?: (signal: AbortSignal) => Promise<SyncExecuteResult>;
-  keepLocal?: (snapshot: CloudSnapshotV1, etag: string | null, signal: AbortSignal) => Promise<SyncExecuteResult>;
-  useCloud?: (snapshot: CloudSnapshotV1, etag: string | null, signal: AbortSignal) => Promise<SyncExecuteResult>;
+  keepLocal?: (snapshot: CloudSnapshotV1, etag: string | null, revision: number, signal: AbortSignal) => Promise<SyncExecuteResult>;
+  useCloud?: (snapshot: CloudSnapshotV1, etag: string | null, revision: number, signal: AbortSignal) => Promise<SyncExecuteResult>;
   options?: (path: string, signal?: AbortSignal) => Promise<void>;
   propfind?: (path: string, signal?: AbortSignal) => Promise<boolean>;
   begin?: () => void;
@@ -426,11 +427,16 @@ test("conflict choices call matching coordinator and clear only after success", 
   const local = deferred<SyncExecuteResult>();
   const cloudChoice = deferred<SyncExecuteResult>();
   const methods: string[] = [];
+  const freshness: Array<[string | null, number]> = [];
   const s = setup({
     auto: false,
     execute: async () => conflictResult,
-    keepLocal: async () => { methods.push("local"); return local.promise; },
-    useCloud: async () => { methods.push("cloud"); return cloudChoice.promise; },
+    keepLocal: async (_snapshot, etag, revision) => {
+      methods.push("local"); freshness.push([etag, revision]); return local.promise;
+    },
+    useCloud: async (_snapshot, etag, revision) => {
+      methods.push("cloud"); freshness.push([etag, revision]); return cloudChoice.promise;
+    },
   });
   await s.controller.syncNow("manual");
   const localRunning = s.controller.resolveConflict("local");
@@ -446,6 +452,7 @@ test("conflict choices call matching coordinator and clear only after success", 
   await cloudRunning;
   assert.equal(s.hasConflict(), false);
   assert.deepEqual(methods, ["local", "cloud"]);
+  assert.deepEqual(freshness, [['"etag-cloud-r2"', 2], ['"etag-cloud-r2"', 2]]);
 });
 
 test("a CAS conflict during cloud resolution remains surfaced", async () => {
@@ -578,7 +585,7 @@ test("cloud resolution owns the sole flight signal and dispose aborts it", async
   let resolutionSignal: AbortSignal | undefined;
   const s = setup({
     execute: async () => conflictResult,
-    useCloud: async (_snapshot, _etag, signal) => {
+    useCloud: async (_snapshot, _etag, _revision, signal) => {
       resolutionSignal = signal;
       return resolution.promise;
     },

@@ -22,15 +22,16 @@ import type {
 export type ConflictDecision = {
   resumeId: string;
   resolution: "keep-local" | "use-cloud";
-  seenRemoteEtag?: string | null;
-  seenManifestRevision?: number;
+  seenRemoteEtag: string | null;
+  seenManifestRevision: number;
 };
 
 export interface CoordinatorDependencies {
   repository: Pick<WebDavResumeRepository,
     "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "listResumeCandidates" |
-    "writeResumeAtomic" | "moveResumeAtomic" | "publishManifest">;
+    "writeResumeAtomic" | "moveResumeAtomic" | "publishManifest" | "deleteManifest">;
   getLocalData: () => ResumeSyncData;
+  subscribeLocalData: (listener: () => void) => () => void;
   getBaseline: () => MultiFileBaseline | null;
   commit: (
     data: ResumeSyncData,
@@ -42,7 +43,7 @@ export interface CoordinatorDependencies {
 }
 
 export interface SyncWarning {
-  code: "INVALID_REMOTE_RESUME";
+  code: "INVALID_REMOTE_RESUME" | "AMBIGUOUS_REMOTE_RESUME";
 }
 
 interface SyncInspectionBase {
@@ -50,6 +51,7 @@ interface SyncInspectionBase {
   localToken: string;
   localHashes: Record<string, string>;
   manifest: ManifestV2 | null;
+  persistedManifest: ManifestV2 | null;
   remoteEtag: string | null;
   plan: SyncPlan;
   conflicts: ResumeSyncConflict[];
@@ -100,7 +102,8 @@ export class WebDavSyncCoordinator {
     const localToken = canonicalizeSyncData(localData);
     const hashes = await localHashes(localData);
     const remoteFile = await this.dependencies.repository.readManifest(signal);
-    let manifest = remoteFile ? await parseManifest(remoteFile.text) : null;
+    const persistedManifest = remoteFile ? await parseManifest(remoteFile.text) : null;
+    let manifest = persistedManifest;
     const warnings: SyncWarning[] = [];
     const manualImports: NonNullable<SyncPlan["manualImports"]> = [];
     let discoveredRemoteFiles = false;
@@ -108,27 +111,44 @@ export class WebDavSyncCoordinator {
     if (manifest) {
       const entries = structuredClone(manifest.entries);
       const indexedPaths = new Set(Object.values(entries).map((entry) => entry.mirrorPath));
-      for (const candidate of await this.dependencies.repository.listResumeCandidates(signal)) {
+      const discovered = new Map<string, Array<{
+        resume: ResumeSyncData["resumes"][number];
+        mirrorPath: string;
+        contentHash: string;
+      }>>();
+      const candidates = await this.dependencies.repository.listResumeCandidates(signal);
+      for (const candidate of [...candidates].sort((a, b) => a.path.localeCompare(b.path))) {
         if (indexedPaths.has(candidate.path)) continue;
         const file = await this.dependencies.repository.readResume(candidate.path, signal);
         if (!file) continue;
         try {
-          const discovered = parseResumeJson(file.text);
-          const contentHash = await calculateResumeHash(discovered);
-          const existing = entries[discovered.id];
-          if (existing?.contentHash === contentHash) continue;
-          entries[discovered.id] = {
-            objectPath: `objects/${discovered.id}/${contentHash}.json`,
-            mirrorPath: candidate.path,
-            contentHash,
-            updatedAt: discovered.updatedAt,
-            deleted: false,
-          };
-          manualImports.push({ resume: discovered, mirrorPath: candidate.path });
-          discoveredRemoteFiles = true;
+          const resume = parseResumeJson(file.text);
+          const contentHash = await calculateResumeHash(resume);
+          const values = discovered.get(resume.id) ?? [];
+          values.push({ resume, mirrorPath: candidate.path, contentHash });
+          discovered.set(resume.id, values);
         } catch {
           warnings.push({ code: "INVALID_REMOTE_RESUME" });
         }
+      }
+      for (const [resumeId, values] of Array.from(discovered.entries()).sort(([a], [b]) => a.localeCompare(b))) {
+        const hashes = new Set(values.map((value) => value.contentHash));
+        if (hashes.size > 1) {
+          warnings.push({ code: "AMBIGUOUS_REMOTE_RESUME" });
+          continue;
+        }
+        const selected = values[0];
+        const existing = entries[resumeId];
+        if (existing?.contentHash === selected.contentHash) continue;
+        entries[resumeId] = {
+          objectPath: `objects/${resumeId}/${selected.contentHash}.json`,
+          mirrorPath: selected.mirrorPath,
+          contentHash: selected.contentHash,
+          updatedAt: selected.resume.updatedAt,
+          deleted: false,
+        };
+        manualImports.push({ resume: selected.resume, mirrorPath: selected.mirrorPath });
+        discoveredRemoteFiles = true;
       }
       if (discoveredRemoteFiles) manifest = { ...manifest, entries };
     }
@@ -146,6 +166,7 @@ export class WebDavSyncCoordinator {
       localToken,
       localHashes: hashes,
       manifest,
+      persistedManifest,
       remoteEtag: remoteFile?.etag ?? null,
       plan,
       conflicts: plan.conflicts,
@@ -164,8 +185,10 @@ export class WebDavSyncCoordinator {
       requestSignal?.throwIfAborted();
       const inspection = await this.inspect(requestSignal);
       if (decision && (
-        (decision.seenRemoteEtag !== undefined && decision.seenRemoteEtag !== inspection.remoteEtag) ||
-        (decision.seenManifestRevision !== undefined && decision.seenManifestRevision !== inspection.manifest?.revision)
+        !Object.prototype.hasOwnProperty.call(decision, "seenRemoteEtag") ||
+        !Object.prototype.hasOwnProperty.call(decision, "seenManifestRevision") ||
+        decision.seenRemoteEtag !== inspection.remoteEtag ||
+        decision.seenManifestRevision !== inspection.manifest?.revision
       )) {
         return { status: "deferred", warning: null, reason: "REMOTE_CHANGED" };
       }
@@ -184,9 +207,11 @@ export class WebDavSyncCoordinator {
         plan,
         localData: inspection.localData,
         remoteManifest: inspection.manifest,
+        previousManifest: inspection.persistedManifest,
         remoteManifestEtag: inspection.remoteEtag,
         expectedLocalToken: inspection.localToken,
         getLocalToken: () => canonicalizeSyncData(this.dependencies.getLocalData()),
+        subscribeLocalToken: this.dependencies.subscribeLocalData,
         deviceId: this.dependencies.deviceId,
         now: this.dependencies.now,
         commit: this.dependencies.commit,
@@ -216,31 +241,31 @@ export class WebDavSyncCoordinator {
   /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
   keepLocal(
     cloud: Pick<CloudSnapshotV1, "revision">,
-    expectedEtagOrSignal?: string | null | AbortSignal,
+    expectedEtag: string | null,
+    seenManifestRevision: number,
     signal?: AbortSignal,
   ): Promise<SyncExecuteResult> {
-    const expectedEtag = expectedEtagOrSignal instanceof AbortSignal ? undefined : expectedEtagOrSignal;
-    const requestSignal = expectedEtagOrSignal instanceof AbortSignal ? expectedEtagOrSignal : signal;
     return this.execute({
       resumeId: cloud.revision,
       resolution: "keep-local",
-      ...(expectedEtag !== undefined ? { seenRemoteEtag: expectedEtag } : {}),
-    }, requestSignal);
+      seenRemoteEtag: expectedEtag,
+      seenManifestRevision,
+    }, signal);
   }
 
   /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
   useCloud(
     cloud: Pick<CloudSnapshotV1, "revision">,
-    expectedEtagOrSignal?: string | null | AbortSignal,
+    expectedEtag: string | null,
+    seenManifestRevision: number,
     signal?: AbortSignal,
   ): Promise<SyncExecuteResult> {
-    const expectedEtag = expectedEtagOrSignal instanceof AbortSignal ? undefined : expectedEtagOrSignal;
-    const requestSignal = expectedEtagOrSignal instanceof AbortSignal ? expectedEtagOrSignal : signal;
     return this.execute({
       resumeId: cloud.revision,
       resolution: "use-cloud",
-      ...(expectedEtag !== undefined ? { seenRemoteEtag: expectedEtag } : {}),
-    }, requestSignal);
+      seenRemoteEtag: expectedEtag,
+      seenManifestRevision,
+    }, signal);
   }
 
   private resolve(plan: SyncPlan, decision: ConflictDecision): SyncPlan {

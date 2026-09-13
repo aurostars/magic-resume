@@ -40,6 +40,7 @@ export interface WebDavConflict {
   cloud: ConflictSide;
   snapshot: CloudSnapshotV1;
   remoteEtag: string | null;
+  manifestRevision: number;
 }
 
 export interface WebDavSafeError {

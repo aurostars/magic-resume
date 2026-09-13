@@ -184,11 +184,13 @@ export class WebDavSyncController {
           ? await this.dependencies.coordinator.keepLocal(
               current.snapshot,
               current.remoteEtag,
+              current.manifestRevision,
               signal,
             )
           : await this.dependencies.coordinator.useCloud(
               current.snapshot,
               current.remoteEtag,
+              current.manifestRevision,
               signal,
             );
         if (isConflict(result)) {

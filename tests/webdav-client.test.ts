@@ -188,18 +188,17 @@ test("maps failed remote preconditions and locks to REMOTE_CAS_MISMATCH", async 
   }
 });
 
-test("DELETE is best effort for HTTP and network failures", async () => {
-  const { calls, fetchImpl } = recordingFetch(() =>
-    new Response("private server response", { status: 507 }),
-  );
-  const client = clientWith(fetchImpl);
-
-  await client.delete("/cleanup.json");
-  await clientWith(async () => {
-    throw new Error("private network detail");
-  }).delete("/cleanup.json");
-
-  assert.equal(calls[0].init.method, "DELETE");
+test("DELETE rejects non-success responses instead of globally hiding cleanup failures", async () => {
+  for (const status of [409, 423]) {
+    const { calls, fetchImpl } = recordingFetch(() =>
+      new Response("private server response", { status }),
+    );
+    await assert.rejects(
+      clientWith(fetchImpl).delete("/manifest.json"),
+      (error: unknown) => error instanceof WebDavError && error.status === status,
+    );
+    assert.equal(calls[0].init.method, "DELETE");
+  }
 });
 
 test("maps HTTP failures to safe typed errors", async () => {

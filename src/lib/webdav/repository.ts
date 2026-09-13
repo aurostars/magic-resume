@@ -141,6 +141,14 @@ export class WebDavResumeRepository {
     await this.writeAtomic(MANIFEST_FILE, text, preconditionFor(expectedEtag), signal);
   }
 
+  async deleteManifest(expectedEtag: string, signal?: AbortSignal): Promise<void> {
+    await this.client.delete(
+      `${this.root}${MANIFEST_FILE}`,
+      { kind: "match", etag: expectedEtag },
+      signal,
+    );
+  }
+
   private async readFile(path: string, signal?: AbortSignal): Promise<RemoteTextFile | null> {
     const remote: RemoteText | null = await this.client.getTextWithMetadata(`${this.root}${path}`, signal);
     return remote === null ? null : { path, ...remote };

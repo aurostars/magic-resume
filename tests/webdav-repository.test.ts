@@ -15,7 +15,7 @@ type Call =
   | ["listCollection", string]
   | ["putText", string, string, RemotePrecondition | undefined]
   | ["move", string, string, RemotePrecondition | undefined]
-  | ["delete", string];
+  | ["delete", string, RemotePrecondition?];
 
 class FakeClient implements WebDavClientApi {
   readonly calls: Call[] = [];
@@ -23,6 +23,7 @@ class FakeClient implements WebDavClientApi {
   listing: RemoteCollectionFile[] = [];
   moveError: unknown = null;
   deleteError: unknown = null;
+  readonly signals: Array<AbortSignal | undefined> = [];
 
   async options(): Promise<void> {}
   async propfind(): Promise<boolean> { return true; }
@@ -44,25 +45,35 @@ class FakeClient implements WebDavClientApi {
     path: string,
     content: string,
     preconditionOrSignal?: RemotePrecondition | AbortSignal,
+    signal?: AbortSignal,
   ): Promise<void> {
     const precondition = preconditionOrSignal instanceof AbortSignal
       ? undefined
       : preconditionOrSignal;
+    this.signals.push(preconditionOrSignal instanceof AbortSignal ? preconditionOrSignal : signal);
     this.calls.push(["putText", path, content, precondition]);
   }
   async move(
     source: string,
     destination: string,
     preconditionOrSignal?: RemotePrecondition | AbortSignal,
+    signal?: AbortSignal,
   ): Promise<void> {
     const precondition = preconditionOrSignal instanceof AbortSignal
       ? undefined
       : preconditionOrSignal;
+    this.signals.push(preconditionOrSignal instanceof AbortSignal ? preconditionOrSignal : signal);
     this.calls.push(["move", source, destination, precondition]);
     if (this.moveError) throw this.moveError;
   }
-  async delete(path: string): Promise<void> {
-    this.calls.push(["delete", path]);
+  async delete(
+    path: string,
+    preconditionOrSignal?: RemotePrecondition | AbortSignal,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const precondition = preconditionOrSignal instanceof AbortSignal ? undefined : preconditionOrSignal;
+    this.signals.push(preconditionOrSignal instanceof AbortSignal ? preconditionOrSignal : signal);
+    this.calls.push(precondition ? ["delete", path, precondition] : ["delete", path]);
     if (this.deleteError) throw this.deleteError;
   }
 }
@@ -234,4 +245,32 @@ test("managed immutable object paths accept full IDs and hashes while rejecting 
   ]) {
     await assert.rejects(repository.writeResumeAtomic(invalid, validResumeText, null), WebDavError);
   }
+});
+
+
+test("deleteManifest uses a matching ETag and propagates DELETE failures", async () => {
+  const client = new FakeClient();
+  const repository = repositoryWith(client);
+  const signal = new AbortController().signal;
+
+  await repository.deleteManifest('"published"', signal);
+  assert.deepEqual(client.calls, [[
+    "delete", "/magic-resume/manifest.json", { kind: "match", etag: '"published"' },
+  ]]);
+  assert.equal(client.signals[0], signal);
+
+  client.deleteError = new WebDavError("REMOTE_CAS_MISMATCH", 423);
+  await assert.rejects(repository.deleteManifest('"published"'), WebDavError);
+});
+
+test("atomic object PUT and MOVE receive the caller AbortSignal", async () => {
+  const client = new FakeClient();
+  const repository = repositoryWith(client);
+  const signal = new AbortController().signal;
+  const hash = "c".repeat(64);
+
+  await repository.writeResumeAtomic(`objects/resume-id/${hash}.json`, validResumeText, null, signal);
+
+  assert.equal(client.signals[0], signal);
+  assert.equal(client.signals[1], signal);
 });

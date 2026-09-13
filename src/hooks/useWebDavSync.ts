@@ -97,6 +97,7 @@ const createConflict = (
       data: inspection.localData,
     },
     remoteEtag: inspection.remoteEtag,
+    manifestRevision: manifest.revision,
   };
 };
 
@@ -139,6 +140,7 @@ export const createConfiguredController = (
   const coordinator = new WebDavSyncCoordinator({
     repository,
     getLocalData: () => useResumeStore.getState().getSyncSnapshot(),
+    subscribeLocalData: (listener) => useResumeStore.subscribe(listener),
     getBaseline: () => useResumeStore.getState().getWebDavBaseline(),
     commit: commitDownloadedSnapshot,
     deviceId,

@@ -40,7 +40,11 @@ export interface WebDavClientApi {
     preconditionOrSignal?: RemotePrecondition | AbortSignal,
     signal?: AbortSignal,
   ): Promise<void>;
-  delete(path: string, signal?: AbortSignal): Promise<void>;
+  delete(
+    path: string,
+    preconditionOrSignal?: RemotePrecondition | AbortSignal,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 type RequestKind = "DEFAULT" | "DIRECTORY" | "MOVE";
@@ -425,13 +429,22 @@ export class WebDavClient implements WebDavClientApi {
     this.requireSuccess(response, "MOVE");
   }
 
-  async delete(path: string, signal?: AbortSignal): Promise<void> {
+  async delete(
+    path: string,
+    preconditionOrSignal?: RemotePrecondition | AbortSignal,
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.assertSafePath(path);
-    try {
-      await this.request(path, { method: "DELETE" }, signal);
-    } catch {
-      // Temporary-file cleanup must not mask the primary sync result.
-    }
+    const precondition = preconditionOrSignal instanceof AbortSignal
+      ? undefined
+      : preconditionOrSignal;
+    const requestSignal = preconditionOrSignal instanceof AbortSignal
+      ? preconditionOrSignal
+      : signal;
+    const headers = new Headers();
+    if (precondition?.kind === "match") headers.set("If-Match", precondition.etag);
+    const response = await this.request(path, { method: "DELETE", headers }, requestSignal);
+    this.requireSuccess(response);
   }
 
   private assertSafePath(path: string): void {

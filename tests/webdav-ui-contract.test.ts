@@ -218,6 +218,7 @@ const conflict = {
     contentHash: "a".repeat(64), data: { resumes: [], activeResumeId: null },
   },
   remoteEtag: '"etag-r1"',
+  manifestRevision: 1,
 };
 
 test("conflict dialog traps focus, closes on Escape without choosing a side, and restores focus", async () => {

@@ -601,13 +601,17 @@ Assert exact safety properties:
 - initial local expected-token mismatch is checked before `ensureLayout` and causes zero repository calls;
 - directories, including `objects/`, are ensured before object writes;
 - every new immutable object is created and hash-verified before manifest publication;
-- a second local-token check immediately before publication turns intervening edits into safe object orphans;
+- immediately before publication, every live entry in the final manifest is reread and strictly checked for existence, valid `ResumeData`, full ID, and content hash;
+- subscribe to the local snapshot token across the publication window, abort on change, and verify again after publish returns;
+- if a server commits despite abort, confirm the attempted manifest by hash and CAS-restore the old manifest, or conditionally delete it for first sync; uncertain recovery remains deferred;
 - upload/object failure means `publishManifest` is never called;
 - downloaded content is read from `objectPath`, parsed, and hash-verified before entering result data;
 - manifest CAS mismatch returns `deferred: remote-changed` and performs no mirror mutation;
 - only after manifest CAS succeeds may `resumes/` and `trash/` mirrors be written/moved;
 - mirror failure does not invalidate the authoritative manifest and is repaired by a later sync;
-- stale conflict decisions whose visible ETag/revision no longer matches are deferred before application.
+- every executor repository operation propagates its caller signal, including object PUT/MOVE and mirror repair;
+- general WebDAV DELETE rejects every non-2xx response; only repository temporary-file cleanup catches it best-effort;
+- conflict decisions require both `seenRemoteEtag` (including explicit `null`) and `seenManifestRevision`; missing or stale fields defer before application.
 
 - [ ] **Step 2: Rewrite coordinator tests around per-resume outcomes**
 
@@ -650,10 +654,11 @@ After reading a valid manifest, scan `resumes/` only. For every path absent from
 1. read text;
 2. strictly parse `ResumeData`;
 3. compute hash;
-4. ignore exact duplicate ID/hash;
-5. treat a new full ID as a remote addition;
-6. treat an existing ID with different hash as a remote modification/conflict;
-7. surface only safe warning codes for invalid files.
+4. group unindexed files by full ID and sort paths deterministically;
+5. deduplicate equal hashes, but emit a safe ambiguity warning and import nothing for an ID with differing hashes;
+6. treat a new full ID as a remote addition;
+7. treat an existing ID with a different unambiguous hash as a remote modification/conflict;
+8. surface only safe warning codes for invalid files.
 
 Never scan or import `trash/`.
 
@@ -790,6 +795,7 @@ Document this exact structure:
 ```text
 <remote-root>/
 ├── manifest.json
+├── objects/<full-resume-id>/<content-hash>.json
 ├── resumes/<safe-title>--<short-id>.json
 └── trash/<safe-title>--<short-id>.json
 ```
