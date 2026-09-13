@@ -21,6 +21,40 @@ export interface CloudSnapshotV1 {
   data: ResumeSyncData;
 }
 
+export interface ResumeManifestEntry {
+  path: string;
+  contentHash: string;
+  updatedAt: string;
+  deleted: boolean;
+}
+
+export interface ManifestV2Body {
+  schemaVersion: 2;
+  revision: number;
+  parentRevision: number | null;
+  updatedAt: string;
+  deviceId: string;
+  activeResumeId: string | null;
+  entries: Record<string, ResumeManifestEntry>;
+}
+
+export interface ManifestV2 extends ManifestV2Body {
+  manifestHash: string;
+}
+
+export type ManifestValidationCode =
+  | "MANIFEST_JSON"
+  | "MANIFEST_VERSION"
+  | "MANIFEST_SHAPE"
+  | "MANIFEST_HASH";
+
+export class ManifestValidationError extends Error {
+  constructor(public readonly code: ManifestValidationCode) {
+    super(code);
+    this.name = "ManifestValidationError";
+  }
+}
+
 export type SnapshotValidationCode =
   | "SNAPSHOT_JSON"
   | "SNAPSHOT_VERSION"
