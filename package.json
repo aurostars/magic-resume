@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite dev",
     "test:ai": "tsx --test tests/*.test.ts",
+    "test:webdav": "tsx --test tests/webdav-*.test.ts",
     "test:resume-import": "tsx --test tests/resume-import.test.ts",
     "build": "vite build",
     "start": "node server.mjs",
@@ -89,6 +90,8 @@
     "zustand": "^4.5.4"
   },
   "devDependencies": {
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
     "@types/lodash": "^4.17.13",
     "@types/node": "^20",
     "@types/react": "^18",
@@ -98,6 +101,7 @@
     "bumpp": "^10.4.1",
     "changelogen": "^0.6.2",
     "eslint": "^8",
+    "jsdom": "26.1.0",
     "playwright": "^1.58.2",
     "postcss": "^8",
     "postcss-normalize": "^13.0.1",

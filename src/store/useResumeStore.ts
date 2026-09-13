@@ -30,7 +30,11 @@ import {
   pushHistory,
   restoreResumeSnapshot,
   clearHistoryGroup,
+  clearAllHistoryGroups,
 } from "./resumeHistory";
+import type { ResumeSyncData, WebDavBaseline } from "@/lib/webdav/types";
+import { LocalCasMismatchError } from "@/lib/webdav/errors";
+import { canonicalizeSyncData, normalizeSyncData } from "@/lib/webdav/snapshot";
 
 interface PendingSync {
   timer: ReturnType<typeof setTimeout>;
@@ -43,7 +47,19 @@ interface ResumeStore {
   activeResume: ResumeData | null;
   history: Record<string, ResumeData[]>;
   future: Record<string, ResumeData[]>;
+  _hasHydrated: boolean;
+  _isApplyingSyncSnapshot: boolean;
+  webDavBaseline: WebDavBaseline | null;
 
+  setHasHydrated: (hasHydrated: boolean) => void;
+  getSyncSnapshot: () => ResumeSyncData;
+  applySyncSnapshot: (data: ResumeSyncData) => void;
+  commitWebDavSnapshot: (
+    data: ResumeSyncData,
+    baseline: WebDavBaseline,
+    expectedLocalToken: string,
+  ) => void;
+  setWebDavBaseline: (baseline: WebDavBaseline | null) => void;
   createResume: (templateId: string | null, isBlank?: boolean) => string;
   deleteResume: (resume: ResumeData) => void;
   duplicateResume: (resumeId: string) => string;
@@ -100,7 +116,10 @@ interface ResumeStore {
   removeCertificate: (id: string) => void;
 }
 
-type PersistedResumeStore = Pick<ResumeStore, "resumes" | "activeResumeId">;
+type PersistedResumeStore = Pick<
+  ResumeStore,
+  "resumes" | "activeResumeId" | "webDavBaseline"
+>;
 
 const createDefaultCustomItem = (): CustomItem => ({
   id: generateUUID(),
@@ -291,6 +310,79 @@ export const useResumeStore = create(
       activeResume: null,
       history: {},
       future: {},
+      _hasHydrated: false,
+      _isApplyingSyncSnapshot: false,
+      webDavBaseline: null,
+
+      setHasHydrated: (hasHydrated) => set({ _hasHydrated: hasHydrated }),
+      getSyncSnapshot: () => {
+        const state = get();
+        return normalizeSyncData({
+          resumes: Object.values(structuredClone(state.resumes)),
+          activeResumeId: state.activeResumeId,
+        });
+      },
+      applySyncSnapshot: (incoming) => {
+        const normalized = normalizeSyncData(structuredClone(incoming));
+        const resumes = Object.fromEntries(
+          normalized.resumes.map((resume) => [resume.id, resume])
+        );
+        clearAllHistoryGroups([
+          ...Object.keys(get().resumes),
+          ...Object.keys(resumes),
+        ]);
+        try {
+          set({
+            resumes,
+            activeResumeId: normalized.activeResumeId,
+            activeResume: normalized.activeResumeId
+              ? resumes[normalized.activeResumeId]
+              : null,
+            history: {},
+            future: {},
+            _isApplyingSyncSnapshot: true,
+          });
+        } finally {
+          set({ _isApplyingSyncSnapshot: false });
+        }
+      },
+      commitWebDavSnapshot: (incoming, baseline, expectedLocalToken) => {
+        const normalized = normalizeSyncData(structuredClone(incoming));
+        const resumes = Object.fromEntries(
+          normalized.resumes.map((resume) => [resume.id, resume])
+        );
+        try {
+          set((state) => {
+            const currentToken = canonicalizeSyncData({
+              resumes: Object.values(state.resumes),
+              activeResumeId: state.activeResumeId,
+            });
+            if (currentToken !== expectedLocalToken) {
+              throw new LocalCasMismatchError();
+            }
+            clearAllHistoryGroups([
+              ...Object.keys(state.resumes),
+              ...Object.keys(resumes),
+            ]);
+            return {
+              resumes,
+              activeResumeId: normalized.activeResumeId,
+              activeResume: normalized.activeResumeId
+                ? resumes[normalized.activeResumeId]
+                : null,
+              history: {},
+              future: {},
+              webDavBaseline: baseline,
+              _isApplyingSyncSnapshot: true,
+            };
+          });
+        } finally {
+          if (get()._isApplyingSyncSnapshot) {
+            set({ _isApplyingSyncSnapshot: false });
+          }
+        }
+      },
+      setWebDavBaseline: (webDavBaseline) => set({ webDavBaseline }),
 
       createResume: (templateId = null, isBlank = false) => {
         const locale =
@@ -992,18 +1084,25 @@ export const useResumeStore = create(
       partialize: (state): PersistedResumeStore => ({
         resumes: state.resumes,
         activeResumeId: state.activeResumeId,
+        webDavBaseline: state.webDavBaseline,
       }),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<PersistedResumeStore>;
         const resumes = persisted.resumes ?? currentState.resumes;
         const activeResumeId =
           persisted.activeResumeId ?? currentState.activeResumeId;
+        const webDavBaseline =
+          persisted.webDavBaseline ?? currentState.webDavBaseline;
 
         return {
           ...currentState,
           ...persisted,
           resumes,
           activeResumeId,
+          webDavBaseline,
           activeResume: activeResumeId ? resumes[activeResumeId] ?? null : null,
         };
       },

@@ -65,6 +65,16 @@ pnpm dev
 
 4. Open browser and visit `http://localhost:3000`
 
+## ☁️ WebDAV synchronization
+
+Open **Settings → WebDAV Sync** and enter your WebDAV server URL, username, and password. The remote directory is configurable and defaults to `/magic-resume/`. Select **Sync Now** for a manual sync, or enable optional automatic sync to synchronize after local changes and when the app returns to the foreground.
+
+If both the local and cloud copies changed since the last successful sync, the app reports a conflict and lets you explicitly choose **Use Local** (upload the local copy) or **Use Cloud** (replace local data). Magic Resume does not merge individual resumes automatically.
+
+The browser connects directly to your WebDAV server; resume data and credentials do not pass through a Magic Resume application server. Your WebDAV server must therefore allow browser requests from the Magic Resume origin with CORS, including the WebDAV methods and headers it uses. Use an HTTPS WebDAV endpoint when the app is served over HTTPS; plain HTTP is supported only during localhost development.
+
+WebDAV settings and credentials are stored in this browser's local storage. Other scripts, extensions, or users with access to the same browser profile may be able to read them. Prefer a dedicated, least-privilege WebDAV account limited to the configured directory, and avoid enabling sync on a shared or untrusted device.
+
 ## 📦 Build and Deploy
 
 ```bash

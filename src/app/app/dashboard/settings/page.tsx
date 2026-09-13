@@ -18,6 +18,7 @@ import {
 } from "@/utils/fileSystem";
 import { useResumeStore } from "@/store/useResumeStore";
 import { syncResumesFromDirectory } from "@/utils/resumeFileSync";
+import { WebDavSection } from "@/components/settings/WebDavSection";
 
 const SettingsPage = () => {
   const [directoryHandle, setDirectoryHandle] =
@@ -150,6 +151,7 @@ const SettingsPage = () => {
               </div>
             </CardContent>
           </Card>
+          <WebDavSection />
         </div>
       </div>
     </div>

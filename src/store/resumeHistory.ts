@@ -128,3 +128,7 @@ export const restoreResumeSnapshot = (
 export const clearHistoryGroup = (resumeId: string) => {
   lastHistoryGroups.delete(resumeId);
 };
+
+export const clearAllHistoryGroups = (resumeIds: string[]): void => {
+  for (const resumeId of resumeIds) clearHistoryGroup(resumeId);
+};
