@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import config from "../../miaobi.config.json" with { type: "json" };
@@ -22,8 +22,13 @@ export interface MiaobiDeployConfig {
   assetKeyPrefix: "magic-resume/releases";
 }
 
+/**
+ * Crash-recovery state protected by 0700/0600 local storage. Its validation
+ * detects corruption and cross-field inconsistencies; it is not an
+ * authentication boundary against malicious code running as the same UID.
+ */
 export interface MiaobiDeploymentState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   apiBuildMarker: string;
   releaseId: string;
   apiFaasId: string;
@@ -35,11 +40,24 @@ export interface MiaobiDeploymentState {
 }
 
 type PendingDeployment = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   status: "pending-page-commit";
   platformOrigin: string;
   apiBuildMarker: string;
   deployment: MiaobiDeploymentState;
+  page: { id: string; artifactPath: "dist/miaobi/page.html"; sha256: string };
+};
+
+type LegacyDeploymentState = Omit<MiaobiDeploymentState, "schemaVersion" | "apiBuildMarker"> & {
+  schemaVersion: 1;
+  apiBuildMarker?: string;
+};
+
+type LegacyPendingDeployment = {
+  schemaVersion: 1;
+  status: "pending-page-commit";
+  platformOrigin: string;
+  deployment: LegacyDeploymentState;
   page: { id: string; artifactPath: "dist/miaobi/page.html"; sha256: string };
 };
 
@@ -55,6 +73,7 @@ type TrustedState = TrustedStorage & {
 
 type TrustedRecovery = TrustedStorage & {
   pendingPath: string;
+  legacyPendingPath: string;
   lockPath: string;
 };
 
@@ -70,12 +89,12 @@ const RESOURCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const BUILD_MARKER_PATTERN = /^([0-9a-f]{40})\.([0-9a-f]{32,128})$/;
 const LOCK_GRACE_MS = 30_000;
-const LOCK_MAX_LIVE_MS = 60 * 60 * 1000;
 
 function deploymentPaths() {
   return {
     outputDirectory: resolve("dist/miaobi"),
     statePath: resolve(".miaobi/deployment.json"),
+    legacyPendingPath: resolve(".miaobi/deployment.pending.json"),
     recoveryPath: resolve(".miaobi-recovery/deployment.pending.json"),
   };
 }
@@ -121,9 +140,11 @@ async function rejectSymlinkAncestors(path: string): Promise<void> {
   }
 }
 
-// Node has no portable dirfd-relative open/rename. These 0700 directories and
-// identity checks fail closed for replacement, but do not claim to defeat a
-// malicious same-UID process racing between syscalls.
+// Security boundary: crash recovery, accidental corruption, and processes that
+// cannot write these 0700/0600 paths. This is deliberately not an authenticity
+// claim against malicious same-UID code; a key stored beside pending would not
+// create an independent HMAC trust anchor. Node also has no portable dirfd-relative
+// open/rename, so identity checks fail closed on detected directory replacement.
 async function trustedStorage(directory: string): Promise<TrustedStorage> {
   await rejectSymlinkAncestors(directory);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -141,11 +162,12 @@ async function trustedState(statePath: string): Promise<TrustedState> {
   };
 }
 
-async function trustedRecovery(recoveryPath: string): Promise<TrustedRecovery> {
+async function trustedRecovery(recoveryPath: string, legacyPendingPath: string): Promise<TrustedRecovery> {
   const storage = await trustedStorage(dirname(recoveryPath));
   return {
     ...storage,
     pendingPath: recoveryPath,
+    legacyPendingPath,
     lockPath: join(storage.directory, "deployment.lock"),
   };
 }
@@ -174,10 +196,11 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
     processStartedAt,
   };
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const stagedLockPath = join(state.directory, `.deployment.lock-${token}`);
     let handle;
     try {
       handle = await open(
-        state.lockPath,
+        stagedLockPath,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
         0o600,
       );
@@ -186,17 +209,26 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
       await handle.close();
       handle = undefined;
       await assertStorageIdentity(state);
+      await link(stagedLockPath, state.lockPath);
+      await rm(stagedLockPath);
+      const claimed = await lstat(state.lockPath);
+      if (!claimed.isFile() || claimed.isSymbolicLink()) throw new Error();
       return async () => {
         try {
           await assertStorageIdentity(state);
           const current = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
-          if (current?.token === token) await rm(state.lockPath, { force: true });
+          if (current?.token !== token) return;
+          const beforeRemove = await lstat(state.lockPath);
+          if (beforeRemove.dev === claimed.dev && beforeRemove.ino === claimed.ino) {
+            await rm(state.lockPath, { force: true });
+          }
         } catch {
           // Never remove a lock whose directory identity or ownership changed.
         }
       };
     } catch (error) {
       await handle?.close().catch(() => undefined);
+      await rm(stagedLockPath, { force: true }).catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) {
         throw codedError("MIAOBI_STATE_LOCKED");
       }
@@ -210,10 +242,11 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
       const ageMs = Date.now() - metadata.mtimeMs;
       if (ageMs < LOCK_GRACE_MS) throw codedError("MIAOBI_STATE_LOCKED");
       let stale = false;
+      let existing: {
+        schemaVersion?: unknown; pid?: unknown; token?: unknown; startedAt?: unknown; processStartedAt?: unknown;
+      } | undefined;
       try {
-        const existing = await readJsonFile(state.lockPath) as {
-          schemaVersion?: unknown; pid?: unknown; token?: unknown; startedAt?: unknown; processStartedAt?: unknown;
-        };
+        existing = await readJsonFile(state.lockPath) as typeof existing;
         if (
           existing?.schemaVersion !== 1 || typeof existing.pid !== "number" || existing.pid <= 0 ||
           typeof existing.token !== "string" || !/^[0-9a-f]{32}$/.test(existing.token) ||
@@ -221,23 +254,22 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
         ) throw new Error();
         const startedAt = Date.parse(existing.startedAt);
         const recordedProcessStart = Date.parse(existing.processStartedAt);
-        const ownerAge = Date.now() - startedAt;
         if (
           !Number.isFinite(startedAt) || !Number.isFinite(recordedProcessStart) ||
-          recordedProcessStart > startedAt || ownerAge > LOCK_MAX_LIVE_MS
-        ) stale = true;
-        if (!stale && existing.pid === process.pid) {
+          recordedProcessStart > startedAt
+        ) throw new Error();
+        if (existing.pid === process.pid) {
           const actualProcessStart = Date.now() - process.uptime() * 1000;
-          if (Math.abs(recordedProcessStart - actualProcessStart) > 5_000) stale = true;
-        }
-        if (!stale) {
-          try { process.kill(existing.pid, 0); } catch (probe) {
-            if ((probe as NodeJS.ErrnoException).code === "ESRCH") stale = true;
-            else throw probe;
-          }
+          stale = Math.abs(recordedProcessStart - actualProcessStart) > 5_000;
         }
       } catch {
         stale = true;
+      }
+      if (!stale && existing && typeof existing.pid === "number") {
+        try { process.kill(existing.pid, 0); } catch (probe) {
+          if ((probe as NodeJS.ErrnoException).code === "ESRCH") stale = true;
+          else throw codedError("MIAOBI_STATE_LOCKED");
+        }
       }
       if (!stale) throw codedError("MIAOBI_STATE_LOCKED");
       await assertStorageIdentity(state);
@@ -251,25 +283,21 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
   throw codedError("MIAOBI_STATE_LOCKED");
 }
 
-function parseDeploymentState(value: unknown, platformOrigin: string): MiaobiDeploymentState {
-  const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
-  const expectedKeys = [
-    "apiBuildMarker", "apiFaasId", "apiFaasUrl", "deployedAt", "pageId", "releaseId",
-    "schemaVersion", "webFaasId", "webFaasUrl",
-  ].sort();
-  if (
-    typeof value !== "object" || value === null ||
-    JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
-    (value as { schemaVersion?: unknown }).schemaVersion !== 1 ||
-    !BUILD_MARKER_PATTERN.test((value as { apiBuildMarker?: string }).apiBuildMarker ?? "") ||
-    (value as { pageId?: unknown }).pageId !== deployConfig.pageId ||
-    typeof (value as { releaseId?: unknown }).releaseId !== "string" ||
-    !/^[0-9a-f]{12}-\d{14}$/.test((value as { releaseId: string }).releaseId) ||
-    typeof (value as { deployedAt?: unknown }).deployedAt !== "string"
-  ) throw codedError("MIAOBI_STATE_FAILED");
-  const deployment = value as MiaobiDeploymentState;
+function markerCommit(buildMarker: string): string | undefined {
+  return BUILD_MARKER_PATTERN.exec(buildMarker)?.[1];
+}
+
+function releaseCommitPrefix(releaseId: string): string | undefined {
+  return /^([0-9a-f]{12})-\d{14}$/.exec(releaseId)?.[1];
+}
+
+function validateDeploymentFields(
+  deployment: MiaobiDeploymentState | LegacyDeploymentState,
+  platformOrigin: string,
+): void {
   try {
-    if (new Date(deployment.deployedAt).toISOString() !== deployment.deployedAt) throw new Error();
+    const releasePrefix = releaseCommitPrefix(deployment.releaseId);
+    if (!releasePrefix || new Date(deployment.deployedAt).toISOString() !== deployment.deployedAt) throw new Error();
     validatePublishedUrl(
       deployment.apiFaasUrl,
       `/api/faas/${validateResourceId(deployment.apiFaasId)}`,
@@ -280,9 +308,41 @@ function parseDeploymentState(value: unknown, platformOrigin: string): MiaobiDep
       `/api/faas/${validateResourceId(deployment.webFaasId)}`,
       platformOrigin,
     );
+    if (deployment.apiBuildMarker !== undefined) {
+      const markerPrefix = markerCommit(deployment.apiBuildMarker)?.slice(0, 12);
+      if (!markerPrefix || markerPrefix !== releasePrefix) throw new Error();
+    }
   } catch {
     throw codedError("MIAOBI_STATE_FAILED");
   }
+}
+
+function parseDeploymentState(
+  value: unknown,
+  platformOrigin: string,
+): MiaobiDeploymentState | LegacyDeploymentState {
+  const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
+  const commonKeys = [
+    "apiFaasId", "apiFaasUrl", "deployedAt", "pageId", "releaseId",
+    "schemaVersion", "webFaasId", "webFaasUrl",
+  ];
+  const schemaVersion = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
+  const hasMarker = typeof (value as { apiBuildMarker?: unknown } | null)?.apiBuildMarker === "string";
+  const expectedKeys = schemaVersion === 2 || (schemaVersion === 1 && hasMarker)
+    ? [...commonKeys, "apiBuildMarker"].sort()
+    : commonKeys.sort();
+  if (
+    typeof value !== "object" || value === null ||
+    JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
+    (schemaVersion !== 1 && schemaVersion !== 2) ||
+    (value as { pageId?: unknown }).pageId !== deployConfig.pageId ||
+    (hasMarker && !BUILD_MARKER_PATTERN.test((value as { apiBuildMarker: string }).apiBuildMarker)) ||
+    (schemaVersion === 2 && !hasMarker) ||
+    typeof (value as { releaseId?: unknown }).releaseId !== "string" ||
+    typeof (value as { deployedAt?: unknown }).deployedAt !== "string"
+  ) throw codedError("MIAOBI_STATE_FAILED");
+  const deployment = value as MiaobiDeploymentState | LegacyDeploymentState;
+  validateDeploymentFields(deployment, platformOrigin);
   return deployment;
 }
 
@@ -321,25 +381,111 @@ function parsePending(value: unknown, platformOrigin: string): PendingDeployment
       !pending || typeof pending !== "object" ||
       JSON.stringify(keys) !== JSON.stringify(["apiBuildMarker", "deployment", "page", "platformOrigin", "schemaVersion", "status"].sort()) ||
       JSON.stringify(pageKeys) !== JSON.stringify(["artifactPath", "id", "sha256"].sort()) ||
-      pending.schemaVersion !== 1 ||
+      pending.schemaVersion !== 2 ||
       pending.status !== "pending-page-commit" || pending.platformOrigin !== platformOrigin ||
       !BUILD_MARKER_PATTERN.test(pending.apiBuildMarker) ||
       pending.apiBuildMarker !== pending.deployment?.apiBuildMarker ||
-      !pending.page || pending.page.id !== deployConfig.pageId ||
+      pending.page.id !== deployConfig.pageId ||
       pending.page.artifactPath !== "dist/miaobi/page.html" ||
       !HASH_PATTERN.test(pending.page.sha256)
     ) throw new Error();
-    parseDeploymentState(pending.deployment, platformOrigin);
+    const deployment = parseDeploymentState(pending.deployment, platformOrigin);
+    if (deployment.schemaVersion !== 2) throw new Error();
     return pending;
   } catch {
     throw codedError("MIAOBI_PENDING_INVALID");
   }
 }
 
-async function pendingState(recovery: TrustedRecovery, platformOrigin: string) {
+function migrateLegacyPending(
+  value: unknown,
+  platformOrigin: string,
+  localBuildMarker: string,
+): PendingDeployment {
+  try {
+    const pending = value as LegacyPendingDeployment & { apiBuildMarker?: string };
+    const hasMarker = typeof pending?.apiBuildMarker === "string";
+    const keys = pending && typeof pending === "object" ? Object.keys(pending).sort() : [];
+    const expectedKeys = hasMarker
+      ? ["apiBuildMarker", "deployment", "page", "platformOrigin", "schemaVersion", "status"].sort()
+      : ["deployment", "page", "platformOrigin", "schemaVersion", "status"].sort();
+    const pageKeys = pending?.page && typeof pending.page === "object" ? Object.keys(pending.page).sort() : [];
+    if (
+      !pending || typeof pending !== "object" ||
+      JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
+      JSON.stringify(pageKeys) !== JSON.stringify(["artifactPath", "id", "sha256"].sort()) ||
+      pending.schemaVersion !== 1 || pending.status !== "pending-page-commit" ||
+      pending.platformOrigin !== platformOrigin || pending.page.id !== deployConfig.pageId ||
+      pending.page.artifactPath !== "dist/miaobi/page.html" || !HASH_PATTERN.test(pending.page.sha256)
+    ) throw new Error();
+    const legacyDeployment = parseDeploymentState(pending.deployment, platformOrigin);
+    if (legacyDeployment.schemaVersion !== 1) throw new Error();
+    const buildMarker = pending.apiBuildMarker ?? legacyDeployment.apiBuildMarker ?? localBuildMarker;
+    if (
+      !BUILD_MARKER_PATTERN.test(buildMarker) || buildMarker !== localBuildMarker ||
+      (pending.apiBuildMarker !== undefined && pending.apiBuildMarker !== buildMarker) ||
+      (legacyDeployment.apiBuildMarker !== undefined && legacyDeployment.apiBuildMarker !== buildMarker) ||
+      markerCommit(buildMarker)?.slice(0, 12) !== releaseCommitPrefix(legacyDeployment.releaseId)
+    ) throw new Error();
+    const deployment: MiaobiDeploymentState = {
+      ...legacyDeployment,
+      schemaVersion: 2,
+      apiBuildMarker: buildMarker,
+    };
+    return {
+      schemaVersion: 2,
+      status: "pending-page-commit",
+      platformOrigin,
+      apiBuildMarker: buildMarker,
+      deployment,
+      page: pending.page,
+    };
+  } catch {
+    throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+  }
+}
+
+async function pendingState(
+  state: TrustedState,
+  recovery: TrustedRecovery,
+  platformOrigin: string,
+  outputDirectory: string,
+  gitCommit: string,
+): Promise<{ pending: PendingDeployment; sourcePath: string; sourceStorage: TrustedStorage } | undefined> {
   await assertStorageIdentity(recovery);
-  const value = await readJsonFile(recovery.pendingPath);
-  return value === undefined ? undefined : parsePending(value, platformOrigin);
+  const current = await readJsonFile(recovery.pendingPath);
+  if (current !== undefined) {
+    if ((current as { schemaVersion?: unknown }).schemaVersion === 2) {
+      return {
+        pending: parsePending(current, platformOrigin),
+        sourcePath: recovery.pendingPath,
+        sourceStorage: recovery,
+      };
+    }
+    try {
+      const metadata = await readApiBuildMetadata(outputDirectory, gitCommit);
+      return {
+        pending: migrateLegacyPending(current, platformOrigin, metadata.buildMarker),
+        sourcePath: recovery.pendingPath,
+        sourceStorage: recovery,
+      };
+    } catch {
+      throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+    }
+  }
+  await assertStorageIdentity(state);
+  const legacy = await readJsonFile(recovery.legacyPendingPath);
+  if (legacy === undefined) return undefined;
+  try {
+    const metadata = await readApiBuildMetadata(outputDirectory, gitCommit);
+    return {
+      pending: migrateLegacyPending(legacy, platformOrigin, metadata.buildMarker),
+      sourcePath: recovery.legacyPendingPath,
+      sourceStorage: state,
+    };
+  } catch {
+    throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+  }
 }
 
 function parseFaasPublishResponse(value: unknown, platformOrigin: string): { id: string; url: string } {
@@ -531,6 +677,8 @@ async function publishPage(runner: MagicBuilderRunner, pagePath: string, platfor
 
 async function reconcilePending(
   pending: PendingDeployment,
+  pendingSourcePath: string,
+  pendingSourceStorage: TrustedStorage,
   state: TrustedState,
   recovery: TrustedRecovery,
   runner: MagicBuilderRunner,
@@ -558,8 +706,8 @@ async function reconcilePending(
     await assertStorageIdentity(recovery);
     await publishPage(runner, temporaryPage, platformOrigin);
     await writeAtomicJson(state, state.path, pending.deployment);
-    await assertStorageIdentity(recovery);
-    await rm(recovery.pendingPath, { force: true });
+    await assertStorageIdentity(pendingSourceStorage);
+    await rm(pendingSourcePath, { force: true });
     return pending.deployment;
   } finally {
     await handle?.close().catch(() => undefined);
@@ -577,17 +725,31 @@ export async function deployMiaobi(options: {
   let releaseLock: (() => Promise<void>) | undefined;
   try {
     const platformOrigin = resolveMagicPlatformOrigin(options.runner.platformOrigin);
-    const { outputDirectory, statePath, recoveryPath } = deploymentPaths();
+    const { outputDirectory, statePath, legacyPendingPath, recoveryPath } = deploymentPaths();
     const stateStorage = await trustedState(statePath);
-    const recoveryStorage = await trustedRecovery(recoveryPath);
+    const recoveryStorage = await trustedRecovery(recoveryPath, legacyPendingPath);
     releaseLock = await acquireStateLock(recoveryStorage);
 
-    const pending = await pendingState(recoveryStorage, platformOrigin);
-    if (pending) {
-      if (BUILD_MARKER_PATTERN.exec(pending.apiBuildMarker)?.[1] !== options.gitCommit) {
+    const pendingRecord = await pendingState(
+      stateStorage,
+      recoveryStorage,
+      platformOrigin,
+      outputDirectory,
+      options.gitCommit,
+    );
+    if (pendingRecord) {
+      if (markerCommit(pendingRecord.pending.apiBuildMarker) !== options.gitCommit) {
         throw codedError("MIAOBI_PENDING_INVALID");
       }
-      return await reconcilePending(pending, stateStorage, recoveryStorage, options.runner, platformOrigin);
+      return await reconcilePending(
+        pendingRecord.pending,
+        pendingRecord.sourcePath,
+        pendingRecord.sourceStorage,
+        stateStorage,
+        recoveryStorage,
+        options.runner,
+        platformOrigin,
+      );
     }
 
     const previous = await priorState(stateStorage, platformOrigin);
@@ -633,7 +795,7 @@ export async function deployMiaobi(options: {
     const pagePath = resolve(outputDirectory, "page.html");
     await writeFile(pagePath, pageHtml(web.url, web.id, platformOrigin), { encoding: "utf8", mode: 0o600 });
     const deployment: MiaobiDeploymentState = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       apiBuildMarker: apiMetadata.buildMarker,
       releaseId,
       apiFaasId: api.id,
@@ -644,7 +806,7 @@ export async function deployMiaobi(options: {
       deployedAt: options.now.toISOString(),
     };
     const pendingDeployment: PendingDeployment = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending-page-commit",
       platformOrigin,
       apiBuildMarker: apiMetadata.buildMarker,
