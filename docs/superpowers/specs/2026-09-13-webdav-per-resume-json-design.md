@@ -162,9 +162,9 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 2. 创建必要目录（包括 `objects/`）。
 3. 创建并回读验证所有新的不可变 `objects/<id>/<hash>.json`；既有对象只校验、永不覆盖。
 4. 下载从 `objectPath` 读取并验证；构造最终清单后，在发布前逐一回读并严格校验其全部 live `objectPath` 的 JSON、完整 ID 与内容哈希。缺失对象触发 `remote-changed` 重规划，损坏或不匹配对象 fail closed。
-5. 在发布窗口订阅本地 snapshot token，并将本地变化与外部取消合并到专用 AbortController；本地变化会中止清单请求，发布返回后还必须再次核验 token。
-6. 使用读取清单时获得的 ETag CAS 发布 `manifest.json`，这是远端事务提交点。若服务端忽略 abort 仍提交，在确认最新清单仍是本轮版本后，用其新 ETag CAS 恢复旧清单；首次同步则条件删除本轮清单。无法确认或恢复时安全 deferred，不覆盖未知远端状态。
-7. 仅在清单成功且发布窗口核验稳定后，尽力更新 `resumes/` / `trash/` 可读镜像；所有对象、移动及镜像修复操作都传播调用方 AbortSignal。
+5. 在发布窗口订阅本地 snapshot token；清单请求发出前，本地变化或外部取消可阻止发布。请求一旦发出，本地变化只记录 `localChanged=true`，不得中止该请求，必须等待成功或明确远端错误。
+6. 使用读取清单时获得的 ETag CAS 发布 `manifest.json`，这是远端事务提交点。发布成功且本地已变化时，重新读取并确认远端仍是本轮 manifest，再用其 ETag CAS 恢复旧清单；首次同步则条件删除。若发布返回不确定网络错误，以固定小次数稳定性轮询区分本轮 manifest、旧状态和第三方状态：本轮版本需条件恢复，旧状态可安全 deferred，第三方状态必须返回 remote-changed 且绝不覆盖。恢复 CAS 失败同样视为第三方变化。
+7. 仅在清单成功且发布窗口核验稳定后，尽力更新 `resumes/` / `trash/` 可读镜像；对象、移动及镜像修复操作传播调用方 AbortSignal，但已发出的 manifest publish 不再被取消。
 8. 原子提交本地 Resume Store 与同步基线。
 
 清单 CAS 失败时不执行镜像操作；本轮新对象只是安全孤儿，旧清单仍完整指向旧对象。镜像失败不回滚清单，因为后续同步可从不可变对象修复镜像。

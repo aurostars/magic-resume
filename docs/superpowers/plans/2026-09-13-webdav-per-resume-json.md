@@ -602,8 +602,9 @@ Assert exact safety properties:
 - directories, including `objects/`, are ensured before object writes;
 - every new immutable object is created and hash-verified before manifest publication;
 - immediately before publication, every live entry in the final manifest is reread and strictly checked for existence, valid `ResumeData`, full ID, and content hash;
-- subscribe to the local snapshot token across the publication window, abort on change, and verify again after publish returns;
-- if a server commits despite abort, confirm the attempted manifest by hash and CAS-restore the old manifest, or conditionally delete it for first sync; uncertain recovery remains deferred;
+- subscribe to the local snapshot token across the publication window; before issuance, local change or external cancellation prevents publication, but after issuance local change is recorded without aborting the manifest request;
+- after an issued publish succeeds with a local change, confirm the current remote hash is the attempted manifest and CAS-restore the old manifest, or conditionally delete it for first sync;
+- after an uncertain publish error, perform a small fixed-count stability poll to classify attempted, previous, or third-party state; recover only the attempted state, treat previous as safe, and defer remote-changed without overwriting third-party state;
 - upload/object failure means `publishManifest` is never called;
 - downloaded content is read from `objectPath`, parsed, and hash-verified before entering result data;
 - manifest CAS mismatch returns `deferred: remote-changed` and performs no mirror mutation;

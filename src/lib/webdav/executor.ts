@@ -100,42 +100,56 @@ async function repairMirror(
   }
 }
 
-function linkedController(external?: AbortSignal): { controller: AbortController; dispose: () => void } {
-  const controller = new AbortController();
-  const abort = () => controller.abort(external?.reason);
-  if (external?.aborted) abort();
-  else external?.addEventListener("abort", abort, { once: true });
-  return {
-    controller,
-    dispose: () => external?.removeEventListener("abort", abort),
-  };
-}
+type PublicationRecovery = "local-restored" | "remote-changed" | "unknown";
+const PUBLICATION_STABILITY_READS = 3;
 
 async function reconcileLocalRace(
   input: ExecuteSyncPlanInput,
   attempted: ManifestV2,
-): Promise<boolean> {
-  try {
-    const latestFile = await input.repository.readManifest(input.signal);
-    if (!latestFile) return true;
-    const latest = await parseManifest(latestFile.text);
-    if (latest.manifestHash !== attempted.manifestHash) {
-      return input.previousManifest !== null && latest.manifestHash === input.previousManifest.manifestHash;
+): Promise<PublicationRecovery> {
+  let stablePreviousReads = 0;
+  for (let read = 0; read < PUBLICATION_STABILITY_READS; read += 1) {
+    try {
+      input.signal?.throwIfAborted();
+      const latestFile = await input.repository.readManifest(input.signal);
+      if (!latestFile) {
+        if (input.previousManifest !== null) return "remote-changed";
+        stablePreviousReads += 1;
+      } else {
+        const latest = await parseManifest(latestFile.text);
+        if (latest.manifestHash === attempted.manifestHash) {
+          if (!latestFile.etag) return "unknown";
+          try {
+            if (input.previousManifest) {
+              await input.repository.publishManifest(
+                serializeManifest(input.previousManifest),
+                latestFile.etag,
+                input.signal,
+              );
+            } else {
+              await input.repository.deleteManifest(latestFile.etag, input.signal);
+            }
+            return "local-restored";
+          } catch (error) {
+            if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
+              return "remote-changed";
+            }
+            throw error;
+          }
+        }
+        if (input.previousManifest === null || latest.manifestHash !== input.previousManifest.manifestHash) {
+          return "remote-changed";
+        }
+        stablePreviousReads += 1;
+      }
+    } catch (error) {
+      stablePreviousReads = 0;
+      if (input.signal?.aborted) throw input.signal.reason;
+      if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") return "remote-changed";
     }
-    if (!latestFile.etag) return false;
-    if (input.previousManifest) {
-      await input.repository.publishManifest(
-        serializeManifest(input.previousManifest),
-        latestFile.etag,
-        input.signal,
-      );
-    } else {
-      await input.repository.deleteManifest(latestFile.etag, input.signal);
-    }
-    return true;
-  } catch {
-    return false;
+    await Promise.resolve();
   }
+  return stablePreviousReads === PUBLICATION_STABILITY_READS ? "local-restored" : "unknown";
 }
 
 export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<ExecutePlanResult> {
@@ -240,38 +254,41 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     }
 
     let localChanged = false;
-    const linked = linkedController(signal);
     const observeLocal = () => {
-      if (input.getLocalToken() !== input.expectedLocalToken) {
-        localChanged = true;
-        linked.controller.abort(new LocalCasMismatchError());
-      }
+      if (input.getLocalToken() !== input.expectedLocalToken) localChanged = true;
     };
     const unsubscribe = input.subscribeLocalToken(observeLocal);
     observeLocal();
     if (localChanged) {
       unsubscribe();
-      linked.dispose();
       return { kind: "deferred", reason: "local-changed" };
     }
+    signal?.throwIfAborted();
 
+    // Once issued, publication is deliberately detached from cancellation. Its outcome must be
+    // observed before recovery so a late server commit cannot escape reconciliation.
+    const publicationSignal = new AbortController().signal;
     let publishError: unknown = null;
     try {
       await repository.publishManifest(
         serializeManifest(finalManifest),
         input.remoteManifestEtag,
-        linked.controller.signal,
+        publicationSignal,
       );
     } catch (error) {
       publishError = error;
     } finally {
       observeLocal();
       unsubscribe();
-      linked.dispose();
     }
     if (localChanged) {
-      await reconcileLocalRace(input, finalManifest);
-      return { kind: "deferred", reason: "local-changed" };
+      if (publishError instanceof WebDavError && publishError.code === "REMOTE_CAS_MISMATCH") {
+        return { kind: "deferred", reason: "remote-changed" };
+      }
+      const recovery = await reconcileLocalRace(input, finalManifest);
+      return recovery === "local-restored"
+        ? { kind: "deferred", reason: "local-changed" }
+        : { kind: "deferred", reason: "remote-changed" };
     }
     if (publishError) {
       if (publishError instanceof WebDavError && publishError.code === "REMOTE_CAS_MISMATCH") {
