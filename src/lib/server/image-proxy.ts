@@ -84,37 +84,46 @@ function expandIPv6(hostname: string): number[] | undefined {
   return words.length === 8 && words.every(Number.isFinite) ? words : undefined;
 }
 
+function isGloballyRoutableIPv6(words: number[]) {
+  // NAT64's well-known prefix is globally reachable only when its embedded IPv4 is.
+  if (
+    words[0] === 0x0064 &&
+    words[1] === 0xff9b &&
+    words.slice(2, 6).every((word) => word === 0)
+  ) {
+    return !isBlockedIPv4([
+      words[6] >> 8,
+      words[6] & 0xff,
+      words[7] >> 8,
+      words[7] & 0xff,
+    ]);
+  }
+
+  // Conservatively allow allocated global unicast (2000::/3), minus IANA
+  // special-purpose blocks. Unknown or transition space stays fail-closed.
+  if ((words[0] & 0xe000) !== 0x2000) return false;
+  if (
+    (words[0] === 0x2001 && (words[1] < 0x0200 || words[1] === 0x0db8)) ||
+    words[0] === 0x2002
+  ) {
+    return false;
+  }
+  if (words[0] === 0x3fff && (words[1] & 0xf000) === 0) return false;
+  return true;
+}
+
+function isGloballyRoutableAddress(hostname: string) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const ipv4 = parseIPv4(normalized);
+  if (ipv4) return !isBlockedIPv4(ipv4);
+  const ipv6 = expandIPv6(normalized);
+  return ipv6 !== undefined && isGloballyRoutableIPv6(ipv6);
+}
+
 function isBlockedHostname(hostname: string) {
   const normalized = hostname.toLowerCase().replace(/\.$/, "");
   if (normalized === "localhost" || normalized.endsWith(".localhost")) return true;
-
-  const ipv4 = parseIPv4(normalized);
-  if (ipv4) return isBlockedIPv4(ipv4);
-
-  const ipv6 = expandIPv6(normalized);
-  if (!ipv6) return false;
-  if (
-    ipv6.every((word) => word === 0) ||
-    (ipv6.slice(0, 7).every((word) => word === 0) && ipv6[7] === 1)
-  ) {
-    return true;
-  }
-  if (
-    (ipv6[0] & 0xfe00) === 0xfc00 ||
-    (ipv6[0] & 0xffc0) === 0xfe80 ||
-    (ipv6[0] & 0xff00) === 0xff00
-  ) {
-    return true;
-  }
-  if (ipv6.slice(0, 5).every((word) => word === 0) && ipv6[5] === 0xffff) {
-    return isBlockedIPv4([
-      ipv6[6] >> 8,
-      ipv6[6] & 0xff,
-      ipv6[7] >> 8,
-      ipv6[7] & 0xff,
-    ]);
-  }
-  return false;
+  return isIpAddress(normalized) && !isGloballyRoutableAddress(normalized);
 }
 
 function isIpAddress(hostname: string) {

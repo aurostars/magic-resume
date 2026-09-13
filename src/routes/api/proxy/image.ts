@@ -6,11 +6,18 @@ import {
 
 const cloudflareTransport = createCloudflareFetchTransport();
 
+function isVerifiedCloudflareRuntime() {
+  return globalThis.navigator?.userAgent === "Cloudflare-Workers";
+}
+
 export const Route = createFileRoute("/api/proxy/image")({
   server: {
     handlers: {
       GET: ({ request }) =>
-        handleImageProxy(request, { transport: cloudflareTransport }),
+        handleImageProxy(
+          request,
+          isVerifiedCloudflareRuntime() ? { transport: cloudflareTransport } : undefined,
+        ),
     },
   },
 });

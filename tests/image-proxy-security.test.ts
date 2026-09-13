@@ -10,6 +10,14 @@ import {
 import { Route as CloudflareImageRoute } from "../src/routes/api/proxy/image";
 
 const originalFetch = globalThis.fetch;
+const originalNavigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
+function setRuntimeUserAgent(userAgent: string) {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { userAgent },
+  });
+}
 
 const directTestTransport: ImageProxyTransport = {
   fetch: (target, init) => globalThis.fetch(target, init),
@@ -24,6 +32,11 @@ function proxy(request: Request, dependencies: Partial<ImageProxyDependencies> =
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalNavigatorDescriptor) {
+    Object.defineProperty(globalThis, "navigator", originalNavigatorDescriptor);
+  } else {
+    Reflect.deleteProperty(globalThis, "navigator");
+  }
 });
 
 async function expectError(
@@ -556,7 +569,26 @@ test("the injected 15 second timeout aborts while reading the upstream body", as
   assert.equal((await response.json()).code, "timeout");
 });
 
-test("the Cloudflare route delegates through its platform-managed fetch transport", async () => {
+test("the shared route fails closed in the Node/default runtime", async () => {
+  setRuntimeUserAgent("Node.js/24");
+  globalThis.fetch = (async () => {
+    assert.fail("the shared route must not use ambient Node fetch");
+  }) as typeof fetch;
+  const handler = CloudflareImageRoute.options.server?.handlers.GET;
+  assert.equal(typeof handler, "function");
+
+  const response = await handler!({
+    request: new Request(
+      "https://app.example/api/proxy/image?url=https%3A%2F%2Fimages.example.test%2Fnode.png",
+    ),
+  } as never);
+
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, "blockedTarget");
+});
+
+test("the shared route delegates only in a verified Cloudflare runtime", async () => {
+  setRuntimeUserAgent("Cloudflare-Workers");
   const bytes = Uint8Array.of(137, 80, 78, 71);
   let requested = "";
   globalThis.fetch = (async (input, init) => {
@@ -577,7 +609,6 @@ test("the Cloudflare route delegates through its platform-managed fetch transpor
   assert.equal(requested, "https://images.example.test/cloudflare.png");
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
 });
-
 
 test("the pinned transport resolves and validates again on a same-host redirect", async () => {
   let resolutions = 0;
@@ -607,4 +638,40 @@ test("the pinned transport resolves and validates again on a same-host redirect"
   assert.equal((await response.json()).code, "blockedTarget");
   assert.equal(resolutions, 2);
   assert.equal(connections, 1);
+});
+
+test("the pinned transport rejects IPv6 addresses that are not proven globally routable", async () => {
+  for (const address of [
+    "100::1",
+    "2001::1",
+    "2001:db8::1",
+    "2002:a00:1::1",
+    "3fff::1",
+    "5f00::1",
+    "64:ff9b::a00:1",
+    "64:ff9b:1::a00:1",
+    "fec0::1",
+  ]) {
+    let connected = false;
+    const transport = createPinnedAddressTransport({
+      resolveAll: async () => [address],
+      connectToValidatedAddresses: async () => {
+        connected = true;
+        return new Response(Uint8Array.of(1), {
+          headers: { "Content-Type": "image/png" },
+        });
+      },
+    });
+
+    const response = await proxy(
+      new Request(
+        "https://app.example/api/proxy/image?url=https%3A%2F%2Fimages.example.test%2Fspecial.png",
+      ),
+      { transport },
+    );
+
+    assert.equal(response.status, 403, address);
+    assert.equal((await response.json()).code, "blockedTarget", address);
+    assert.equal(connected, false, address);
+  }
 });
