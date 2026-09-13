@@ -36,6 +36,7 @@ class FakeRepository {
   pendingPublish: { operation: ManifestPublishOperation; text: string } | null = null;
   preparedManifestText = "";
   temporarySourceExists = false;
+  manifestPublishSupported = false;
   deferredMoveAfterReads = Number.POSITIVE_INFINITY;
   destinationReadsAfterError = 0;
   restoreNetworkError = false;
@@ -43,6 +44,7 @@ class FakeRepository {
   lateMoveFailed = false;
   onPrepare: (() => void) | null = null;
   onWrite: ((path: string) => void) | null = null;
+  onCapabilityCheck: ((signal?: AbortSignal) => void | Promise<void>) | null = null;
   onPublish: ((signal?: AbortSignal) => void | Promise<void>) | null = null;
   onReadManifest: (() => void) | null = null;
   onRestore: (() => void) | null = null;
@@ -78,6 +80,12 @@ class FakeRepository {
     const file = this.files.get(from);
     if (file) { this.files.set(to, file); this.files.delete(from); }
   }
+  async ensureManifestPublishSupported(signal?: AbortSignal) {
+    this.calls.push("preflight"); this.seenSignals.push(signal);
+    await this.onCapabilityCheck?.(signal);
+    signal?.throwIfAborted();
+    this.manifestPublishSupported = true;
+  }
   async prepareManifestPublish(text: string, expectedEtag: string | null, signal?: AbortSignal) {
     this.calls.push(`prepare:${expectedEtag}`); this.seenSignals.push(signal);
     this.preparedManifestText = text;
@@ -92,6 +100,9 @@ class FakeRepository {
     };
   }
   async commitManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal) {
+    if (!this.manifestPublishSupported) {
+      await this.ensureManifestPublishSupported(signal);
+    }
     const expectedEtag = operation.destinationPrecondition.kind === "match"
       ? operation.destinationPrecondition.etag
       : null;
@@ -222,7 +233,7 @@ test("uploads and verifies immutable objects, publishes manifest, then writes re
   assert.deepEqual(state.repository.calls, [
     "ensure-layout", `ensure-object:${item.id}`,
     `read:${objectPath(item.id, hash)}`, `write:${objectPath(item.id, hash)}`,
-    `read:${objectPath(item.id, hash)}`, `read:${objectPath(item.id, hash)}`, "prepare:null", "publish:null",
+    `read:${objectPath(item.id, hash)}`, `read:${objectPath(item.id, hash)}`, "preflight", "prepare:null", "publish:null",
     "read:resumes/Readable--resume.json", "write:resumes/Readable--resume.json", "read:resumes/Readable--resume.json",
   ]);
   const published = JSON.parse(state.repository.manifestText!) as ManifestV2;
@@ -372,6 +383,38 @@ test("local change after publication subscription but before request prevents ma
 
   assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
   assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
+});
+
+test("abort while manifest OPTIONS is pending prevents temp preparation and publication", async () => {
+  const item = resume("abort-during-options");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Abort--abort-.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  const controller = new AbortController();
+  const abortReason = new Error("stop during OPTIONS");
+  let releaseOptions!: () => void;
+  let markOptionsStarted!: () => void;
+  const optionsPending = new Promise<void>((resolve) => { releaseOptions = resolve; });
+  const optionsStarted = new Promise<void>((resolve) => { markOptionsStarted = resolve; });
+  state.input.signal = controller.signal;
+  state.repository.onCapabilityCheck = async () => {
+    markOptionsStarted();
+    await optionsPending;
+  };
+
+  const execution = executeSyncPlan(state.input);
+  await optionsStarted;
+  controller.abort(abortReason);
+  releaseOptions();
+
+  await assert.rejects(execution, (error: unknown) => error === abortReason);
+  assert.equal(state.repository.manifestText, null);
+  assert.equal(state.repository.temporarySourceExists, false);
+  assert.equal(state.commits.length, 0);
+  assert.equal(state.getListenerCount(), 0);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("prepare:")), false);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("cancel-source:")), false);
 });
 
 test("abort after prepare unsubscribes and conditionally cleans temp while preserving abort reason", async () => {

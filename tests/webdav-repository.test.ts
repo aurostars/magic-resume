@@ -207,21 +207,16 @@ test("manifest publish exposes its temporary source handle before conditional MO
   ]);
 });
 
-test("manifest publish fails closed before MOVE when conditional MOVE capability is absent", async () => {
+test("manifest publish capability preflight fails before creating a temporary source", async () => {
   const client = new FakeClient();
   client.conditionalMove = false;
-  client.files.set("/magic-resume/manifest.json.tmp-device-1-op-1", {
-    text: "new",
-    etag: '"temp-1"',
-  });
   const repository = repositoryWith(client);
-  const operation = await repository.prepareManifestPublish("new", null);
 
   await assert.rejects(
-    repository.commitManifestPublish(operation),
+    repository.ensureManifestPublishSupported(),
     (error: unknown) => error instanceof WebDavError && error.code === "MOVE_UNSUPPORTED",
   );
-  assert.equal(client.calls.some((call) => call[0] === "move"), false);
+  assert.deepEqual(client.calls, [["options", "/magic-resume/"]]);
 });
 
 test("manifest publish cancellation conditionally deletes only its temporary source", async () => {

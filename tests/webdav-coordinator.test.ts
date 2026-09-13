@@ -77,6 +77,7 @@ class MemoryRepository {
     const value = this.files.get(from);
     if (value) { this.files.delete(from); this.files.set(to, value); }
   }
+  async ensureManifestPublishSupported() {}
   async prepareManifestPublish(text: string, expectedEtag: string | null): Promise<ManifestPublishOperation> {
     this.calls.push(`prepare:${expectedEtag}`);
     this.preparedManifestText = text;

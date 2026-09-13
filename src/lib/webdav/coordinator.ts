@@ -29,8 +29,8 @@ export type ConflictDecision = {
 export interface CoordinatorDependencies {
   repository: Pick<WebDavResumeRepository,
     "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "listResumeCandidates" |
-    "writeResumeAtomic" | "moveResumeAtomic" | "prepareManifestPublish" |
-    "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
+    "writeResumeAtomic" | "moveResumeAtomic" | "ensureManifestPublishSupported" |
+    "prepareManifestPublish" | "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
   getLocalData: () => ResumeSyncData;
   subscribeLocalData: (listener: () => void) => () => void;
   getBaseline: () => MultiFileBaseline | null;

@@ -12,8 +12,8 @@ export type ExecutePlanResult =
 
 type RepositoryApi = Pick<WebDavResumeRepository,
   "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "writeResumeAtomic" |
-  "moveResumeAtomic" | "prepareManifestPublish" | "commitManifestPublish" |
-  "cancelManifestPublish" | "deleteManifest">;
+  "moveResumeAtomic" | "ensureManifestPublishSupported" | "prepareManifestPublish" |
+  "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
 
 export interface ExecuteSyncPlanInput {
   repository: RepositoryApi;
@@ -314,6 +314,11 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     };
     const unsubscribe = input.subscribeLocalToken(observeLocal);
     try {
+      observeLocal();
+      if (localChanged) return { kind: "deferred", reason: "local-changed" };
+      signal?.throwIfAborted();
+
+      await repository.ensureManifestPublishSupported(signal);
       observeLocal();
       if (localChanged) return { kind: "deferred", reason: "local-changed" };
       signal?.throwIfAborted();
