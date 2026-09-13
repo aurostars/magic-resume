@@ -21,8 +21,12 @@ export interface RemoteCollectionFile {
   etag: string | null;
 }
 
+export interface WebDavCapabilities {
+  conditionalMove: boolean;
+}
+
 export interface WebDavClientApi {
-  options(path: string, signal?: AbortSignal): Promise<void>;
+  options(path: string, signal?: AbortSignal): Promise<WebDavCapabilities>;
   propfind(path: string, signal?: AbortSignal): Promise<boolean>;
   listCollection(path: string, signal?: AbortSignal): Promise<RemoteCollectionFile[]>;
   ensureDirectory(path: string, signal?: AbortSignal): Promise<void>;
@@ -39,6 +43,7 @@ export interface WebDavClientApi {
     destination: string,
     preconditionOrSignal?: RemotePrecondition | AbortSignal,
     signal?: AbortSignal,
+    sourceEtag?: string,
   ): Promise<void>;
   delete(
     path: string,
@@ -254,10 +259,20 @@ export class WebDavClient implements WebDavClientApi {
     this.authorization = basicAuthorization(config.username, config.password);
   }
 
-  async options(path: string, signal?: AbortSignal): Promise<void> {
+  async options(path: string, signal?: AbortSignal): Promise<WebDavCapabilities> {
     this.assertSafePath(path);
     const response = await this.request(path, { method: "OPTIONS" }, signal);
     this.requireSuccess(response);
+    const davTokens = (response.headers.get("DAV") ?? "")
+      .split(",")
+      .map((token) => token.trim().toLowerCase());
+    const allowedMethods = new Set((response.headers.get("Allow") ?? "")
+      .split(",")
+      .map((method) => method.trim().toUpperCase()));
+    return {
+      conditionalMove: davTokens.includes("1") &&
+        allowedMethods.has("MOVE") && allowedMethods.has("DELETE"),
+    };
   }
 
   async propfind(path: string, signal?: AbortSignal): Promise<boolean> {
@@ -404,6 +419,7 @@ export class WebDavClient implements WebDavClientApi {
     destination: string,
     preconditionOrSignal?: RemotePrecondition | AbortSignal,
     signal?: AbortSignal,
+    sourceEtag?: string,
   ): Promise<void> {
     this.assertSafePath(source);
     this.assertSafePath(destination);
@@ -413,14 +429,18 @@ export class WebDavClient implements WebDavClientApi {
     const requestSignal = preconditionOrSignal instanceof AbortSignal
       ? preconditionOrSignal
       : signal;
+    const sourceUrl = this.remoteUrl(source).toString();
     const destinationUrl = this.remoteUrl(destination).toString();
     const headers = new Headers({
       Destination: destinationUrl,
       Overwrite: precondition?.kind === "missing" ? "F" : "T",
     });
+    const taggedConditions: string[] = [];
+    if (sourceEtag) taggedConditions.push(`<${sourceUrl}> ([${sourceEtag}])`);
     if (precondition?.kind === "match") {
-      headers.set("If", `<${destinationUrl}> ([${precondition.etag}])`);
+      taggedConditions.push(`<${destinationUrl}> ([${precondition.etag}])`);
     }
+    if (taggedConditions.length > 0) headers.set("If", taggedConditions.join(" "));
     const response = await this.request(
       source,
       { method: "MOVE", headers },

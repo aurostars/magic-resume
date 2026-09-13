@@ -163,7 +163,7 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 3. 创建并回读验证所有新的不可变 `objects/<id>/<hash>.json`；既有对象只校验、永不覆盖。
 4. 下载从 `objectPath` 读取并验证；构造最终清单后，在发布前逐一回读并严格校验其全部 live `objectPath` 的 JSON、完整 ID 与内容哈希。缺失对象触发 `remote-changed` 重规划，损坏或不匹配对象 fail closed。
 5. 在发布窗口订阅本地 snapshot token；清单请求发出前，本地变化或外部取消可阻止发布。请求一旦发出，本地变化只记录 `localChanged=true`，不得中止该请求，必须等待成功或明确远端错误。
-6. 使用读取清单时获得的 ETag CAS，将本轮专属临时源 `MOVE` 到 `manifest.json`；临时源路径与上传后 ETag 构成本轮 operation handle。发布成功且本地已变化时，重新读取并确认远端仍是本轮 manifest，再用其 ETag CAS 恢复旧清单；首次同步则条件删除。若 `MOVE` 返回不确定网络错误，先以临时源 ETag 条件删除该源：删除成功即证明晚到 `MOVE` 必然失败，旧清单是确定终态；删除返回 404/条件失败时，才读取 destination 并分类为本轮、旧版或第三方。本轮版本按当前 CAS 恢复，第三方绝不覆盖；若 destination 仍是旧版/404 且临时源已不存在，必须保持 `remote-uncertain`、fail closed，后续同步继续 reconcile。任何固定次数即时 GET 都不能证明旧版是终态。恢复 CAS 失败同样视为第三方变化。
+6. 使用读取清单时获得的 ETag CAS，将本轮专属临时源 `MOVE` 到 `manifest.json`；临时源路径与上传后 ETag 构成本轮 operation handle，MOVE 的 tagged `If` 同时绑定 source ETag 与 destination CAS。发布前通过 OPTIONS 验证 WebDAV class 1 及 MOVE/DELETE 能力，不满足时 fail closed。初次发布与恢复发布统一使用同一套 prepared-operation 仲裁：任一 MOVE 返回 NETWORK/TIMEOUT 后，先以临时源 ETag 条件删除该源。删除成功即证明晚到 MOVE 必然失败；仅 DELETE 404 证明源不存在，此时读取 destination 并分类为 before、after 或 third-party。DELETE 412/423 表示源可能仍存在，必须直接保持 `remote-uncertain`。after 状态可继续下一阶段或恢复，third-party 绝不覆盖；若 destination 仍是 before/404，则同样保持 `remote-uncertain`。任何固定次数即时 GET 都不能证明 before 是终态。
 7. 仅在清单成功且发布窗口核验稳定后，尽力更新 `resumes/` / `trash/` 可读镜像；对象、移动及镜像修复操作传播调用方 AbortSignal，但已发出的 manifest publish 不再被取消。
 8. 原子提交本地 Resume Store 与同步基线。
 
@@ -263,7 +263,7 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 - 内容哈希不一致：不写入本地，提示远端文件被修改或损坏。
 - Manifest 校验失败：停止同步，不覆盖远端。
 - ETag/CAS 冲突：重新规划，达到有限重试次数后返回可重试错误。
-- WebDAV `DELETE` 的非 2xx 响应必须作为安全错误返回；仅普通 repository 临时文件清理可显式捕获并 best-effort。manifest 不确定 `MOVE` 的源撤销必须使用该临时源上传后 ETag 的 `If-Match`，且必须观察结果；首次同步 destination 回滚也使用带 `If-Match` 的条件删除。
+- WebDAV `DELETE` 的非 2xx 响应必须作为安全错误返回；仅普通 repository 临时文件清理可显式捕获并 best-effort。manifest 不确定 `MOVE` 的源撤销必须使用该临时源上传后 ETag 的 `If-Match`，且必须观察结果：404 可进入 destination 分类，412/423 只能 `remote-uncertain`。manifest MOVE 必须用 tagged `If` 同时绑定 source ETag 与 destination CAS，并先确认服务端声明 WebDAV class 1 及 MOVE/DELETE 能力；首次同步 destination 回滚也使用带 `If-Match` 的条件删除。
 - 远端缺少可靠条件请求支持：延续现有 fail-closed 策略，不执行可能覆盖并发数据的写入。
 - 错误状态只保存安全 `code/status`；不得包含凭据、完整 URL 查询、响应正文或简历内容。
 - WebDAV 必须使用 HTTPS，localhost 开发例外沿用现有规则。

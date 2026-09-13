@@ -78,6 +78,24 @@ test("OPTIONS strips base query and hash, encodes each path segment, and uses UT
   assert.equal(calls[0].url.includes("fragment"), false);
 });
 
+test("OPTIONS reports whether reliable conditional MOVE prerequisites are advertised", async () => {
+  const supported = recordingFetch(() => new Response(null, {
+    status: 204,
+    headers: { DAV: "1, 2", Allow: "OPTIONS, GET, PUT, DELETE, MOVE" },
+  }));
+  const unsupported = recordingFetch(() => new Response(null, {
+    status: 204,
+    headers: { DAV: "1", Allow: "OPTIONS, GET, PUT" },
+  }));
+
+  assert.deepEqual(await clientWith(supported.fetchImpl).options("/magic-resume/"), {
+    conditionalMove: true,
+  });
+  assert.deepEqual(await clientWith(unsupported.fetchImpl).options("/magic-resume/"), {
+    conditionalMove: false,
+  });
+});
+
 test("PROPFIND sends Depth zero and reports whether the resource exists", async () => {
   const { calls, fetchImpl } = recordingFetch((_call, index) =>
     new Response(null, { status: index === 0 ? 207 : 404 }),
@@ -163,16 +181,23 @@ test("MOVE sends an absolute destination and Overwrite T without forwarding URL 
   assert.equal(headers.get("Destination")?.includes("token=secret"), false);
 });
 
-test("MOVE sends a tagged destination ETag condition for atomic replacement", async () => {
+test("MOVE sends tagged source and destination ETag conditions for atomic replacement", async () => {
   const { calls, fetchImpl } = recordingFetch();
   const client = clientWith(fetchImpl);
 
-  await client.move("/file.tmp", "/file.json", { kind: "match", etag: '"r1"' });
+  await client.move(
+    "/file.tmp",
+    "/file.json",
+    { kind: "match", etag: '"r1"' },
+    undefined,
+    '"temp-1"',
+  );
 
   const headers = new Headers(calls[0].init.headers);
   assert.equal(
     headers.get("If"),
-    '<https://dav.example.test/root/file.json> (["r1"])',
+    '<https://dav.example.test/root/file.tmp> (["temp-1"]) '
+      + '<https://dav.example.test/root/file.json> (["r1"])',
   );
   assert.equal(headers.get("Overwrite"), "T");
 });

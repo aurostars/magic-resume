@@ -165,11 +165,14 @@ export class WebDavResumeRepository {
   }
 
   async commitManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal): Promise<void> {
+    const capabilities = await this.client.options(this.root, signal);
+    if (!capabilities.conditionalMove) throw new WebDavError("MOVE_UNSUPPORTED");
     await this.client.move(
       operation.sourcePath,
       `${this.root}${MANIFEST_FILE}`,
       operation.destinationPrecondition,
       signal,
+      operation.sourceEtag,
     );
   }
 

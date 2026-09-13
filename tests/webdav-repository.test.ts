@@ -10,11 +10,12 @@ import { WebDavError } from "../src/lib/webdav/errors";
 import { WebDavResumeRepository } from "../src/lib/webdav/repository";
 
 type Call =
+  | ["options", string]
   | ["ensureDirectory", string]
   | ["getTextWithMetadata", string]
   | ["listCollection", string]
   | ["putText", string, string, RemotePrecondition | undefined]
-  | ["move", string, string, RemotePrecondition | undefined]
+  | ["move", string, string, RemotePrecondition | undefined, string?]
   | ["delete", string, RemotePrecondition?];
 
 class FakeClient implements WebDavClientApi {
@@ -23,9 +24,13 @@ class FakeClient implements WebDavClientApi {
   listing: RemoteCollectionFile[] = [];
   moveError: unknown = null;
   deleteError: unknown = null;
+  conditionalMove = true;
   readonly signals: Array<AbortSignal | undefined> = [];
 
-  async options(): Promise<void> {}
+  async options(path: string) {
+    this.calls.push(["options", path]);
+    return { conditionalMove: this.conditionalMove };
+  }
   async propfind(): Promise<boolean> { return true; }
   async ensureDirectory(path: string): Promise<void> {
     this.calls.push(["ensureDirectory", path]);
@@ -58,12 +63,15 @@ class FakeClient implements WebDavClientApi {
     destination: string,
     preconditionOrSignal?: RemotePrecondition | AbortSignal,
     signal?: AbortSignal,
+    sourceEtag?: string,
   ): Promise<void> {
     const precondition = preconditionOrSignal instanceof AbortSignal
       ? undefined
       : preconditionOrSignal;
     this.signals.push(preconditionOrSignal instanceof AbortSignal ? preconditionOrSignal : signal);
-    this.calls.push(["move", source, destination, precondition]);
+    this.calls.push(sourceEtag
+      ? ["move", source, destination, precondition, sourceEtag]
+      : ["move", source, destination, precondition]);
     if (this.moveError) throw this.moveError;
   }
   async delete(
@@ -194,9 +202,26 @@ test("manifest publish exposes its temporary source handle before conditional MO
     destinationPrecondition: { kind: "missing" },
   });
   assert.deepEqual(client.calls.filter((call) => call[0] === "move"), [
-    ["move", create.sourcePath, "/magic-resume/manifest.json", { kind: "missing" }],
-    ["move", replace.sourcePath, "/magic-resume/manifest.json", { kind: "match", etag: '"m1"' }],
+    ["move", create.sourcePath, "/magic-resume/manifest.json", { kind: "missing" }, '"temp-1"'],
+    ["move", replace.sourcePath, "/magic-resume/manifest.json", { kind: "match", etag: '"m1"' }, '"temp-2"'],
   ]);
+});
+
+test("manifest publish fails closed before MOVE when conditional MOVE capability is absent", async () => {
+  const client = new FakeClient();
+  client.conditionalMove = false;
+  client.files.set("/magic-resume/manifest.json.tmp-device-1-op-1", {
+    text: "new",
+    etag: '"temp-1"',
+  });
+  const repository = repositoryWith(client);
+  const operation = await repository.prepareManifestPublish("new", null);
+
+  await assert.rejects(
+    repository.commitManifestPublish(operation),
+    (error: unknown) => error instanceof WebDavError && error.code === "MOVE_UNSUPPORTED",
+  );
+  assert.equal(client.calls.some((call) => call[0] === "move"), false);
 });
 
 test("manifest publish cancellation conditionally deletes only its temporary source", async () => {

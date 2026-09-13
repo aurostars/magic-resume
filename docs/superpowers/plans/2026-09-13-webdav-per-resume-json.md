@@ -351,7 +351,7 @@ Also assert:
 
 - `writeResumeAtomic` PUTs a unique temporary sibling then MOVEs to the final path;
 - failed MOVE attempts cleanup without hiding the primary safe error;
-- manifest publish exposes a per-operation temporary source path and ETag before MOVE, uses `If-None-Match: *` for creation or the expected destination ETag for replacement, and can conditionally delete only that source after an uncertain MOVE;
+- manifest publish exposes a per-operation temporary source path and ETag before MOVE, probes OPTIONS for WebDAV class 1 plus MOVE/DELETE support, sends tagged source and destination conditions on MOVE, and can conditionally delete only that source after an uncertain MOVE;
 - `listResumeCandidates` excludes directories, non-JSON files, temporary files, and every `trash/` file.
 
 - [ ] **Step 3: Run client/repository tests and confirm RED**
@@ -604,9 +604,9 @@ Assert exact safety properties:
 - directories, including `objects/`, are ensured before object writes;
 - every new immutable object is created and hash-verified before manifest publication;
 - immediately before publication, every live entry in the final manifest is reread and strictly checked for existence, valid `ResumeData`, full ID, and content hash;
-- subscribe to the local snapshot token across the publication window; before issuance, local change or external cancellation prevents publication, but after issuance local change is recorded without aborting the manifest request;
+- publication subscription and prepared temp source are scoped by `try/finally`; abort after prepare but before MOVE unsubscribes and conditionally deletes the temp source without replacing the original abort reason;
 - after an issued publish succeeds with a local change, confirm the current remote hash is the attempted manifest and CAS-restore the old manifest, or conditionally delete it for first sync;
-- after an uncertain manifest MOVE, conditionally DELETE its exact temporary source by source ETag; DELETE success proves the late MOVE cannot commit, while 404/precondition failure requires one destination classification as attempted, previous/404, or third-party; recover only attempted, never overwrite third-party, and keep previous/404 as `remote-uncertain` because repeated immediate GETs are not terminal-state proof;
+- initial and restoration manifest MOVEs share `commitPreparedManifestWithReconciliation`: on NETWORK/TIMEOUT, conditionally DELETE the exact temporary source by source ETag; DELETE success proves the late MOVE cannot commit, only 404 permits destination classification, and 412/423 stays `remote-uncertain` because the source may still exist; classify destination as before, after, or third-party, never overwrite third-party, and never treat repeated immediate GETs as terminal-state proof;
 - upload/object failure means no manifest publication operation is prepared or committed;
 - downloaded content is read from `objectPath`, parsed, and hash-verified before entering result data;
 - manifest CAS mismatch returns `deferred: remote-changed` and performs no mirror mutation;

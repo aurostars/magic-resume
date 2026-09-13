@@ -101,82 +101,109 @@ async function repairMirror(
   }
 }
 
-type PublicationRecovery =
-  | "source-cancelled"
-  | "attempted-restored"
+type PreparedManifestCommitResult =
+  | "committed"
+  | "not-committed"
   | "remote-changed"
   | "remote-uncertain";
 
-function isMissingOrPrecondition(error: unknown): boolean {
+type ExpectedDestinationState = {
+  before: ManifestV2 | null;
+  after: ManifestV2;
+};
+
+function isSourceMissing(error: unknown): boolean {
   return error instanceof WebDavError &&
-    (error.code === "NOT_FOUND" || error.code === "REMOTE_CAS_MISMATCH");
+    (error.code === "NOT_FOUND" || error.status === 404);
 }
 
-async function restoreAttemptedManifest(
-  input: ExecuteSyncPlanInput,
-  attemptedEtag: string,
-): Promise<PublicationRecovery> {
-  try {
-    if (input.previousManifest) {
-      const restore = await input.repository.prepareManifestPublish(
-        serializeManifest(input.previousManifest),
-        attemptedEtag,
-        input.signal,
-      );
-      await input.repository.commitManifestPublish(restore, input.signal);
-    } else {
-      await input.repository.deleteManifest(attemptedEtag, input.signal);
-    }
-    return "attempted-restored";
-  } catch (error) {
-    if (isMissingOrPrecondition(error)) return "remote-changed";
-    throw error;
-  }
+function isUncertainCommitError(error: unknown): boolean {
+  return error instanceof WebDavError &&
+    (error.code === "NETWORK" || error.code === "TIMEOUT");
 }
 
-async function classifyDestinationAfterLostSource(
+async function classifyDestination(
   input: ExecuteSyncPlanInput,
-  attempted: ManifestV2,
-): Promise<PublicationRecovery> {
-  input.signal?.throwIfAborted();
-  const latestFile = await input.repository.readManifest(input.signal);
+  expected: ExpectedDestinationState,
+): Promise<PreparedManifestCommitResult> {
+  const latestFile = await input.repository.readManifest();
   if (!latestFile) return "remote-uncertain";
   const latest = await parseManifest(latestFile.text);
-  if (latest.manifestHash === attempted.manifestHash) {
-    if (!latestFile.etag) return "remote-uncertain";
-    return restoreAttemptedManifest(input, latestFile.etag);
-  }
-  if (input.previousManifest && latest.manifestHash === input.previousManifest.manifestHash) {
+  if (latest.manifestHash === expected.after.manifestHash) return "committed";
+  if (expected.before && latest.manifestHash === expected.before.manifestHash) {
     return "remote-uncertain";
   }
   return "remote-changed";
 }
 
-async function reconcileUncertainMove(
+async function commitPreparedManifestWithReconciliation(
+  input: ExecuteSyncPlanInput,
+  operation: ManifestPublishOperation,
+  expected: ExpectedDestinationState,
+  commitSignal: AbortSignal,
+): Promise<PreparedManifestCommitResult> {
+  try {
+    await input.repository.commitManifestPublish(operation, commitSignal);
+    return "committed";
+  } catch (commitError) {
+    if (!isUncertainCommitError(commitError)) {
+      try { await input.repository.cancelManifestPublish(operation); } catch { /* orphan temp only */ }
+      if (commitError instanceof WebDavError && commitError.code === "REMOTE_CAS_MISMATCH") {
+        return "remote-changed";
+      }
+      throw commitError;
+    }
+
+    try {
+      await input.repository.cancelManifestPublish(operation);
+      return "not-committed";
+    } catch (cancelError) {
+      if (isSourceMissing(cancelError)) return classifyDestination(input, expected);
+      // 412/423 does not prove the source disappeared; a delayed MOVE may still consume it.
+      return "remote-uncertain";
+    }
+  }
+}
+
+async function restoreAttemptedManifest(
   input: ExecuteSyncPlanInput,
   attempted: ManifestV2,
-  operation: ManifestPublishOperation,
-): Promise<PublicationRecovery> {
-  try {
-    await input.repository.cancelManifestPublish(operation, input.signal);
-    return "source-cancelled";
-  } catch (error) {
-    if (input.signal?.aborted) throw input.signal.reason;
-    if (!isMissingOrPrecondition(error)) return "remote-uncertain";
-    return classifyDestinationAfterLostSource(input, attempted);
+  attemptedEtag: string,
+): Promise<PreparedManifestCommitResult> {
+  if (!input.previousManifest) {
+    try {
+      await input.repository.deleteManifest(attemptedEtag);
+      return "committed";
+    } catch (error) {
+      if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
+        return "remote-changed";
+      }
+      throw error;
+    }
   }
+
+  const restore = await input.repository.prepareManifestPublish(
+    serializeManifest(input.previousManifest),
+    attemptedEtag,
+  );
+  return commitPreparedManifestWithReconciliation(
+    input,
+    restore,
+    { before: attempted, after: input.previousManifest },
+    new AbortController().signal,
+  );
 }
 
 async function reconcileKnownSuccessfulMove(
   input: ExecuteSyncPlanInput,
   attempted: ManifestV2,
-): Promise<PublicationRecovery> {
-  const latestFile = await input.repository.readManifest(input.signal);
+): Promise<PreparedManifestCommitResult> {
+  const latestFile = await input.repository.readManifest();
   if (!latestFile) return "remote-uncertain";
   const latest = await parseManifest(latestFile.text);
   if (latest.manifestHash !== attempted.manifestHash) return "remote-changed";
   if (!latestFile.etag) return "remote-uncertain";
-  return restoreAttemptedManifest(input, latestFile.etag);
+  return restoreAttemptedManifest(input, attempted, latestFile.etag);
 }
 
 export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<ExecutePlanResult> {
@@ -281,64 +308,69 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     }
 
     let localChanged = false;
+    let publication: ManifestPublishOperation | null = null;
     const observeLocal = () => {
       if (input.getLocalToken() !== input.expectedLocalToken) localChanged = true;
     };
     const unsubscribe = input.subscribeLocalToken(observeLocal);
-    observeLocal();
-    if (localChanged) {
-      unsubscribe();
-      return { kind: "deferred", reason: "local-changed" };
-    }
-    signal?.throwIfAborted();
-
-    const publication = await repository.prepareManifestPublish(
-      serializeManifest(finalManifest),
-      input.remoteManifestEtag,
-      signal,
-    );
-    observeLocal();
-    if (localChanged) {
-      unsubscribe();
-      try { await repository.cancelManifestPublish(publication, signal); } catch { /* orphan temp only */ }
-      return { kind: "deferred", reason: "local-changed" };
-    }
-    signal?.throwIfAborted();
-
-    // Once issued, MOVE is deliberately detached from cancellation. A network error is reconciled
-    // through the conditionally deletable source, never through repeated destination observations.
-    const publicationSignal = new AbortController().signal;
-    let publishError: unknown = null;
     try {
-      await repository.commitManifestPublish(publication, publicationSignal);
-    } catch (error) {
-      publishError = error;
-    } finally {
       observeLocal();
-      unsubscribe();
-    }
+      if (localChanged) return { kind: "deferred", reason: "local-changed" };
+      signal?.throwIfAborted();
 
-    if (publishError instanceof WebDavError && publishError.code === "REMOTE_CAS_MISMATCH") {
-      try { await repository.cancelManifestPublish(publication, signal); } catch { /* orphan temp only */ }
-      return { kind: "deferred", reason: "remote-changed" };
-    }
-
-    if (publishError) {
-      const recovery = await reconcileUncertainMove(input, finalManifest, publication);
-      if (recovery === "source-cancelled" || recovery === "attempted-restored") {
-        if (localChanged) return { kind: "deferred", reason: "local-changed" };
-        throw publishError;
-      }
-      return { kind: "deferred", reason: recovery };
-    } else if (localChanged) {
-      const recovery = await reconcileKnownSuccessfulMove(input, finalManifest);
-      if (recovery === "attempted-restored") {
+      publication = await repository.prepareManifestPublish(
+        serializeManifest(finalManifest),
+        input.remoteManifestEtag,
+        signal,
+      );
+      observeLocal();
+      if (localChanged) {
+        try { await repository.cancelManifestPublish(publication); } catch { /* orphan temp only */ }
+        publication = null;
         return { kind: "deferred", reason: "local-changed" };
       }
-      return {
-        kind: "deferred",
-        reason: recovery === "remote-changed" ? "remote-changed" : "remote-uncertain",
-      };
+      if (signal?.aborted) {
+        const abortReason = signal.reason;
+        try { await repository.cancelManifestPublish(publication); } catch { /* preserve abort */ }
+        publication = null;
+        throw abortReason;
+      }
+
+      // Once issued, MOVE is deliberately detached from cancellation. Both initial publication and
+      // restoration use the same temp-source arbitration for uncertain network outcomes.
+      const commitResult = await commitPreparedManifestWithReconciliation(
+        input,
+        publication,
+        { before: input.previousManifest, after: finalManifest },
+        new AbortController().signal,
+      );
+      publication = null;
+      observeLocal();
+
+      if (commitResult === "not-committed") {
+        return {
+          kind: "deferred",
+          reason: localChanged ? "local-changed" : "remote-changed",
+        };
+      }
+      if (commitResult === "remote-changed" || commitResult === "remote-uncertain") {
+        return { kind: "deferred", reason: commitResult };
+      }
+      if (localChanged) {
+        const recovery = await reconcileKnownSuccessfulMove(input, finalManifest);
+        if (recovery === "committed") {
+          return { kind: "deferred", reason: "local-changed" };
+        }
+        return {
+          kind: "deferred",
+          reason: recovery === "remote-changed" ? "remote-changed" : "remote-uncertain",
+        };
+      }
+    } finally {
+      unsubscribe();
+      if (publication) {
+        try { await repository.cancelManifestPublish(publication); } catch { /* preserve primary outcome */ }
+      }
     }
   }
 

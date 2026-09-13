@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { initialResumeState } from "../src/config/initialResumeData";
 import { executeSyncPlan } from "../src/lib/webdav/executor";
-import { createManifest, serializeManifest } from "../src/lib/webdav/manifest";
+import { createManifest, parseManifest, serializeManifest } from "../src/lib/webdav/manifest";
 import { calculateResumeHash, serializeResumeJson } from "../src/lib/webdav/resume-codec";
 import { LocalCasMismatchError, WebDavError } from "../src/lib/webdav/errors";
 import type { ManifestPublishOperation } from "../src/lib/webdav/repository";
@@ -38,7 +38,10 @@ class FakeRepository {
   temporarySourceExists = false;
   deferredMoveAfterReads = Number.POSITIVE_INFINITY;
   destinationReadsAfterError = 0;
+  restoreNetworkError = false;
+  cancelSourceError: WebDavError | null = null;
   lateMoveFailed = false;
+  onPrepare: (() => void) | null = null;
   onWrite: ((path: string) => void) | null = null;
   onPublish: ((signal?: AbortSignal) => void | Promise<void>) | null = null;
   onReadManifest: (() => void) | null = null;
@@ -79,6 +82,7 @@ class FakeRepository {
     this.calls.push(`prepare:${expectedEtag}`); this.seenSignals.push(signal);
     this.preparedManifestText = text;
     this.temporarySourceExists = true;
+    this.onPrepare?.();
     return {
       sourcePath: "/magic-resume/manifest.json.tmp-device-a-operation",
       sourceEtag: '"temp-etag"',
@@ -95,6 +99,11 @@ class FakeRepository {
     await this.onPublish?.(signal);
     if (signal?.aborted) throw signal.reason;
     if (this.failPublish) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
+    if (this.restoreNetworkError && expectedEtag === '"published"') {
+      this.restoreNetworkError = false;
+      this.pendingPublish = { operation, text: this.preparedManifestText };
+      throw new WebDavError("NETWORK");
+    }
     if (this.publishNetworkError) {
       this.publishNetworkError = false;
       this.pendingPublish = { operation, text: this.preparedManifestText };
@@ -109,17 +118,14 @@ class FakeRepository {
   }
   async cancelManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal) {
     this.calls.push(`cancel-source:${operation.sourceEtag}`); this.seenSignals.push(signal);
+    if (this.cancelSourceError) throw this.cancelSourceError;
     if (this.pendingPublish && this.deferredMove === "move-wins") this.completePendingMove();
     if (this.pendingPublish && this.deferredMove === "third-party") {
       this.temporarySourceExists = false;
       this.manifestText = this.thirdPartyManifestText;
       this.manifestEtag = '"third-party"';
     }
-    if (!this.temporarySourceExists) {
-      throw this.deferredMove === "third-party"
-        ? new WebDavError("REMOTE_CAS_MISMATCH", 412)
-        : new WebDavError("NOT_FOUND", 404);
-    }
+    if (!this.temporarySourceExists) throw new WebDavError("NOT_FOUND", 404);
     this.temporarySourceExists = false;
   }
   private completePendingMove() {
@@ -159,6 +165,7 @@ const setup = (options: { local?: ResumeSyncData; remote?: ManifestV2 | null; pl
   return {
     repository,
     commits,
+    getListenerCount: () => listeners.size,
     setLocalToken: (value: string) => {
       localToken = value;
       for (const listener of [...listeners]) listener();
@@ -367,6 +374,23 @@ test("local change after publication subscription but before request prevents ma
   assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
 });
 
+test("abort after prepare unsubscribes and conditionally cleans temp while preserving abort reason", async () => {
+  const item = resume("abort-after-prepare");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Abort--abort-.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  const controller = new AbortController();
+  const abortReason = new Error("stop after prepare");
+  state.input.signal = controller.signal;
+  state.repository.onPrepare = () => controller.abort(abortReason);
+  state.repository.cancelSourceError = new WebDavError("SERVER", 503);
+
+  await assert.rejects(executeSyncPlan(state.input), (error: unknown) => error === abortReason);
+  assert.equal(state.getListenerCount(), 0);
+  assert.equal(state.repository.calls.includes('cancel-source:"temp-etag"'), true);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
+});
+
 test("in-flight local change waits for delayed publish success then conditionally deletes first-sync manifest", async () => {
   const item = resume("in-flight");
   const plan = emptyPlan();
@@ -426,7 +450,7 @@ test("uncertain MOVE that wins before temp DELETE is identified and restored", a
 
   assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
   assert.equal(state.repository.manifestText, original);
-  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 1);
+  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 2);
   assert.equal(state.repository.calls.includes('publish:"published"'), true);
 });
 
@@ -445,6 +469,43 @@ test("missing temp with previous destination remains remote-uncertain without po
 
   assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-uncertain" });
   assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 1);
+});
+
+test("temp DELETE precondition failure keeps a still-existing source remote-uncertain", async () => {
+  const old = resume("etag-changed", "Old");
+  const oldEntry = await entryFor(old);
+  const remote = await manifest({ [old.id]: oldEntry }, old.id);
+  const changed = resume(old.id, "Changed");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: changed, mirrorPath: "resumes/Changed--etag-c.json", previousMirrorPath: oldEntry.mirrorPath }];
+  const state = setup({ local: data(changed), remote, plan });
+  seed(state.repository, oldEntry.objectPath, old);
+  state.repository.publishNetworkError = true;
+  state.repository.cancelSourceError = new WebDavError("REMOTE_CAS_MISMATCH", 412);
+  state.repository.onPublish = () => state.setLocalToken("changed-in-flight");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-uncertain" });
+  assert.equal(state.repository.temporarySourceExists, true);
+  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 0);
+});
+
+test("uncertain restore MOVE retains its handle and reconciles to remote-uncertain", async () => {
+  const old = resume("restore-uncertain", "Old");
+  const oldEntry = await entryFor(old);
+  const remote = await manifest({ [old.id]: oldEntry }, old.id);
+  const changed = resume(old.id, "Changed");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: changed, mirrorPath: "resumes/Changed--restor.json", previousMirrorPath: oldEntry.mirrorPath }];
+  const state = setup({ local: data(changed), remote, plan });
+  seed(state.repository, oldEntry.objectPath, old);
+  state.repository.restoreNetworkError = true;
+  state.repository.onPublish = () => state.setLocalToken("changed-in-flight");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-uncertain" });
+  assert.equal(state.repository.calls.filter((call) => call === 'cancel-source:"temp-etag"').length, 1);
+  assert.equal(state.repository.temporarySourceExists, false);
+  const attempted = await parseManifest(state.repository.manifestText!);
+  assert.notEqual(attempted.manifestHash, remote.manifestHash);
 });
 
 test("third-party manifest committed before uncertain MOVE recovery is never overwritten", async () => {
