@@ -79,14 +79,13 @@ export function planSync(input: PlanSyncInput): SyncPlan {
     if (localChanged && remoteChanged) {
       if (localDeleted && remoteDeleted) continue;
       if (!localDeleted && !remoteDeleted && localHash === remoteEntry.contentHash) continue;
-      if (!remoteEntry) continue;
 
       plan.conflicts.push({
         resumeId,
-        title: local?.title ?? remoteTitle(remoteEntry),
+        title: local?.title ?? (remoteEntry ? remoteTitle(remoteEntry) : resumeId),
         kind: localDeleted || remoteDeleted ? "delete-vs-modify" : "both-modified",
         local,
-        remoteEntry,
+        remoteEntry: remoteEntry ?? null,
       });
       continue;
     }
@@ -124,9 +123,12 @@ export function planSync(input: PlanSyncInput): SyncPlan {
     }
   }
 
-  const deletedLocally = new Set(plan.remoteDeletions);
+  const removedIds = new Set([
+    ...plan.remoteDeletions,
+    ...plan.trashMoves.map(({ resumeId }) => resumeId),
+  ]);
   const liveIds = ids.filter((id) => {
-    if (deletedLocally.has(id)) return false;
+    if (removedIds.has(id)) return false;
     if (localById.has(id)) return true;
     const entry = remoteEntries[id];
     return Boolean(entry && !entry.deleted);

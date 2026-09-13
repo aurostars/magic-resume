@@ -307,3 +307,58 @@ test("invalid active ID falls back to the first live full ID or null", () => {
   assert.equal(withLiveResumes.nextActiveResumeId, resumeA.id);
   assert.equal(withoutLiveResumes.nextActiveResumeId, null);
 });
+
+
+test("remote hard deletion with changed local produces a delete-vs-modify conflict", () => {
+  const local = resume("resume-hard-deleted");
+  const result = plan({
+    resumes: [local],
+    localHashes: { [local.id]: hash("b") },
+    remote: manifest(),
+    previous: baseline({ [local.id]: baselineEntry(local.id, hash("a")) }),
+  });
+
+  assert.deepEqual(result.conflicts, [{
+    resumeId: local.id,
+    title: local.title,
+    kind: "delete-vs-modify",
+    local,
+    remoteEntry: null,
+  }]);
+});
+
+test("deleting the only resume makes the next active ID null", () => {
+  const id = "only-resume";
+  const result = plan({
+    activeResumeId: id,
+    remote: manifest({ [id]: entry(id, hash("a")) }, id),
+    previous: baseline({ [id]: baselineEntry(id, hash("a")) }, id),
+  });
+
+  assert.deepEqual(result.trashMoves.map(({ resumeId }) => resumeId), [id]);
+  assert.equal(result.nextActiveResumeId, null);
+});
+
+test("deleting the active resume selects the first remaining full ID", () => {
+  const deletedId = "same-prefix-current";
+  const resumeZ = resume("same-prefix-z");
+  const resumeA = resume("same-prefix-a");
+  const result = plan({
+    resumes: [resumeZ, resumeA],
+    activeResumeId: deletedId,
+    localHashes: { [resumeZ.id]: hash("z"), [resumeA.id]: hash("a") },
+    remote: manifest({
+      [deletedId]: entry(deletedId, hash("d")),
+      [resumeZ.id]: entry(resumeZ.id, hash("z")),
+      [resumeA.id]: entry(resumeA.id, hash("a")),
+    }, deletedId),
+    previous: baseline({
+      [deletedId]: baselineEntry(deletedId, hash("d")),
+      [resumeZ.id]: baselineEntry(resumeZ.id, hash("z")),
+      [resumeA.id]: baselineEntry(resumeA.id, hash("a")),
+    }, deletedId),
+  });
+
+  assert.deepEqual(result.trashMoves.map(({ resumeId }) => resumeId), [deletedId]);
+  assert.equal(result.nextActiveResumeId, resumeA.id);
+});

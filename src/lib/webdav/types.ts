@@ -62,7 +62,7 @@ export interface ResumeSyncConflict {
   title: string;
   kind: ResumeConflictKind;
   local: ResumeData | null;
-  remoteEntry: ResumeManifestEntry;
+  remoteEntry: ResumeManifestEntry | null;
 }
 
 export interface SyncPlan {
