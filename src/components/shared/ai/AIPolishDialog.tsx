@@ -23,6 +23,7 @@ import { pdfImportErrorMessage } from "@/lib/pdf-import-client";
 import { ResumeImportError } from "@/lib/resume-import-schema";
 import { getTaskModel, isModelConfigured, toAIConnection } from "@/config/ai-models";
 import { cn } from "@/lib/utils";
+import { getApiRequestUrl } from "@/config/runtime-endpoints";
 
 interface AIPolishDialogProps {
   open: boolean;
@@ -117,7 +118,7 @@ export default function AIPolishDialog({
 
       abortControllerRef.current = new AbortController();
 
-      const response = await fetch("/api/polish", {
+      const response = await fetch(getApiRequestUrl("/api/polish"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"

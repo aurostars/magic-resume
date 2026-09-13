@@ -2,12 +2,13 @@ import { MAX_PDF_REQUEST_BYTES, PDF_IMPORT_TIMEOUT_MS, type PdfImportConnection 
 import { combineAbortSignals } from "@/lib/abort-signal";
 import { ResumeImportError } from "@/lib/resume-import-schema";
 import type { Translator } from "@/i18n/compat/utils";
+import { getApiRequestUrl } from "@/config/runtime-endpoints";
 
 export async function requestPdfImport(connection: PdfImportConnection, images: string[], test = false, signal?: AbortSignal) {
   const body = JSON.stringify({ ...connection, images, test });
   if (new Blob([body]).size > MAX_PDF_REQUEST_BYTES) throw new ResumeImportError("requestTooLarge");
   try {
-    const response = await fetch("/api/resume-import", {
+    const response = await fetch(getApiRequestUrl("/api/resume-import"), {
       method: "POST", headers: { "Content-Type": "application/json" }, body,
       signal: combineAbortSignals([
         AbortSignal.timeout(PDF_IMPORT_TIMEOUT_MS + 10_000),

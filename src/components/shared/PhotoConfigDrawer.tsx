@@ -24,8 +24,12 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useResumeStore } from "@/store/useResumeStore";
 import { cn } from "@/lib/utils";
+import {
+  getApiRequestUrl,
+  getPublicAssetUrl,
+} from "@/config/runtime-endpoints";
 
-const DEFAULT_AVATAR = "/avatar.png";
+const getDefaultAvatar = () => getPublicAssetUrl("/avatar.png");
 
 interface Props {
   isOpen: boolean;
@@ -72,8 +76,13 @@ const PhotoConfigDrawer: React.FC<Props> = ({
   useEffect(() => {
     if (isOpen) {
       setConfig(initialConfig || DEFAULT_CONFIG);
-      setPreviewUrl(photo === "" ? "" : photo || DEFAULT_AVATAR);
-      setImageUrl(photo === DEFAULT_AVATAR ? "" : photo || "");
+      const defaultAvatar = getDefaultAvatar();
+      const usesDefaultAvatar =
+        !photo || photo === "/avatar.png" || photo === defaultAvatar;
+      setPreviewUrl(
+        photo === "" ? "" : usesDefaultAvatar ? defaultAvatar : photo
+      );
+      setImageUrl(usesDefaultAvatar ? "" : photo);
     }
 
     const handleClick = (e: MouseEvent) => {
@@ -152,7 +161,9 @@ const PhotoConfigDrawer: React.FC<Props> = ({
     }
 
     try {
-      const proxyUrl = `/api/proxy/image?url=${encodeURIComponent(url)}`;
+      const proxyUrl = getApiRequestUrl(
+        `/api/proxy/image?url=${encodeURIComponent(url)}`
+      );
 
       const img = new Image();
       img.crossOrigin = "anonymous";

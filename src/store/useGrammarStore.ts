@@ -4,6 +4,7 @@ import Mark from "mark.js";
 import { useAIConfigStore } from "@/store/useAIConfigStore";
 import { getTaskModel, isModelConfigured, toAIConnection } from "@/config/ai-models";
 import { cn } from "@/lib/utils";
+import { getApiRequestUrl } from "@/config/runtime-endpoints";
 
 export interface GrammarError {
   context: string;
@@ -99,7 +100,7 @@ export const useGrammarStore = create<GrammarStore>((set, get) => ({
     set({ isChecking: true });
 
     try {
-      const response = await fetch("/api/grammar", {
+      const response = await fetch(getApiRequestUrl("/api/grammar"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
