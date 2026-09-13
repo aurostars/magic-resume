@@ -1203,7 +1203,7 @@ test("local stabilization deferral stays dirty without conflict, UNKNOWN error, 
 });
 
 
-test("resolving one resume keeps unrelated conflicts visible and pauses dirty follow-up", async () => {
+test("resolving multiple resumes pauses then runs exactly one dirty follow-up after the final conflict", async () => {
   const productResume = makeIntegratedResume("full-id", "产品经理简历");
   const designResume = makeIntegratedResume("design-id", "设计师简历");
   const conflicts = [
@@ -1261,7 +1261,8 @@ test("resolving one resume keeps unrelated conflicts visible and pauses dirty fo
   let visibleConflicts: typeof conflicts = [];
   const decisions: unknown[] = [];
   let executeCalls = 0;
-  const resolution = deferred<SyncExecuteResult>();
+  const firstResolution = deferred<SyncExecuteResult>();
+  const secondResolution = deferred<SyncExecuteResult>();
   const controller = new WebDavSyncController({
     coordinator: {
       inspect: async () => inspection,
@@ -1271,7 +1272,7 @@ test("resolving one resume keeps unrelated conflicts visible and pauses dirty fo
           return executeCalls === 1 ? inspection : completed;
         }
         decisions.push(decisionOrSignal);
-        return resolution.promise;
+        return decisions.length === 1 ? firstResolution.promise : secondResolution.promise;
       },
     },
     client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
@@ -1301,7 +1302,7 @@ test("resolving one resume keeps unrelated conflicts visible and pauses dirty fo
   const resolving = controller.resolveConflict("full-id", "keep-local");
   controller.notifyLocalChange();
   controller.notifyLocalChange();
-  resolution.resolve({ ...inspection, conflicts: [conflicts[1]], plan: { ...inspection.plan, conflicts: [conflicts[1]] } });
+  firstResolution.resolve({ ...inspection, conflicts: [conflicts[1]], plan: { ...inspection.plan, conflicts: [conflicts[1]] } });
   await resolving;
   await controller.whenIdle();
 
@@ -1313,6 +1314,117 @@ test("resolving one resume keeps unrelated conflicts visible and pauses dirty fo
   }]);
   assert.deepEqual(visibleConflicts.map((item) => item.resumeId), ["design-id"]);
   assert.equal(executeCalls, 2, "a remaining conflict must keep automatic follow-up paused");
+
+  const resolvingLastConflict = controller.resolveConflict("design-id", "use-cloud");
+  secondResolution.resolve(completed);
+  await resolvingLastConflict;
+  await controller.whenIdle();
+
+  assert.deepEqual(decisions, [
+    {
+      resumeId: "full-id",
+      resolution: "keep-local",
+      seenRemoteEtag: '"manifest-7"',
+      seenManifestRevision: 7,
+    },
+    {
+      resumeId: "design-id",
+      resolution: "use-cloud",
+      seenRemoteEtag: '"manifest-7"',
+      seenManifestRevision: 7,
+    },
+  ]);
+  assert.equal(executeCalls, 4, "clearing the final conflict must run one dirty follow-up");
+});
+
+test("coalesces opposite queued decisions for the same resume", async () => {
+  const resume = makeIntegratedResume("full-id", "产品经理简历");
+  const resumeConflict = {
+    resumeId: resume.id,
+    title: resume.title,
+    kind: "both-modified" as const,
+    localUpdatedAt: "2026-09-12T08:00:00.000Z",
+    remoteUpdatedAt: "2026-09-12T09:00:00.000Z",
+    local: resume,
+    remoteEntry: {
+      objectPath: `objects/full-id/${"a".repeat(64)}.json`,
+      mirrorPath: "resumes/product.json",
+      contentHash: "a".repeat(64),
+      updatedAt: "2026-09-12T09:00:00.000Z",
+      deleted: false,
+    },
+  };
+  const inspection = {
+    decision: "conflict" as const,
+    localData: { resumes: [resume], activeResumeId: resume.id },
+    localToken: "token",
+    localHashes: {},
+    manifest: {
+      schemaVersion: 2 as const,
+      revision: 7,
+      parentRevision: 6,
+      updatedAt: "2026-09-12T09:00:00.000Z",
+      deviceId: "cloud-device",
+      activeResumeId: resume.id,
+      entries: {},
+      manifestHash: "b".repeat(64),
+    },
+    persistedManifest: null,
+    remoteEtag: '"manifest-7"',
+    plan: {
+      uploads: [], downloads: [], trashMoves: [], remoteDeletions: [],
+      conflicts: [resumeConflict], nextActiveResumeId: resume.id,
+    },
+    conflicts: [resumeConflict],
+    warnings: [],
+    discoveredRemoteFiles: false,
+  };
+  let visibleConflicts = [resumeConflict];
+  const decisions: unknown[] = [];
+  const firstResolution = deferred<SyncExecuteResult>();
+  const controller = new WebDavSyncController({
+    coordinator: {
+      inspect: async () => inspection,
+      execute: async (decisionOrSignal?: unknown) => {
+        if (decisionOrSignal instanceof AbortSignal || decisionOrSignal === undefined) return inspection;
+        decisions.push(decisionOrSignal);
+        return firstResolution.promise;
+      },
+    },
+    client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
+    remoteDirectory: "/sync/",
+    isApplyingRemote: () => false,
+    createConflict: () => conflict,
+    state: {
+      isConfigured: () => true,
+      isHydrated: () => true,
+      isAutoSyncEnabled: () => true,
+      isOnline: () => true,
+      isVisible: () => true,
+      hasConflict: () => visibleConflicts.length > 0,
+      begin: () => {},
+      complete: () => {},
+      defer: () => {},
+      fail: () => {},
+      setConflict: () => {},
+      clearConflict: () => { visibleConflicts = []; },
+      setConflicts: (next: typeof visibleConflicts) => { visibleConflicts = next; },
+    } as SyncControllerState,
+  } as any);
+
+  await controller.syncNow("manual");
+  const keepingLocal = controller.resolveConflict("full-id", "keep-local");
+  const usingCloud = controller.resolveConflict("full-id", "use-cloud");
+  firstResolution.resolve(completed);
+  await Promise.all([keepingLocal, usingCloud]);
+  await controller.whenIdle();
+
+  assert.deepEqual(decisions, [{
+    resumeId: "full-id",
+    resolution: "keep-local",
+    seenRemoteEtag: '"manifest-7"',
+    seenManifestRevision: 7,
+  }], "a queued opposite choice must not execute after the first choice resolves the conflict");
 });
 
 test("successful applied and no-op syncs publish only count and completion time state", async () => {

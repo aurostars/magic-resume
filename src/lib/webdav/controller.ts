@@ -195,8 +195,7 @@ export class WebDavSyncController {
       resolution,
       ...freshness,
     };
-    return this.enqueue(`resolve:${conflict.resumeId}:${resolution}`, async (signal) => {
-      this.dirty = false;
+    return this.enqueue(`resolve:${conflict.resumeId}`, async (signal) => {
       try {
         const result = await this.dependencies.coordinator.execute(decision, signal);
         if (isConflict(result)) {
