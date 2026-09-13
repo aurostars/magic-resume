@@ -130,7 +130,10 @@ export class WebDavResumeRepository {
   async moveResumeAtomic(
     from: string,
     to: string,
-    expectedEtag: string | null,
+    conditions: {
+      sourceEtag: string | null;
+      destinationPrecondition: RemotePrecondition;
+    },
     signal?: AbortSignal,
   ): Promise<void> {
     assertResumePath(from);
@@ -138,7 +141,21 @@ export class WebDavResumeRepository {
     await this.client.move(
       `${this.root}${from}`,
       `${this.root}${to}`,
-      preconditionFor(expectedEtag),
+      conditions.destinationPrecondition,
+      signal,
+      conditions.sourceEtag ?? undefined,
+    );
+  }
+
+  async deleteResumeAtomic(
+    path: string,
+    sourceEtag: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    assertResumePath(path);
+    await this.client.delete(
+      `${this.root}${path}`,
+      { kind: "match", etag: sourceEtag },
       signal,
     );
   }

@@ -96,9 +96,34 @@ export function planSync(input: PlanSyncInput): SyncPlan {
     const entry = remoteEntries[id];
     return Boolean(entry && !entry.deleted);
   });
-  const preferredIds = [input.remote?.activeResumeId, input.local.activeResumeId];
-  plan.nextActiveResumeId = preferredIds.find(
-    (id): id is string => id !== null && id !== undefined && liveIds.includes(id),
-  ) ?? liveIds[0] ?? null;
+  const baselineActive = input.baseline?.activeResumeId;
+  const localActive = input.local.activeResumeId;
+  const remoteActive = input.remote?.activeResumeId ?? null;
+  const localActiveChanged = baselineActive !== undefined && localActive !== baselineActive;
+  const remoteActiveChanged = baselineActive !== undefined && remoteActive !== baselineActive;
+  let preferredActive: string | null;
+  if (baselineActive === undefined) {
+    preferredActive = remoteActive ?? localActive;
+  } else if (localActiveChanged && !remoteActiveChanged) {
+    preferredActive = localActive;
+    plan.activeResumeChange = "upload";
+  } else if (!localActiveChanged && remoteActiveChanged) {
+    preferredActive = remoteActive;
+    plan.activeResumeChange = "download";
+  } else if (localActiveChanged && remoteActiveChanged) {
+    // Active selection is local UI state; concurrent differing selections deterministically keep local.
+    preferredActive = localActive === remoteActive ? remoteActive : localActive;
+    if (preferredActive !== remoteActive) plan.activeResumeChange = "upload";
+    else if (preferredActive !== localActive) plan.activeResumeChange = "download";
+  } else {
+    preferredActive = baselineActive;
+  }
+  plan.nextActiveResumeId = preferredActive !== null && liveIds.includes(preferredActive)
+    ? preferredActive
+    : liveIds[0] ?? null;
+  if (plan.nextActiveResumeId !== preferredActive) {
+    if (plan.nextActiveResumeId !== remoteActive) plan.activeResumeChange = "upload";
+    else if (plan.nextActiveResumeId !== localActive) plan.activeResumeChange = "download";
+  }
   return plan;
 }

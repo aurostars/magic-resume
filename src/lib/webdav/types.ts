@@ -81,6 +81,7 @@ export interface SyncPlan {
   conflicts: ResumeSyncConflict[];
   manualImports?: Array<{ resume: ResumeData; mirrorPath: string }>;
   nextActiveResumeId: string | null;
+  activeResumeChange?: "upload" | "download";
 }
 
 export interface PlanSyncInput {

@@ -371,3 +371,52 @@ test("deleting the active resume selects the first remaining full ID", () => {
   assert.deepEqual(result.trashMoves.map(({ resumeId }) => resumeId), [deletedId]);
   assert.equal(result.nextActiveResumeId, resumeA.id);
 });
+
+
+test("local-only active resume change publishes the local choice", () => {
+  const a = resume("a");
+  const b = resume("b");
+  const entries = { a: entry("a", hash("a")), b: entry("b", hash("b")) };
+  const result = plan({
+    resumes: [a, b], activeResumeId: "b", localHashes: { a: hash("a"), b: hash("b") },
+    remote: manifest(entries, "a"), previous: baseline(entries, "a"),
+  });
+  assert.equal(result.nextActiveResumeId, "b");
+});
+
+test("remote-only active resume change applies the remote choice", () => {
+  const a = resume("a");
+  const b = resume("b");
+  const entries = { a: entry("a", hash("a")), b: entry("b", hash("b")) };
+  const result = plan({
+    resumes: [a, b], activeResumeId: "a", localHashes: { a: hash("a"), b: hash("b") },
+    remote: manifest(entries, "b"), previous: baseline(entries, "a"),
+  });
+  assert.equal(result.nextActiveResumeId, "b");
+});
+
+test("concurrent different active resume changes deterministically keep the local choice", () => {
+  const a = resume("a");
+  const b = resume("b");
+  const c = resume("c");
+  const entries = { a: entry("a", hash("a")), b: entry("b", hash("b")), c: entry("c", hash("c")) };
+  const result = plan({
+    resumes: [a, b, c], activeResumeId: "b",
+    localHashes: { a: hash("a"), b: hash("b"), c: hash("c") },
+    remote: manifest(entries, "c"), previous: baseline(entries, "a"),
+  });
+  assert.equal(result.nextActiveResumeId, "b");
+});
+
+test("active resume change is retained beside a remote content download", () => {
+  const a = resume("a");
+  const b = resume("b");
+  const entries = { a: entry("a", hash("a")), b: entry("b", hash("c")) };
+  const result = plan({
+    resumes: [a, b], activeResumeId: "b", localHashes: { a: hash("a"), b: hash("b") },
+    remote: manifest(entries, "a"),
+    previous: baseline({ a: baselineEntry("a", hash("a")), b: baselineEntry("b", hash("b")) }, "a"),
+  });
+  assert.equal(result.nextActiveResumeId, "b");
+  assert.deepEqual(result.downloads.map(({ resumeId }) => resumeId), ["b"]);
+});

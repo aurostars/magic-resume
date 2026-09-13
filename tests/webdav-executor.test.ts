@@ -74,11 +74,21 @@ class FakeRepository {
     this.files.set(path, { text, etag: `etag:${path}` });
     this.onWrite?.(path);
   }
-  async moveResumeAtomic(from: string, to: string, _etag?: string | null, signal?: AbortSignal) {
+  async moveResumeAtomic(
+    from: string,
+    to: string,
+    _conditions: { sourceEtag: string | null; destinationPrecondition: { kind: "missing" } | { kind: "match"; etag: string } },
+    signal?: AbortSignal,
+  ) {
     this.calls.push(`move:${from}->${to}`); this.seenSignals.push(signal);
     if (this.failMirror) throw new WebDavError("SERVER", 503);
     const file = this.files.get(from);
     if (file) { this.files.set(to, file); this.files.delete(from); }
+  }
+  async deleteResumeAtomic(path: string, sourceEtag: string, signal?: AbortSignal) {
+    this.calls.push(`delete-resume:${path}:${sourceEtag}`); this.seenSignals.push(signal);
+    const file = this.files.get(path);
+    if (file?.etag === sourceEtag) this.files.delete(path);
   }
   async ensureManifestPublishSupported(signal?: AbortSignal) {
     this.calls.push("preflight"); this.seenSignals.push(signal);
@@ -165,7 +175,12 @@ const manifest = async (entries: ManifestV2["entries"], activeResumeId: string |
   schemaVersion: 2, revision: 4, parentRevision: 3, updatedAt: NOW,
   deviceId: "remote", activeResumeId, entries,
 });
-const setup = (options: { local?: ResumeSyncData; remote?: ManifestV2 | null; plan?: SyncPlan } = {}) => {
+const setup = (options: {
+  local?: ResumeSyncData;
+  remote?: ManifestV2 | null;
+  plan?: SyncPlan;
+  currentBaseline?: MultiFileBaseline | null;
+} = {}) => {
   const repository = new FakeRepository();
   const remote = options.remote ?? null;
   if (remote) repository.manifestText = serializeManifest(remote);
@@ -188,6 +203,17 @@ const setup = (options: { local?: ResumeSyncData; remote?: ManifestV2 | null; pl
       remoteManifest: remote,
       previousManifest: remote,
       remoteManifestEtag: repository.manifestEtag,
+      currentBaseline: Object.prototype.hasOwnProperty.call(options, "currentBaseline")
+        ? options.currentBaseline
+        : remote ? {
+        manifestRevision: remote.revision,
+        manifestHash: remote.manifestHash,
+        activeResumeId: remote.activeResumeId,
+        entries: Object.fromEntries(Object.entries(remote.entries).map(([id, entry]) => [id, {
+          contentHash: entry.contentHash, deleted: entry.deleted,
+          objectPath: entry.objectPath, mirrorPath: entry.mirrorPath,
+        }])),
+      } : null,
       expectedLocalToken: "stable-token",
       getLocalToken: () => localToken,
       subscribeLocalToken: (listener: () => void) => {
@@ -588,4 +614,41 @@ test("executor forwards AbortSignal to object writes, moves, and mirror repair",
   assert.equal(state.repository.seenSignals.length > 0, true);
   assert.equal(state.repository.seenSignals.every((signal) => signal === controller.signal || signal !== undefined), true);
   assert.equal(state.repository.seenSignals.includes(undefined), false);
+});
+
+
+test("a remote no-op commits a missing baseline without rewriting the manifest", async () => {
+  const item = resume("baseline");
+  const itemEntry = await entryFor(item);
+  const remote = await manifest({ [item.id]: itemEntry }, item.id);
+  const state = setup({ local: data(item), remote, currentBaseline: null });
+  state.input.plan.nextActiveResumeId = item.id;
+  seed(state.repository, itemEntry.objectPath, item);
+  seed(state.repository, itemEntry.mirrorPath, item);
+
+  const result = await executeSyncPlan(state.input);
+
+  assert.equal(result.kind, "applied");
+  assert.equal(state.commits.length, 1);
+  assert.equal(state.commits[0].baseline.manifestHash, remote.manifestHash);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
+});
+
+test("an active-only local change publishes the manifest and commits local state", async () => {
+  const a = resume("a");
+  const b = resume("b");
+  const aEntry = await entryFor(a);
+  const bEntry = await entryFor(b);
+  const remote = await manifest({ a: aEntry, b: bEntry }, "a");
+  const state = setup({ local: { resumes: [a, b], activeResumeId: "b" }, remote });
+  state.input.plan.nextActiveResumeId = "b";
+  state.input.plan.activeResumeChange = "upload";
+  seed(state.repository, aEntry.objectPath, a);
+  seed(state.repository, bEntry.objectPath, b);
+
+  const result = await executeSyncPlan(state.input);
+
+  assert.equal(result.kind, "applied");
+  assert.equal((await parseManifest(state.repository.manifestText!)).activeResumeId, "b");
+  assert.equal(state.commits.length, 1);
 });

@@ -4,6 +4,7 @@ import { initialResumeState } from "../src/config/initialResumeData";
 import type { WebDavClientApi } from "../src/lib/webdav/client";
 import {
   LocalCasMismatchError,
+  type ConflictDecision,
   type SyncExecuteResult,
   type SyncInspection,
 } from "../src/lib/webdav/coordinator";
@@ -21,9 +22,9 @@ import {
 } from "../src/lib/webdav/snapshot";
 import { createManifest, serializeManifest } from "../src/lib/webdav/manifest";
 import { calculateResumeHash, serializeResumeJson } from "../src/lib/webdav/resume-codec";
-import type { CloudSnapshotV1, ManifestV2, MultiFileBaseline } from "../src/lib/webdav/types";
+import type { ManifestV2, MultiFileBaseline, ResumeSyncConflict } from "../src/lib/webdav/types";
 import { useResumeStore } from "../src/store/useResumeStore";
-import { useWebDavStore, type WebDavConflict } from "../src/store/useWebDavStore";
+import { useWebDavStore } from "../src/store/useWebDavStore";
 import {
   attachWebDavLifecycle,
   commitDownloadedSnapshot,
@@ -55,42 +56,47 @@ console.warn = (...args: unknown[]) => {
 after(() => { console.warn = originalConsoleWarn; });
 
 const completed = { status: "unchanged", warning: null } as const;
-const cloud = {
-  schemaVersion: 1,
-  revision: "cloud-r2",
-  parentRevision: "r1",
+const resumeConflict: ResumeSyncConflict = {
+  resumeId: "legacy",
+  title: "Local resume",
+  kind: "both-modified",
+  localUpdatedAt: "2026-09-12T13:00:00.000Z",
+  remoteUpdatedAt: "2026-09-12T12:00:00.000Z",
+  local: null,
+  remoteEntry: {
+    objectPath: `objects/legacy/${"a".repeat(64)}.json`,
+    mirrorPath: "resumes/legacy.json",
+    contentHash: "a".repeat(64),
+    updatedAt: "2026-09-12T12:00:00.000Z",
+    deleted: false,
+  },
+};
+const conflictManifest: ManifestV2 = {
+  schemaVersion: 2,
+  revision: 2,
+  parentRevision: 1,
   updatedAt: "2026-09-12T12:00:00.000Z",
   deviceId: "cloud-device",
-  contentHash: "hash",
-  data: { resumes: [], activeResumeId: null },
-} satisfies CloudSnapshotV1;
-const conflict: WebDavConflict = {
-  local: { updatedAt: "2026-09-12T13:00:00.000Z", deviceId: "local-device", resumeCount: 1 },
-  cloud: { updatedAt: cloud.updatedAt, deviceId: cloud.deviceId, resumeCount: 0 },
-  snapshot: cloud,
-  remoteEtag: '"etag-cloud-r2"',
-  manifestRevision: 2,
+  activeResumeId: "legacy",
+  entries: { legacy: resumeConflict.remoteEntry! },
+  manifestHash: "b".repeat(64),
 };
-const conflictResult = {
+const conflictResult: Extract<SyncInspection, { decision: "conflict" }> = {
   decision: "conflict",
-  cloud,
-  remoteEtag: '"etag-cloud-r2"',
   localData: { resumes: [], activeResumeId: null },
-  localHash: "local-hash",
   localToken: "local-token",
-} as const;
-
-const conflictFromInspection = (
-  inspection: Extract<SyncInspection, { decision: "conflict" }>,
-): WebDavConflict => ({
-  ...conflict,
-  cloud: {
-    ...conflict.cloud,
-    updatedAt: inspection.cloud?.updatedAt ?? conflict.cloud.updatedAt,
-    deviceId: inspection.cloud?.deviceId ?? conflict.cloud.deviceId,
+  localHashes: {},
+  manifest: conflictManifest,
+  persistedManifest: conflictManifest,
+  remoteEtag: '"etag-cloud-r2"',
+  plan: {
+    uploads: [], downloads: [], trashMoves: [], remoteDeletions: [],
+    conflicts: [resumeConflict], nextActiveResumeId: "legacy",
   },
-  snapshot: inspection.cloud ?? conflict.snapshot,
-});
+  conflicts: [resumeConflict],
+  warnings: [],
+  discoveredRemoteFiles: false,
+};
 
 const deferred = <T>() => {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -132,13 +138,15 @@ class FakeClock implements SyncControllerClock {
 
 const setup = (overrides: {
   inspect?: (signal: AbortSignal) => Promise<SyncInspection>;
-  execute?: (signal: AbortSignal) => Promise<SyncExecuteResult>;
-  keepLocal?: (snapshot: CloudSnapshotV1, etag: string | null, revision: number, signal: AbortSignal) => Promise<SyncExecuteResult>;
-  useCloud?: (snapshot: CloudSnapshotV1, etag: string | null, revision: number, signal: AbortSignal) => Promise<SyncExecuteResult>;
+  execute?: (
+    decisionOrSignal?: ConflictDecision | AbortSignal,
+    signal?: AbortSignal,
+  ) => Promise<SyncExecuteResult>;
+  keepLocal?: (decision: ConflictDecision, signal: AbortSignal) => Promise<SyncExecuteResult>;
+  useCloud?: (decision: ConflictDecision, signal: AbortSignal) => Promise<SyncExecuteResult>;
   options?: (path: string, signal?: AbortSignal) => Promise<void>;
   propfind?: (path: string, signal?: AbortSignal) => Promise<boolean>;
   begin?: () => void;
-  createConflict?: (inspection: Extract<SyncInspection, { decision: "conflict" }>) => WebDavConflict;
   hydrated?: boolean;
   configured?: boolean;
   auto?: boolean;
@@ -150,7 +158,7 @@ const setup = (overrides: {
   const clock = new FakeClock();
   const events: string[] = [];
   let calls = 0;
-  let currentConflict: WebDavConflict | null = overrides.conflicted ? conflict : null;
+  let currentConflicts: ResumeSyncConflict[] = overrides.conflicted ? [resumeConflict] : [];
   const flags = {
     hydrated: overrides.hydrated ?? true,
     configured: overrides.configured ?? true,
@@ -165,13 +173,13 @@ const setup = (overrides: {
     isAutoSyncEnabled: () => flags.auto,
     isOnline: () => flags.online,
     isVisible: () => flags.visible,
-    hasConflict: () => currentConflict !== null,
+    hasConflict: () => currentConflicts.length > 0,
     begin: () => { events.push("begin"); overrides.begin?.(); },
     complete: (warning) => events.push(`complete:${warning ?? "none"}`),
     defer: () => events.push("defer"),
     fail: () => events.push("fail"),
-    setConflict: (next) => { currentConflict = next; events.push("conflict"); },
-    clearConflict: () => { currentConflict = null; events.push("clear"); },
+    setConflicts: (next) => { currentConflicts = next; events.push("conflict"); },
+    clearConflict: () => { currentConflicts = []; events.push("clear"); },
   };
   const methods: string[] = [];
   const client = {
@@ -191,21 +199,24 @@ const setup = (overrides: {
     remoteDirectory: "/sync/",
     coordinator: {
       inspect: overrides.inspect ?? (async () => conflictResult),
-      execute: async (signal) => {
+      execute: async (decisionOrSignal?: ConflictDecision | AbortSignal, signal?: AbortSignal) => {
+        if (decisionOrSignal && !(decisionOrSignal instanceof AbortSignal)) {
+          const resolver = decisionOrSignal.resolution === "keep-local"
+            ? overrides.keepLocal
+            : overrides.useCloud;
+          if (resolver) return resolver(decisionOrSignal, signal ?? new AbortController().signal);
+        }
         calls += 1;
-        return overrides.execute ? overrides.execute(signal) : completed;
+        return overrides.execute ? overrides.execute(decisionOrSignal, signal) : completed;
       },
-      keepLocal: overrides.keepLocal ?? (async () => completed),
-      useCloud: overrides.useCloud ?? (async () => completed),
     },
-    createConflict: overrides.createConflict ?? (() => conflict),
     isApplyingRemote: () => flags.remoteApply,
   });
   return {
     clock, controller, events, methods, flags,
     calls: () => calls,
-    hasConflict: () => currentConflict !== null,
-    conflict: () => currentConflict,
+    hasConflict: () => currentConflicts.length > 0,
+    conflict: () => currentConflicts[0] ?? null,
   };
 };
 
@@ -254,7 +265,7 @@ test("busy connection and resolution flights consume queued sync and dirty as on
     keepLocal: async () => resolution.promise,
   });
   await resolving.controller.syncNow("manual");
-  const activeResolution = resolving.controller.resolveConflict("local");
+  const activeResolution = resolving.controller.resolveConflict("legacy", "keep-local");
   resolving.controller.syncNow("manual");
   resolving.controller.syncNow("manual");
   resolving.controller.notifyLocalChange();
@@ -297,7 +308,7 @@ test("sync queues resolution and connection checks without concurrent remote ope
   await s.controller.syncNow("manual");
 
   const running = s.controller.syncNow("manual");
-  const resolving = s.controller.resolveConflict("local");
+  const resolving = s.controller.resolveConflict("legacy", "keep-local");
   const testing = s.controller.testConnection();
   await settle();
   assert.equal(resolutions, 0);
@@ -317,7 +328,7 @@ test("a manual sync requested during resolution runs after the write", async () 
   });
   await s.controller.syncNow("manual");
 
-  const resolving = s.controller.resolveConflict("local");
+  const resolving = s.controller.resolveConflict("legacy", "keep-local");
   const syncing = s.controller.syncNow("manual");
   assert.equal(s.calls(), 1);
   resolution.resolve(completed);
@@ -334,8 +345,8 @@ test("duplicate conflict resolutions share the queue and never write concurrentl
   });
   await s.controller.syncNow("manual");
 
-  const first = s.controller.resolveConflict("local");
-  const second = s.controller.resolveConflict("local");
+  const first = s.controller.resolveConflict("legacy", "keep-local");
+  const second = s.controller.resolveConflict("legacy", "keep-local");
   await settle();
   assert.equal(resolutions, 1);
   resolution.resolve(completed);
@@ -431,22 +442,22 @@ test("conflict choices call matching coordinator and clear only after success", 
   const s = setup({
     auto: false,
     execute: async () => conflictResult,
-    keepLocal: async (_snapshot, etag, revision) => {
-      methods.push("local"); freshness.push([etag, revision]); return local.promise;
+    keepLocal: async (decision) => {
+      methods.push("local"); freshness.push([decision.seenRemoteEtag, decision.seenManifestRevision]); return local.promise;
     },
-    useCloud: async (_snapshot, etag, revision) => {
-      methods.push("cloud"); freshness.push([etag, revision]); return cloudChoice.promise;
+    useCloud: async (decision) => {
+      methods.push("cloud"); freshness.push([decision.seenRemoteEtag, decision.seenManifestRevision]); return cloudChoice.promise;
     },
   });
   await s.controller.syncNow("manual");
-  const localRunning = s.controller.resolveConflict("local");
+  const localRunning = s.controller.resolveConflict("legacy", "keep-local");
   assert.equal(s.hasConflict(), true);
   local.resolve(completed);
   await localRunning;
   assert.equal(s.hasConflict(), false);
   await s.controller.syncNow("manual");
   s.controller.dismissConflict();
-  const cloudRunning = s.controller.resolveConflict("cloud");
+  const cloudRunning = s.controller.resolveConflict("legacy", "use-cloud");
   assert.equal(s.hasConflict(), true);
   cloudChoice.resolve(completed);
   await cloudRunning;
@@ -458,57 +469,66 @@ test("conflict choices call matching coordinator and clear only after success", 
 test("a CAS conflict during cloud resolution remains surfaced", async () => {
   const s = setup({ auto: false, execute: async () => conflictResult, useCloud: async () => conflictResult });
   await s.controller.syncNow("manual");
-  await s.controller.resolveConflict("cloud");
+  await s.controller.resolveConflict("legacy", "use-cloud");
   assert.equal(s.hasConflict(), true);
   assert.equal(s.events.includes("clear"), false);
 });
 
-test("structured CAS conflicts from either resolution refresh the surfaced snapshot", async () => {
-  const refreshedCloud = { ...cloud, revision: "cloud-r3" };
-  const refreshed = { ...conflictResult, cloud: refreshedCloud, reason: "LOCAL_CAS_MISMATCH" as const };
+test("structured CAS conflicts from either resolution refresh the surfaced resume conflicts", async () => {
+  const refreshedConflict = { ...resumeConflict, title: "Refreshed resume" };
+  const refreshed = {
+    ...conflictResult,
+    conflicts: [refreshedConflict],
+    plan: { ...conflictResult.plan, conflicts: [refreshedConflict] },
+  };
   for (const choice of ["local", "cloud"] as const) {
     const s = setup({
       execute: async () => conflictResult,
       keepLocal: async () => refreshed,
       useCloud: async () => refreshed,
-      createConflict: conflictFromInspection,
     });
     await s.controller.syncNow("manual");
-    await s.controller.resolveConflict(choice);
-    assert.equal(s.conflict()?.snapshot.revision, "cloud-r3", choice);
+    await s.controller.resolveConflict("legacy", choice === "local" ? "keep-local" : "use-cloud");
+    assert.equal(s.conflict()?.title, "Refreshed resume", choice);
     assert.equal(s.events.includes("fail"), false, choice);
   }
 });
 
 test("LOCAL_CAS_MISMATCH errors from execute refresh the current conflict", async () => {
-  const refreshedCloud = { ...cloud, revision: "cloud-r3" };
-  const refreshed = { ...conflictResult, cloud: refreshedCloud, reason: "LOCAL_CAS_MISMATCH" as const };
+  const refreshedConflict = { ...resumeConflict, title: "Refreshed resume" };
+  const refreshed = {
+    ...conflictResult,
+    conflicts: [refreshedConflict],
+    plan: { ...conflictResult.plan, conflicts: [refreshedConflict] },
+  };
   const s = setup({
     execute: async () => { throw new LocalCasMismatchError(); },
     inspect: async () => refreshed,
-    createConflict: conflictFromInspection,
   });
 
   await s.controller.syncNow("manual");
 
-  assert.equal(s.conflict()?.snapshot.revision, "cloud-r3");
+  assert.equal(s.conflict()?.title, "Refreshed resume");
   assert.equal(s.events.includes("fail"), false);
 });
 
 test("LOCAL_CAS_MISMATCH errors from both resolutions refresh the current conflict", async () => {
-  const refreshedCloud = { ...cloud, revision: "cloud-r3" };
-  const refreshed = { ...conflictResult, cloud: refreshedCloud, reason: "LOCAL_CAS_MISMATCH" as const };
+  const refreshedConflict = { ...resumeConflict, title: "Refreshed resume" };
+  const refreshed = {
+    ...conflictResult,
+    conflicts: [refreshedConflict],
+    plan: { ...conflictResult.plan, conflicts: [refreshedConflict] },
+  };
   for (const choice of ["local", "cloud"] as const) {
     const s = setup({
       execute: async () => conflictResult,
       inspect: async () => refreshed,
       keepLocal: async () => { throw new LocalCasMismatchError(); },
       useCloud: async () => { throw new LocalCasMismatchError(); },
-      createConflict: conflictFromInspection,
     });
     await s.controller.syncNow("manual");
-    await s.controller.resolveConflict(choice);
-    assert.equal(s.conflict()?.snapshot.revision, "cloud-r3", choice);
+    await s.controller.resolveConflict("legacy", choice === "local" ? "keep-local" : "use-cloud");
+    assert.equal(s.conflict()?.title, "Refreshed resume", choice);
     assert.equal(s.events.includes("fail"), false, choice);
   }
 });
@@ -572,7 +592,7 @@ test("dispose blocks every later public asynchronous entry", async () => {
   await Promise.all([
     s.controller.syncNow("manual"),
     s.controller.testConnection(),
-    s.controller.resolveConflict("cloud"),
+    s.controller.resolveConflict("legacy", "use-cloud"),
   ]);
 
   assert.equal(s.calls(), callsBeforeDispose);
@@ -585,14 +605,14 @@ test("cloud resolution owns the sole flight signal and dispose aborts it", async
   let resolutionSignal: AbortSignal | undefined;
   const s = setup({
     execute: async () => conflictResult,
-    useCloud: async (_snapshot, _etag, _revision, signal) => {
+    useCloud: async (_decision, signal) => {
       resolutionSignal = signal;
       return resolution.promise;
     },
   });
   await s.controller.syncNow("manual");
 
-  const running = s.controller.resolveConflict("cloud");
+  const running = s.controller.resolveConflict("legacy", "use-cloud");
   assert.equal(resolutionSignal?.aborted, false);
   s.controller.dispose();
   assert.equal(resolutionSignal?.aborted, true);
@@ -1160,7 +1180,7 @@ test("remote deletion after keep-local CAS defers safely and remains retryable",
   });
   await s.controller.syncNow("manual");
 
-  await s.controller.resolveConflict("local");
+  await s.controller.resolveConflict("legacy", "keep-local");
 
   assert.equal(s.hasConflict(), false, "the stale conflict dialog must close");
   assert.equal(s.events.includes("defer"), true);
@@ -1174,7 +1194,6 @@ test("remote deletion after keep-local CAS defers safely and remains retryable",
 });
 
 test("local stabilization deferral stays dirty without conflict, UNKNOWN error, or busy loop", async () => {
-  let conflicts = 0;
   const deferredResult = {
     status: "deferred",
     warning: null,
@@ -1182,17 +1201,12 @@ test("local stabilization deferral stays dirty without conflict, UNKNOWN error, 
   } as const;
   const s = setup({
     execute: async () => s.calls() === 1 ? deferredResult : completed,
-    createConflict: () => {
-      conflicts += 1;
-      return conflict;
-    },
   });
 
   await s.controller.syncNow("manual");
   await settle();
 
   assert.equal(s.calls(), 1, "bounded coordinator exhaustion must not busy-loop");
-  assert.equal(conflicts, 0);
   assert.equal(s.hasConflict(), false);
   assert.equal(s.events.includes("fail"), false);
   assert.equal(s.events.includes("defer"), true);
@@ -1278,7 +1292,6 @@ test("resolving multiple resumes pauses then runs exactly one dirty follow-up af
     client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
     remoteDirectory: "/sync/",
     isApplyingRemote: () => false,
-    createConflict: () => conflict,
     state: {
       isConfigured: () => true,
       isHydrated: () => true,
@@ -1290,11 +1303,10 @@ test("resolving multiple resumes pauses then runs exactly one dirty follow-up af
       complete: () => {},
       defer: () => {},
       fail: () => {},
-      setConflict: () => {},
       clearConflict: () => { visibleConflicts = []; },
       setConflicts: (next: typeof conflicts) => { visibleConflicts = next; },
     } as SyncControllerState,
-  } as any);
+  });
 
   await controller.syncNow("manual");
   assert.deepEqual(visibleConflicts.map((item) => item.resumeId), ["full-id", "design-id"]);
@@ -1394,7 +1406,6 @@ test("coalesces opposite queued decisions for the same resume", async () => {
     client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
     remoteDirectory: "/sync/",
     isApplyingRemote: () => false,
-    createConflict: () => conflict,
     state: {
       isConfigured: () => true,
       isHydrated: () => true,
@@ -1406,11 +1417,10 @@ test("coalesces opposite queued decisions for the same resume", async () => {
       complete: () => {},
       defer: () => {},
       fail: () => {},
-      setConflict: () => {},
       clearConflict: () => { visibleConflicts = []; },
       setConflicts: (next: typeof visibleConflicts) => { visibleConflicts = next; },
     } as SyncControllerState,
-  } as any);
+  });
 
   await controller.syncNow("manual");
   const keepingLocal = controller.resolveConflict("full-id", "keep-local");
@@ -1432,7 +1442,7 @@ test("successful applied and no-op syncs publish only count and completion time 
   let call = 0;
   const controller = new WebDavSyncController({
     coordinator: {
-      inspect: async () => conflictResult as any,
+      inspect: async () => conflictResult,
       execute: async () => {
         call += 1;
         return call === 1
@@ -1443,7 +1453,6 @@ test("successful applied and no-op syncs publish only count and completion time 
     client: { options: async () => {}, propfind: async () => true } as WebDavClientApi,
     remoteDirectory: "/sync/?token=private",
     isApplyingRemote: () => false,
-    createConflict: () => conflict,
     state: {
       isConfigured: () => true,
       isHydrated: () => true,
@@ -1455,11 +1464,10 @@ test("successful applied and no-op syncs publish only count and completion time 
       complete: (warning: unknown, syncedCount?: number) => { completions.push({ warning, syncedCount }); },
       defer: () => {},
       fail: () => {},
-      setConflict: () => {},
       clearConflict: () => {},
       setConflicts: () => {},
     } as SyncControllerState,
-  } as any);
+  });
 
   await controller.syncNow("manual");
   await controller.syncNow("manual");

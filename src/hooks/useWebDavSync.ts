@@ -2,10 +2,7 @@ import { useEffect } from "react";
 import { WebDavClient } from "../lib/webdav/client";
 import { WebDavResumeRepository } from "../lib/webdav/repository";
 import { LocalCasMismatchError, WebDavError } from "../lib/webdav/errors";
-import {
-  WebDavSyncCoordinator,
-  type SyncInspection,
-} from "../lib/webdav/coordinator";
+import { WebDavSyncCoordinator } from "../lib/webdav/coordinator";
 import { WebDavSyncController } from "../lib/webdav/controller";
 import {
   ManifestValidationError,
@@ -16,7 +13,6 @@ import {
 import { useResumeStore } from "../store/useResumeStore";
 import {
   useWebDavStore,
-  type WebDavConflict,
   type WebDavSafeError,
   type WebDavSettings,
 } from "../store/useWebDavStore";
@@ -61,44 +57,6 @@ const toSafeError = (error: unknown): WebDavSafeError => {
     return { code: error.code, status: null };
   }
   return { code: "UNKNOWN", status: null };
-};
-
-const latestResumeTimestamp = (data: ResumeSyncData): string =>
-  data.resumes.reduce(
-    (latest, resume) => resume.updatedAt > latest ? resume.updatedAt : latest,
-    "1970-01-01T00:00:00.000Z",
-  );
-
-const createConflict = (
-  inspection: Extract<SyncInspection, { decision: "conflict" }>,
-  deviceId: string,
-): WebDavConflict => {
-  const conflict = inspection.conflicts[0];
-  const manifest = inspection.manifest;
-  if (!conflict || !manifest) throw new WebDavError("UNKNOWN");
-  return {
-    local: {
-      updatedAt: latestResumeTimestamp(inspection.localData),
-      deviceId,
-      resumeCount: inspection.localData.resumes.length,
-    },
-    cloud: {
-      updatedAt: manifest.updatedAt,
-      deviceId: manifest.deviceId,
-      resumeCount: Object.values(manifest.entries).filter((entry) => !entry.deleted).length,
-    },
-    snapshot: {
-      schemaVersion: 1,
-      revision: conflict.resumeId,
-      parentRevision: null,
-      updatedAt: manifest.updatedAt,
-      deviceId: manifest.deviceId,
-      contentHash: manifest.manifestHash,
-      data: inspection.localData,
-    },
-    remoteEtag: inspection.remoteEtag,
-    manifestRevision: manifest.revision,
-  };
 };
 
 /** Commit the validated cloud data and its baseline inside the Resume Store transaction. */
@@ -152,17 +110,13 @@ export const createConfiguredController = (
     coordinator,
     remoteDirectory: settings.remoteDirectory,
     isApplyingRemote: () => useResumeStore.getState()._isApplyingSyncSnapshot,
-    createConflict: (inspection) => createConflict(inspection, deviceId),
     state: {
       isConfigured: () => isConfigured(useWebDavStore.getState().settings),
       isHydrated: () => useResumeStore.getState()._hasHydrated,
       isAutoSyncEnabled: () => useWebDavStore.getState().settings.autoSyncEnabled,
       isOnline: () => typeof navigator === "undefined" || navigator.onLine,
       isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
-      hasConflict: () => {
-        const store = useWebDavStore.getState();
-        return store.conflicts.length > 0 || store.conflict !== null;
-      },
+      hasConflict: () => useWebDavStore.getState().conflicts.length > 0,
       begin: (requestController) => useWebDavStore.getState().beginRequest(requestController),
       complete: (warning, syncedCount) => {
         const store = useWebDavStore.getState();
@@ -190,15 +144,8 @@ export const createConfiguredController = (
         store.finishRequest("conflict");
         store.setConflicts(conflicts);
       },
-      setConflict: (conflict) => {
-        const store = useWebDavStore.getState();
-        store.finishRequest("conflict");
-        store.setConflict(conflict);
-      },
       clearConflict: () => {
-        const store = useWebDavStore.getState();
-        store.setConflicts([]);
-        store.setConflict(null);
+        useWebDavStore.getState().setConflicts([]);
       },
     },
   });

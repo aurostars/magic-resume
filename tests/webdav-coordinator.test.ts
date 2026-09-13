@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { initialResumeState } from "../src/config/initialResumeData";
 import { WebDavSyncCoordinator } from "../src/lib/webdav/coordinator";
+import { WebDavSyncController, type SyncControllerState } from "../src/lib/webdav/controller";
+import type { WebDavClientApi } from "../src/lib/webdav/client";
 import { LocalCasMismatchError, WebDavError } from "../src/lib/webdav/errors";
 import { createManifest, parseManifest, serializeManifest } from "../src/lib/webdav/manifest";
 import { calculateResumeHash, serializeResumeJson } from "../src/lib/webdav/resume-codec";
@@ -50,6 +52,7 @@ class MemoryRepository {
   trashCandidates = new Set<string>();
   calls: string[] = [];
   publishRaces = 0;
+  failedMirrorMoves = 0;
   preparedManifestText = "";
 
   async ensureLayout() { this.calls.push("ensure-layout"); }
@@ -72,10 +75,20 @@ class MemoryRepository {
     this.calls.push(`write:${path}`);
     this.files.set(path, { text, etag: `etag:${path}` });
   }
-  async moveResumeAtomic(from: string, to: string) {
-    this.calls.push(`move:${from}->${to}`);
+  async moveResumeAtomic(
+    from: string,
+    to: string,
+    conditions: { sourceEtag: string | null; destinationPrecondition: { kind: "missing" } | { kind: "match"; etag: string } },
+  ) {
+    this.calls.push(`move:${from}->${to}:${conditions.sourceEtag}`);
+    if (this.failedMirrorMoves-- > 0) throw new WebDavError("SERVER", 503);
     const value = this.files.get(from);
     if (value) { this.files.delete(from); this.files.set(to, value); }
+  }
+  async deleteResumeAtomic(path: string, sourceEtag: string | null) {
+    this.calls.push(`delete-resume:${path}:${sourceEtag}`);
+    const current = this.files.get(path);
+    if (current && current.etag === sourceEtag) this.files.delete(path);
   }
   async ensureManifestPublishSupported() {}
   async prepareManifestPublish(text: string, expectedEtag: string | null): Promise<ManifestPublishOperation> {
@@ -138,6 +151,7 @@ const setup = async (options: {
     repository, coordinator,
     local: () => local, baseline: () => baseline, commits: () => commits,
     setLocalRace: (value: boolean) => { localRace = value; },
+    setLocal: (next: ResumeSyncData) => { local = structuredClone(next); },
   };
 };
 
@@ -366,4 +380,121 @@ test("manual mirrors with one ID are deterministic: equal hashes dedupe and diff
     assert.equal(inspection.plan.manualImports?.length, 0);
     assert.equal(inspection.plan.downloads.some((item) => item.resumeId === "manual-id"), false);
   }
+});
+
+
+test("identical bootstrap establishes a baseline so the next local edit uploads without conflict", async () => {
+  const same = resume("same", "Original");
+  const remote = await makeManifest([same]);
+  const state = await setup({ local: data(same), remote });
+  await seedRemoteFiles(state.repository, [same]);
+
+  assert.deepEqual(await state.coordinator.execute(), { status: "unchanged", warning: null, syncedCount: 0 });
+  assert.equal(state.commits(), 1);
+  assert.equal(state.baseline()?.manifestHash, remote.manifestHash);
+
+  const edited = resume("same", "Edited locally");
+  state.setLocal(data(edited));
+  const uploaded = await state.coordinator.execute();
+  assert.equal(uploaded.status, "uploaded");
+  assert.equal("decision" in uploaded, false);
+});
+
+test("real controller and coordinator accumulate two conflict choices into one publication", async () => {
+  const baseA = resume("a", "Base A");
+  const baseB = resume("b", "Base B");
+  const localA = resume("a", "Local A");
+  const localB = resume("b", "Local B");
+  const cloudA = resume("a", "Cloud A");
+  const cloudB = resume("b", "Cloud B");
+  const base = await makeManifest([baseA, baseB]);
+  const remote = await makeManifest([cloudA, cloudB], 2);
+  const state = await setup({ local: data(localA, localB), remote, baseline: baselineFor(base) });
+  await seedRemoteFiles(state.repository, [cloudA, cloudB]);
+  let visible: import("../src/lib/webdav/types").ResumeSyncConflict[] = [];
+  let completions = 0;
+  const controllerState: SyncControllerState = {
+    isConfigured: () => true, isHydrated: () => true, isAutoSyncEnabled: () => false,
+    isOnline: () => true, isVisible: () => true, hasConflict: () => visible.length > 0,
+    begin: () => {}, complete: () => { completions += 1; }, defer: () => {}, fail: (error) => { throw error; },
+    setConflicts: (next) => { visible = next; }, clearConflict: () => { visible = []; },
+  };
+  const controller = new WebDavSyncController({
+    coordinator: state.coordinator,
+    client: { options: async () => ({ conditionalMove: true }), propfind: async () => true } as WebDavClientApi,
+    state: controllerState, remoteDirectory: "/magic-resume/", isApplyingRemote: () => false,
+  });
+
+  await controller.syncNow("manual");
+  assert.deepEqual(visible.map(({ resumeId }) => resumeId), ["a", "b"]);
+  await controller.resolveConflict("a", "keep-local");
+  assert.deepEqual(visible.map(({ resumeId }) => resumeId), ["b"]);
+  assert.equal(state.commits(), 0);
+  await controller.resolveConflict("b", "use-cloud");
+  await controller.whenIdle();
+
+  assert.equal(visible.length, 0);
+  assert.equal(completions, 1);
+  assert.equal(state.commits(), 1);
+  assert.equal(state.repository.calls.filter((call) => call.startsWith("publish:")).length, 1);
+  assert.deepEqual(state.local().resumes.map(({ title }) => title), ["Local A", "Cloud B"]);
+  controller.dispose();
+});
+
+test("a failed post-publication rename is recognized as a stale system mirror and repaired next sync", async () => {
+  const old = resume("same", "Old title");
+  const remote = await makeManifest([old]);
+  const changed = resume("same", "New title");
+  const state = await setup({ local: data(changed), remote, baseline: baselineFor(remote) });
+  await seedRemoteFiles(state.repository, [old]);
+  state.repository.failedMirrorMoves = 1;
+
+  assert.equal((await state.coordinator.execute()).status, "uploaded");
+  const oldPath = remote.entries.same.mirrorPath;
+  assert.equal(state.repository.files.has(oldPath), true);
+
+  const second = await state.coordinator.execute();
+  assert.deepEqual(second, { status: "unchanged", warning: null, syncedCount: 0 });
+  assert.equal(state.repository.files.has(oldPath), false);
+  assert.equal(state.repository.calls.some((call) => call.startsWith(`delete-resume:${oldPath}:`)), true);
+});
+
+
+test("a failed post-publication delete does not re-import the stale live mirror and cleans it safely", async () => {
+  const removed = resume("removed", "Removed");
+  const remote = await makeManifest([removed]);
+  const state = await setup({ local: data(), remote, baseline: baselineFor(remote) });
+  await seedRemoteFiles(state.repository, [removed]);
+  state.repository.failedMirrorMoves = 1;
+
+  assert.equal((await state.coordinator.execute()).status, "uploaded");
+  const oldPath = remote.entries.removed.mirrorPath;
+  assert.equal(state.repository.files.has(oldPath), true);
+
+  const second = await state.coordinator.execute();
+  assert.deepEqual(second, { status: "unchanged", warning: null, syncedCount: 0 });
+  assert.equal(state.repository.files.has(oldPath), false);
+  const published = await parseManifest(state.repository.manifest!.text);
+  assert.equal(published.entries.removed.deleted, true);
+  assert.equal(state.local().resumes.length, 0);
+});
+
+test("successful rename and delete moves remove live mirrors and do not rediscover them", async () => {
+  const renamedOld = resume("renamed", "Old");
+  const renamedRemote = await makeManifest([renamedOld]);
+  const renamed = await setup({
+    local: data(resume("renamed", "New")), remote: renamedRemote, baseline: baselineFor(renamedRemote),
+  });
+  await seedRemoteFiles(renamed.repository, [renamedOld]);
+  assert.equal((await renamed.coordinator.execute()).status, "uploaded");
+  assert.equal(renamed.repository.files.has(renamedRemote.entries.renamed.mirrorPath), false);
+  assert.equal((await renamed.coordinator.inspect()).discoveredRemoteFiles, false);
+
+  const deletedItem = resume("deleted", "Deleted");
+  const deletedRemote = await makeManifest([deletedItem]);
+  const deleted = await setup({ local: data(), remote: deletedRemote, baseline: baselineFor(deletedRemote) });
+  await seedRemoteFiles(deleted.repository, [deletedItem]);
+  assert.equal((await deleted.coordinator.execute()).status, "uploaded");
+  assert.equal(deleted.repository.files.has(deletedRemote.entries.deleted.mirrorPath), false);
+  assert.equal((await deleted.coordinator.inspect()).discoveredRemoteFiles, false);
 });

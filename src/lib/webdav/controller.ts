@@ -6,8 +6,7 @@ import {
   type SyncInspection,
   type WebDavSyncCoordinator,
 } from "./coordinator";
-import type { CloudSnapshotV1, ResumeSyncConflict } from "./types";
-import type { WebDavConflict } from "../../store/useWebDavStore";
+import type { ResumeSyncConflict } from "./types";
 
 export const LOCAL_DEBOUNCE_MS = 5_000;
 export const FOREGROUND_MIN_INTERVAL_MS = 60_000;
@@ -29,16 +28,12 @@ export interface SyncControllerState {
   complete(warning: "NON_ATOMIC_UPLOAD" | null, syncedCount?: number): void;
   defer(): void;
   fail(error: unknown): void;
-  setConflicts?(conflicts: ResumeSyncConflict[]): void;
-  setConflict?(conflict: WebDavConflict): void;
+  setConflicts(conflicts: ResumeSyncConflict[]): void;
   clearConflict(): void;
 }
 
 type ConflictInspection = Extract<SyncInspection, { decision: "conflict" }>;
-type CoordinatorApi = Pick<WebDavSyncCoordinator, "inspect" | "execute"> & Partial<Pick<
-  WebDavSyncCoordinator,
-  "keepLocal" | "useCloud"
->>;
+type CoordinatorApi = Pick<WebDavSyncCoordinator, "inspect" | "execute">;
 type FlightKey = "sync" | "test" | `resolve:${string}`;
 type FlightOperation = (signal: AbortSignal) => Promise<boolean>;
 
@@ -55,8 +50,6 @@ export interface WebDavSyncControllerDependencies {
   client: WebDavClientApi;
   state: SyncControllerState;
   remoteDirectory: string;
-  /** @deprecated Compatibility for aggregate conflicts created before per-resume sync. */
-  createConflict?(conflict: ConflictInspection): WebDavConflict;
   isApplyingRemote(): boolean;
   clock?: SyncControllerClock;
 }
@@ -87,7 +80,6 @@ export class WebDavSyncController {
   private lastForegroundCheck = Number.NEGATIVE_INFINITY;
   private conflicts: ResumeSyncConflict[] = [];
   private conflictFreshness: Pick<ConflictDecision, "seenRemoteEtag" | "seenManifestRevision"> | null = null;
-  private legacyConflict: WebDavConflict | null = null;
 
   constructor(private readonly dependencies: WebDavSyncControllerDependencies) {
     this.clock = dependencies.clock ?? systemClock;
@@ -176,17 +168,13 @@ export class WebDavSyncController {
   /** @deprecated Unresolved conflicts can no longer be dismissed. */
   dismissConflict(): void {}
 
-  resolveConflict(resumeId: string, resolution: "keep-local" | "use-cloud"): Promise<void>;
-  /** @deprecated Compatibility for callers from the aggregate conflict UI. */
-  resolveConflict(choice: "local" | "cloud"): Promise<void>;
   resolveConflict(
-    resumeIdOrChoice: string,
-    resolution?: "keep-local" | "use-cloud",
+    resumeId: string,
+    resolution: "keep-local" | "use-cloud",
   ): Promise<void> {
     if (this.disposed) return Promise.resolve();
 
-    if (!resolution) return this.resolveLegacyConflict(resumeIdOrChoice as "local" | "cloud");
-    const conflict = this.conflicts.find((item) => item.resumeId === resumeIdOrChoice);
+    const conflict = this.conflicts.find((item) => item.resumeId === resumeId);
     const freshness = this.conflictFreshness;
     if (!conflict || !freshness) return Promise.resolve();
 
@@ -196,6 +184,13 @@ export class WebDavSyncController {
       ...freshness,
     };
     return this.enqueue(`resolve:${conflict.resumeId}`, async (signal) => {
+      const currentFreshness = this.conflictFreshness;
+      if (
+        !this.conflicts.some((item) => item.resumeId === decision.resumeId) ||
+        !currentFreshness ||
+        currentFreshness.seenRemoteEtag !== decision.seenRemoteEtag ||
+        currentFreshness.seenManifestRevision !== decision.seenManifestRevision
+      ) return true;
       try {
         const result = await this.dependencies.coordinator.execute(decision, signal);
         if (isConflict(result)) {
@@ -204,6 +199,7 @@ export class WebDavSyncController {
         }
         if (isDeferred(result)) {
           this.dirty = true;
+          this.clearConflicts();
           this.dependencies.state.defer();
           return false;
         }
@@ -237,49 +233,6 @@ export class WebDavSyncController {
     this.clearDebounce();
     for (const queued of this.queue.splice(0)) queued.resolve();
     this.activeController?.abort();
-  }
-
-  private resolveLegacyConflict(choice: "local" | "cloud"): Promise<void> {
-    if (!this.legacyConflict) return Promise.resolve();
-    const key: FlightKey = `resolve:${choice}`;
-    return this.enqueue(key, async (signal) => {
-      const current = this.legacyConflict;
-      if (!current) return true;
-      this.dirty = false;
-      try {
-        const method = choice === "local"
-          ? this.dependencies.coordinator.keepLocal
-          : this.dependencies.coordinator.useCloud;
-        if (!method) return false;
-        const result = await method.call(
-          this.dependencies.coordinator,
-          current.snapshot,
-          current.remoteEtag,
-          current.manifestRevision,
-          signal,
-        );
-        if (isConflict(result)) {
-          this.surfaceResult(result);
-          return true;
-        }
-        if (isDeferred(result)) {
-          this.dirty = true;
-          this.clearConflicts();
-          this.dependencies.state.defer();
-          return false;
-        }
-        this.clearConflicts();
-        this.dependencies.state.complete(result.warning, result.syncedCount);
-        return true;
-      } catch (error) {
-        if (error instanceof LocalCasMismatchError) {
-          await this.refreshConflict(signal);
-          return true;
-        }
-        this.dependencies.state.fail(error);
-        throw error;
-      }
-    });
   }
 
   private enqueue(key: FlightKey, operation: FlightOperation): Promise<void> {
@@ -381,20 +334,11 @@ export class WebDavSyncController {
   private clearConflicts(): void {
     this.conflicts = [];
     this.conflictFreshness = null;
-    this.legacyConflict = null;
     this.dependencies.state.clearConflict();
   }
 
   private surfaceResult(result: ConflictInspection): void {
-    if (result.conflicts?.length && this.dependencies.state.setConflicts) {
-      this.surfaceConflicts(result);
-      return;
-    }
-    const createConflict = this.dependencies.createConflict;
-    if (!createConflict || !this.dependencies.state.setConflict) return;
-    const conflict = createConflict(result);
-    this.legacyConflict = conflict;
-    this.dependencies.state.setConflict(conflict);
+    this.surfaceConflicts(result);
   }
 
   private surfaceConflicts(result: ConflictInspection): void {
@@ -403,7 +347,7 @@ export class WebDavSyncController {
       seenRemoteEtag: result.remoteEtag,
       seenManifestRevision: result.manifest?.revision ?? 0,
     };
-    this.dependencies.state.setConflicts?.(result.conflicts);
+    this.dependencies.state.setConflicts(result.conflicts);
   }
 
   private clearDebounce(): void {

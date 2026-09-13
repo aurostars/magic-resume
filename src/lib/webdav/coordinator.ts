@@ -13,7 +13,6 @@ import { canonicalizeSyncData } from "./snapshot";
 import type {
   ManifestV2,
   MultiFileBaseline,
-  CloudSnapshotV1,
   ResumeSyncConflict,
   ResumeSyncData,
   SyncPlan,
@@ -29,7 +28,7 @@ export type ConflictDecision = {
 export interface CoordinatorDependencies {
   repository: Pick<WebDavResumeRepository,
     "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "listResumeCandidates" |
-    "writeResumeAtomic" | "moveResumeAtomic" | "ensureManifestPublishSupported" |
+    "writeResumeAtomic" | "moveResumeAtomic" | "deleteResumeAtomic" | "ensureManifestPublishSupported" |
     "prepareManifestPublish" | "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
   getLocalData: () => ResumeSyncData;
   subscribeLocalData: (listener: () => void) => () => void;
@@ -82,8 +81,8 @@ const compareIds = (left: string, right: string): number => left.localeCompare(r
 
 function decisionFor(plan: SyncPlan): SyncInspection["decision"] {
   if (plan.conflicts.length > 0) return "conflict";
-  if (plan.uploads.length > 0 || plan.trashMoves.length > 0) return "upload";
-  if (plan.downloads.length > 0 || plan.remoteDeletions.length > 0) return "download";
+  if (plan.uploads.length > 0 || plan.trashMoves.length > 0 || plan.activeResumeChange === "upload") return "upload";
+  if (plan.downloads.length > 0 || plan.remoteDeletions.length > 0 || plan.activeResumeChange === "download") return "download";
   return "none";
 }
 
@@ -96,6 +95,9 @@ async function localHashes(data: ResumeSyncData): Promise<Record<string, string>
 }
 
 export class WebDavSyncCoordinator {
+  private confirmedFreshness: string | null = null;
+  private readonly confirmedDecisions = new Map<string, ConflictDecision["resolution"]>();
+
   constructor(private readonly dependencies: CoordinatorDependencies) {}
 
   async inspect(signal?: AbortSignal): Promise<SyncInspection> {
@@ -125,6 +127,41 @@ export class WebDavSyncCoordinator {
         try {
           const resume = parseResumeJson(file.text);
           const contentHash = await calculateResumeHash(resume);
+          const currentEntry = entries[resume.id];
+          if (
+            currentEntry &&
+            candidate.path === getResumeRelativePath(resume) &&
+            (currentEntry.deleted || contentHash !== currentEntry.contentHash)
+          ) {
+            const historicalObject = await this.dependencies.repository.readResume(
+              `objects/${resume.id}/${contentHash}.json`,
+              signal,
+            );
+            if (historicalObject) {
+              try {
+                const historicalResume = parseResumeJson(historicalObject.text);
+                if (
+                  historicalResume.id === resume.id &&
+                  await calculateResumeHash(historicalResume) === contentHash
+                ) {
+                  if (candidate.etag) {
+                    try {
+                      await this.dependencies.repository.deleteResumeAtomic(
+                        candidate.path,
+                        candidate.etag,
+                        signal,
+                      );
+                    } catch (error) {
+                      if (signal?.aborted) throw signal.reason;
+                    }
+                  }
+                  continue;
+                }
+              } catch {
+                // An unverified historical object cannot authorize cleanup.
+              }
+            }
+          }
           const values = discovered.get(resume.id) ?? [];
           values.push({ resume, mirrorPath: candidate.path, contentHash });
           discovered.set(resume.id, values);
@@ -191,16 +228,28 @@ export class WebDavSyncCoordinator {
         decision.seenRemoteEtag !== inspection.remoteEtag ||
         decision.seenManifestRevision !== inspection.manifest?.revision
       )) {
+        this.clearConfirmedDecisions();
         return { status: "deferred", warning: null, reason: "REMOTE_CHANGED" };
       }
-      const plan = decision ? this.resolve(inspection.plan, decision) : inspection.plan;
+      let plan = inspection.plan;
+      if (decision) {
+        const freshness = this.freshnessKey(decision.seenRemoteEtag, decision.seenManifestRevision);
+        if (this.confirmedFreshness !== freshness) this.clearConfirmedDecisions();
+        this.confirmedFreshness = freshness;
+        if (plan.conflicts.some(({ resumeId }) => resumeId === decision.resumeId)) {
+          this.confirmedDecisions.set(decision.resumeId, decision.resolution);
+        }
+        for (const [resumeId, resolution] of Array.from(this.confirmedDecisions.entries())) {
+          plan = this.resolve(plan, { ...decision, resumeId, resolution });
+        }
+      }
       if (plan.conflicts.length > 0) {
         return { ...inspection, decision: "conflict", plan, conflicts: plan.conflicts };
       }
       const intendedStatus = plan.uploads.length > 0 || plan.trashMoves.length > 0 ||
-          inspection.manifest === null || inspection.discoveredRemoteFiles
+          plan.activeResumeChange === "upload" || inspection.manifest === null || inspection.discoveredRemoteFiles
         ? "uploaded"
-        : plan.downloads.length > 0 || plan.remoteDeletions.length > 0
+        : plan.downloads.length > 0 || plan.remoteDeletions.length > 0 || plan.activeResumeChange === "download"
         ? "downloaded"
         : "unchanged";
       const result = await executeSyncPlan({
@@ -210,6 +259,7 @@ export class WebDavSyncCoordinator {
         remoteManifest: inspection.manifest,
         previousManifest: inspection.persistedManifest,
         remoteManifestEtag: inspection.remoteEtag,
+        currentBaseline: this.dependencies.getBaseline(),
         expectedLocalToken: inspection.localToken,
         getLocalToken: () => canonicalizeSyncData(this.dependencies.getLocalData()),
         subscribeLocalToken: this.dependencies.subscribeLocalData,
@@ -234,6 +284,7 @@ export class WebDavSyncCoordinator {
             : "REMOTE_CHANGED",
         };
       }
+      this.clearConfirmedDecisions();
       return {
         status: intendedStatus,
         warning: null,
@@ -243,34 +294,13 @@ export class WebDavSyncCoordinator {
     throw new WebDavError("UNKNOWN");
   }
 
-  /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
-  keepLocal(
-    cloud: Pick<CloudSnapshotV1, "revision">,
-    expectedEtag: string | null,
-    seenManifestRevision: number,
-    signal?: AbortSignal,
-  ): Promise<SyncExecuteResult> {
-    return this.execute({
-      resumeId: cloud.revision,
-      resolution: "keep-local",
-      seenRemoteEtag: expectedEtag,
-      seenManifestRevision,
-    }, signal);
+  private freshnessKey(etag: string | null, revision: number): string {
+    return JSON.stringify([etag, revision]);
   }
 
-  /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
-  useCloud(
-    cloud: Pick<CloudSnapshotV1, "revision">,
-    expectedEtag: string | null,
-    seenManifestRevision: number,
-    signal?: AbortSignal,
-  ): Promise<SyncExecuteResult> {
-    return this.execute({
-      resumeId: cloud.revision,
-      resolution: "use-cloud",
-      seenRemoteEtag: expectedEtag,
-      seenManifestRevision,
-    }, signal);
+  private clearConfirmedDecisions(): void {
+    this.confirmedFreshness = null;
+    this.confirmedDecisions.clear();
   }
 
   private resolve(plan: SyncPlan, decision: ConflictDecision): SyncPlan {

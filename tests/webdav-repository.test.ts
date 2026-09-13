@@ -237,20 +237,21 @@ test("manifest publish cancellation conditionally deletes only its temporary sou
   ]);
 });
 
-test("moveResumeAtomic applies CAS to validated resume and trash paths", async () => {
+test("moveResumeAtomic conditions the source ETag and creates only a missing destination", async () => {
   const client = new FakeClient();
 
   await repositoryWith(client).moveResumeAtomic(
     "resumes/CV.json",
     "trash/CV.json",
-    '"r1"',
+    { sourceEtag: '"r1"', destinationPrecondition: { kind: "missing" } },
   );
 
   assert.deepEqual(client.calls, [[
     "move",
     "/magic-resume/resumes/CV.json",
     "/magic-resume/trash/CV.json",
-    { kind: "match", etag: '"r1"' },
+    { kind: "missing" },
+    '"r1"',
   ]]);
 });
 
@@ -278,7 +279,11 @@ test("repository rejects unnormalized paths before making WebDAV calls", async (
 
   await assert.rejects(repository.readResume("../secret.json"), WebDavError);
   await assert.rejects(repository.writeResumeAtomic("resumes/../secret.json", "{}"), WebDavError);
-  await assert.rejects(repository.moveResumeAtomic("resumes/CV.json", "/outside.json", null), WebDavError);
+  await assert.rejects(repository.moveResumeAtomic(
+    "resumes/CV.json",
+    "/outside.json",
+    { sourceEtag: null, destinationPrecondition: { kind: "missing" } },
+  ), WebDavError);
   assert.deepEqual(client.calls, []);
 });
 
@@ -326,4 +331,17 @@ test("atomic object PUT and MOVE receive the caller AbortSignal", async () => {
 
   assert.equal(client.signals[0], signal);
   assert.equal(client.signals[1], signal);
+});
+
+
+test("deleteResumeAtomic removes only the source whose ETag still matches", async () => {
+  const client = new FakeClient();
+  const signal = new AbortController().signal;
+
+  await repositoryWith(client).deleteResumeAtomic("resumes/Stale.json", '"stale"', signal);
+
+  assert.deepEqual(client.calls, [[
+    "delete", "/magic-resume/resumes/Stale.json", { kind: "match", etag: '"stale"' },
+  ]]);
+  assert.equal(client.signals[0], signal);
 });

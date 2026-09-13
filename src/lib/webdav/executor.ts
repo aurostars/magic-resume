@@ -12,7 +12,7 @@ export type ExecutePlanResult =
 
 type RepositoryApi = Pick<WebDavResumeRepository,
   "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "writeResumeAtomic" |
-  "moveResumeAtomic" | "ensureManifestPublishSupported" | "prepareManifestPublish" |
+  "moveResumeAtomic" | "deleteResumeAtomic" | "ensureManifestPublishSupported" | "prepareManifestPublish" |
   "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
 
 export interface ExecuteSyncPlanInput {
@@ -22,6 +22,7 @@ export interface ExecuteSyncPlanInput {
   remoteManifest: ManifestV2 | null;
   previousManifest: ManifestV2 | null;
   remoteManifestEtag: string | null;
+  currentBaseline: MultiFileBaseline | null;
   expectedLocalToken: string;
   getLocalToken: () => string;
   subscribeLocalToken: (listener: () => void) => () => void;
@@ -44,6 +45,14 @@ const baselineFor = (manifest: ManifestV2): MultiFileBaseline => ({
     mirrorPath: entry.mirrorPath,
   }])),
 });
+
+const baselineEquivalent = (
+  current: MultiFileBaseline | null | undefined,
+  next: MultiFileBaseline,
+): boolean => current !== null && current !== undefined &&
+  current.manifestRevision === next.manifestRevision &&
+  current.manifestHash === next.manifestHash &&
+  current.activeResumeId === next.activeResumeId;
 
 async function verifiedResume(
   repository: RepositoryApi,
@@ -293,7 +302,7 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
   }
 
   let finalManifest = input.remoteManifest;
-  if (remoteMutated || finalManifest === null || input.forceManifestPublish) {
+  if (remoteMutated || finalManifest === null || input.forceManifestPublish || plan.activeResumeChange === "upload") {
     finalManifest = await createManifest({
       schemaVersion: 2,
       revision: (input.remoteManifest?.revision ?? 0) + 1,
@@ -385,7 +394,10 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     if (upload.previousMirrorPath && upload.previousMirrorPath !== entry.mirrorPath) {
       try {
         const old = await repository.readResume(upload.previousMirrorPath, signal);
-        if (old) await repository.moveResumeAtomic(upload.previousMirrorPath, entry.mirrorPath, old.etag, signal);
+        if (old) await repository.moveResumeAtomic(upload.previousMirrorPath, entry.mirrorPath, {
+          sourceEtag: old.etag,
+          destinationPrecondition: { kind: "missing" },
+        }, signal);
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
       }
@@ -397,7 +409,10 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     const object = objectResumes.get(move.resumeId);
     try {
       const old = await repository.readResume(move.from, signal);
-      if (old) await repository.moveResumeAtomic(move.from, move.to, old.etag, signal);
+      if (old) await repository.moveResumeAtomic(move.from, move.to, {
+        sourceEtag: old.etag,
+        destinationPrecondition: { kind: "missing" },
+      }, signal);
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
     }
@@ -415,7 +430,7 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     activeResumeId: plan.nextActiveResumeId,
   };
   const baseline = baselineFor(finalManifest);
-  if (syncedCount === 0 && !remoteMutated && !input.forceManifestPublish) {
+  if (syncedCount === 0 && baselineEquivalent(input.currentBaseline, baseline)) {
     return { kind: "applied", data, baseline, syncedCount };
   }
   try {
