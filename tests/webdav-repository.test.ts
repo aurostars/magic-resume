@@ -171,16 +171,49 @@ test("a failed atomic MOVE cleans up without hiding the primary safe error", asy
   assert.deepEqual(client.calls.map((call) => call[0]), ["putText", "move", "delete"]);
 });
 
-test("publishManifest uses create-only and matching ETag CAS without weakening it", async () => {
+test("manifest publish exposes its temporary source handle before conditional MOVE", async () => {
   const client = new FakeClient();
+  client.files.set("/magic-resume/manifest.json.tmp-device-1-op-1", {
+    text: "new",
+    etag: '"temp-1"',
+  });
+  client.files.set("/magic-resume/manifest.json.tmp-device-1-op-2", {
+    text: "replacement",
+    etag: '"temp-2"',
+  });
   const repository = repositoryWith(client);
 
-  await repository.publishManifest("new", null);
-  await repository.publishManifest("replacement", '"m1"');
+  const create = await repository.prepareManifestPublish("new", null);
+  const replace = await repository.prepareManifestPublish("replacement", '"m1"');
+  await repository.commitManifestPublish(create);
+  await repository.commitManifestPublish(replace);
 
+  assert.deepEqual(create, {
+    sourcePath: "/magic-resume/manifest.json.tmp-device-1-op-1",
+    sourceEtag: '"temp-1"',
+    destinationPrecondition: { kind: "missing" },
+  });
   assert.deepEqual(client.calls.filter((call) => call[0] === "move"), [
-    ["move", "/magic-resume/manifest.json.tmp-device-1-op-1", "/magic-resume/manifest.json", { kind: "missing" }],
-    ["move", "/magic-resume/manifest.json.tmp-device-1-op-2", "/magic-resume/manifest.json", { kind: "match", etag: '"m1"' }],
+    ["move", create.sourcePath, "/magic-resume/manifest.json", { kind: "missing" }],
+    ["move", replace.sourcePath, "/magic-resume/manifest.json", { kind: "match", etag: '"m1"' }],
+  ]);
+});
+
+test("manifest publish cancellation conditionally deletes only its temporary source", async () => {
+  const client = new FakeClient();
+  client.files.set("/magic-resume/manifest.json.tmp-device-1-op-1", {
+    text: "new",
+    etag: '"temp-1"',
+  });
+  const repository = repositoryWith(client);
+  const operation = await repository.prepareManifestPublish("new", null);
+
+  await repository.cancelManifestPublish(operation);
+
+  assert.deepEqual(client.calls.at(-1), [
+    "delete",
+    operation.sourcePath,
+    { kind: "match", etag: '"temp-1"' },
   ]);
 });
 

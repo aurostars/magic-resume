@@ -29,7 +29,8 @@ export type ConflictDecision = {
 export interface CoordinatorDependencies {
   repository: Pick<WebDavResumeRepository,
     "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "listResumeCandidates" |
-    "writeResumeAtomic" | "moveResumeAtomic" | "publishManifest" | "deleteManifest">;
+    "writeResumeAtomic" | "moveResumeAtomic" | "prepareManifestPublish" |
+    "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
   getLocalData: () => ResumeSyncData;
   subscribeLocalData: (listener: () => void) => () => void;
   getBaseline: () => MultiFileBaseline | null;
@@ -72,7 +73,7 @@ export type SyncExecutionResult = {
 export type SyncDeferredResult = {
   status: "deferred";
   warning: null;
-  reason: "LOCAL_CHANGED" | "REMOTE_CHANGED";
+  reason: "LOCAL_CHANGED" | "REMOTE_CHANGED" | "REMOTE_UNCERTAIN";
 };
 export type SyncConflictResult = SyncInspection & { decision: "conflict" };
 export type SyncExecuteResult = SyncExecutionResult | SyncDeferredResult | SyncConflictResult;
@@ -226,7 +227,11 @@ export class WebDavSyncCoordinator {
         return {
           status: "deferred",
           warning: null,
-          reason: result.reason === "local-changed" ? "LOCAL_CHANGED" : "REMOTE_CHANGED",
+          reason: result.reason === "local-changed"
+            ? "LOCAL_CHANGED"
+            : result.reason === "remote-uncertain"
+            ? "REMOTE_UNCERTAIN"
+            : "REMOTE_CHANGED",
         };
       }
       return {

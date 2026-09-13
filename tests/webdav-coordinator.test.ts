@@ -6,6 +6,7 @@ import { LocalCasMismatchError, WebDavError } from "../src/lib/webdav/errors";
 import { createManifest, parseManifest, serializeManifest } from "../src/lib/webdav/manifest";
 import { calculateResumeHash, serializeResumeJson } from "../src/lib/webdav/resume-codec";
 import { canonicalizeSyncData } from "../src/lib/webdav/snapshot";
+import type { ManifestPublishOperation } from "../src/lib/webdav/repository";
 import type { ManifestV2, MultiFileBaseline, ResumeSyncData } from "../src/lib/webdav/types";
 import type { ResumeData } from "../src/types/resume";
 
@@ -49,6 +50,7 @@ class MemoryRepository {
   trashCandidates = new Set<string>();
   calls: string[] = [];
   publishRaces = 0;
+  preparedManifestText = "";
 
   async ensureLayout() { this.calls.push("ensure-layout"); }
   async ensureObjectDirectory(id: string) { this.calls.push(`ensure-object:${id}`); }
@@ -75,10 +77,27 @@ class MemoryRepository {
     const value = this.files.get(from);
     if (value) { this.files.delete(from); this.files.set(to, value); }
   }
-  async publishManifest(text: string, expectedEtag: string | null) {
+  async prepareManifestPublish(text: string, expectedEtag: string | null): Promise<ManifestPublishOperation> {
+    this.calls.push(`prepare:${expectedEtag}`);
+    this.preparedManifestText = text;
+    return {
+      sourcePath: "/magic-resume/manifest.json.tmp-device-operation",
+      sourceEtag: '"temp"',
+      destinationPrecondition: expectedEtag === null
+        ? { kind: "missing" }
+        : { kind: "match", etag: expectedEtag },
+    };
+  }
+  async commitManifestPublish(operation: ManifestPublishOperation) {
+    const expectedEtag = operation.destinationPrecondition.kind === "match"
+      ? operation.destinationPrecondition.etag
+      : null;
     this.calls.push(`publish:${expectedEtag}`);
     if (this.publishRaces-- > 0) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
-    this.manifest = { text, etag: '"next"' };
+    this.manifest = { text: this.preparedManifestText, etag: '"next"' };
+  }
+  async cancelManifestPublish(operation: ManifestPublishOperation) {
+    this.calls.push(`cancel-source:${operation.sourceEtag}`);
   }
   async deleteManifest(expectedEtag: string) {
     this.calls.push(`delete-manifest:${expectedEtag}`);

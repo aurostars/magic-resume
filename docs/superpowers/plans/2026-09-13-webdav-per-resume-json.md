@@ -319,7 +319,9 @@ export class WebDavResumeRepository {
   listResumeCandidates(): Promise<RemoteResumeCandidate[]>;
   writeResumeAtomic(path: string, text: string, expectedEtag?: string | null): Promise<void>;
   moveResumeAtomic(from: string, to: string, expectedEtag: string | null): Promise<void>;
-  publishManifest(text: string, expectedEtag: string | null): Promise<void>;
+  prepareManifestPublish(text: string, expectedEtag: string | null): Promise<ManifestPublishOperation>;
+  commitManifestPublish(operation: ManifestPublishOperation): Promise<void>;
+  cancelManifestPublish(operation: ManifestPublishOperation): Promise<void>;
 }
 ```
 
@@ -349,7 +351,7 @@ Also assert:
 
 - `writeResumeAtomic` PUTs a unique temporary sibling then MOVEs to the final path;
 - failed MOVE attempts cleanup without hiding the primary safe error;
-- `publishManifest` uses `If-None-Match: *` for creation and expected ETag for replacement;
+- manifest publish exposes a per-operation temporary source path and ETag before MOVE, uses `If-None-Match: *` for creation or the expected destination ETag for replacement, and can conditionally delete only that source after an uncertain MOVE;
 - `listResumeCandidates` excludes directories, non-JSON files, temporary files, and every `trash/` file.
 
 - [ ] **Step 3: Run client/repository tests and confirm RED**
@@ -571,7 +573,7 @@ git commit -m "feat(webdav): persist per-resume sync baseline"
 export type ExecutePlanResult =
   | { kind: "applied"; data: ResumeSyncData; baseline: MultiFileBaseline; syncedCount: number }
   | { kind: "conflict"; conflicts: ResumeSyncConflict[] }
-  | { kind: "deferred"; reason: "local-changed" | "remote-changed" };
+  | { kind: "deferred"; reason: "local-changed" | "remote-changed" | "remote-uncertain" };
 
 export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<ExecutePlanResult>;
 ```
@@ -604,8 +606,8 @@ Assert exact safety properties:
 - immediately before publication, every live entry in the final manifest is reread and strictly checked for existence, valid `ResumeData`, full ID, and content hash;
 - subscribe to the local snapshot token across the publication window; before issuance, local change or external cancellation prevents publication, but after issuance local change is recorded without aborting the manifest request;
 - after an issued publish succeeds with a local change, confirm the current remote hash is the attempted manifest and CAS-restore the old manifest, or conditionally delete it for first sync;
-- after an uncertain publish error, perform a small fixed-count stability poll to classify attempted, previous, or third-party state; recover only the attempted state, treat previous as safe, and defer remote-changed without overwriting third-party state;
-- upload/object failure means `publishManifest` is never called;
+- after an uncertain manifest MOVE, conditionally DELETE its exact temporary source by source ETag; DELETE success proves the late MOVE cannot commit, while 404/precondition failure requires one destination classification as attempted, previous/404, or third-party; recover only attempted, never overwrite third-party, and keep previous/404 as `remote-uncertain` because repeated immediate GETs are not terminal-state proof;
+- upload/object failure means no manifest publication operation is prepared or committed;
 - downloaded content is read from `objectPath`, parsed, and hash-verified before entering result data;
 - manifest CAS mismatch returns `deferred: remote-changed` and performs no mirror mutation;
 - only after manifest CAS succeeds may `resumes/` and `trash/` mirrors be written/moved;

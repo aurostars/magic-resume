@@ -1,18 +1,19 @@
 import { LocalCasMismatchError, WebDavError } from "./errors";
 import { createManifest, parseManifest, serializeManifest } from "./manifest";
 import { calculateResumeHash, parseResumeJson, serializeResumeJson } from "./resume-codec";
-import type { WebDavResumeRepository } from "./repository";
+import type { ManifestPublishOperation, WebDavResumeRepository } from "./repository";
 import type { ManifestV2, MultiFileBaseline, ResumeSyncConflict, ResumeSyncData, SyncPlan } from "./types";
 import type { ResumeData } from "@/types/resume";
 
 export type ExecutePlanResult =
   | { kind: "applied"; data: ResumeSyncData; baseline: MultiFileBaseline; syncedCount: number }
   | { kind: "conflict"; conflicts: ResumeSyncConflict[] }
-  | { kind: "deferred"; reason: "local-changed" | "remote-changed" };
+  | { kind: "deferred"; reason: "local-changed" | "remote-changed" | "remote-uncertain" };
 
 type RepositoryApi = Pick<WebDavResumeRepository,
   "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "writeResumeAtomic" |
-  "moveResumeAtomic" | "publishManifest" | "deleteManifest">;
+  "moveResumeAtomic" | "prepareManifestPublish" | "commitManifestPublish" |
+  "cancelManifestPublish" | "deleteManifest">;
 
 export interface ExecuteSyncPlanInput {
   repository: RepositoryApi;
@@ -100,56 +101,82 @@ async function repairMirror(
   }
 }
 
-type PublicationRecovery = "local-restored" | "remote-changed" | "unknown";
-const PUBLICATION_STABILITY_READS = 3;
+type PublicationRecovery =
+  | "source-cancelled"
+  | "attempted-restored"
+  | "remote-changed"
+  | "remote-uncertain";
 
-async function reconcileLocalRace(
+function isMissingOrPrecondition(error: unknown): boolean {
+  return error instanceof WebDavError &&
+    (error.code === "NOT_FOUND" || error.code === "REMOTE_CAS_MISMATCH");
+}
+
+async function restoreAttemptedManifest(
+  input: ExecuteSyncPlanInput,
+  attemptedEtag: string,
+): Promise<PublicationRecovery> {
+  try {
+    if (input.previousManifest) {
+      const restore = await input.repository.prepareManifestPublish(
+        serializeManifest(input.previousManifest),
+        attemptedEtag,
+        input.signal,
+      );
+      await input.repository.commitManifestPublish(restore, input.signal);
+    } else {
+      await input.repository.deleteManifest(attemptedEtag, input.signal);
+    }
+    return "attempted-restored";
+  } catch (error) {
+    if (isMissingOrPrecondition(error)) return "remote-changed";
+    throw error;
+  }
+}
+
+async function classifyDestinationAfterLostSource(
   input: ExecuteSyncPlanInput,
   attempted: ManifestV2,
 ): Promise<PublicationRecovery> {
-  let stablePreviousReads = 0;
-  for (let read = 0; read < PUBLICATION_STABILITY_READS; read += 1) {
-    try {
-      input.signal?.throwIfAborted();
-      const latestFile = await input.repository.readManifest(input.signal);
-      if (!latestFile) {
-        if (input.previousManifest !== null) return "remote-changed";
-        stablePreviousReads += 1;
-      } else {
-        const latest = await parseManifest(latestFile.text);
-        if (latest.manifestHash === attempted.manifestHash) {
-          if (!latestFile.etag) return "unknown";
-          try {
-            if (input.previousManifest) {
-              await input.repository.publishManifest(
-                serializeManifest(input.previousManifest),
-                latestFile.etag,
-                input.signal,
-              );
-            } else {
-              await input.repository.deleteManifest(latestFile.etag, input.signal);
-            }
-            return "local-restored";
-          } catch (error) {
-            if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
-              return "remote-changed";
-            }
-            throw error;
-          }
-        }
-        if (input.previousManifest === null || latest.manifestHash !== input.previousManifest.manifestHash) {
-          return "remote-changed";
-        }
-        stablePreviousReads += 1;
-      }
-    } catch (error) {
-      stablePreviousReads = 0;
-      if (input.signal?.aborted) throw input.signal.reason;
-      if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") return "remote-changed";
-    }
-    await Promise.resolve();
+  input.signal?.throwIfAborted();
+  const latestFile = await input.repository.readManifest(input.signal);
+  if (!latestFile) return "remote-uncertain";
+  const latest = await parseManifest(latestFile.text);
+  if (latest.manifestHash === attempted.manifestHash) {
+    if (!latestFile.etag) return "remote-uncertain";
+    return restoreAttemptedManifest(input, latestFile.etag);
   }
-  return stablePreviousReads === PUBLICATION_STABILITY_READS ? "local-restored" : "unknown";
+  if (input.previousManifest && latest.manifestHash === input.previousManifest.manifestHash) {
+    return "remote-uncertain";
+  }
+  return "remote-changed";
+}
+
+async function reconcileUncertainMove(
+  input: ExecuteSyncPlanInput,
+  attempted: ManifestV2,
+  operation: ManifestPublishOperation,
+): Promise<PublicationRecovery> {
+  try {
+    await input.repository.cancelManifestPublish(operation, input.signal);
+    return "source-cancelled";
+  } catch (error) {
+    if (input.signal?.aborted) throw input.signal.reason;
+    if (!isMissingOrPrecondition(error)) return "remote-uncertain";
+    return classifyDestinationAfterLostSource(input, attempted);
+  }
+}
+
+async function reconcileKnownSuccessfulMove(
+  input: ExecuteSyncPlanInput,
+  attempted: ManifestV2,
+): Promise<PublicationRecovery> {
+  const latestFile = await input.repository.readManifest(input.signal);
+  if (!latestFile) return "remote-uncertain";
+  const latest = await parseManifest(latestFile.text);
+  if (latest.manifestHash !== attempted.manifestHash) return "remote-changed";
+  if (!latestFile.etag) return "remote-uncertain";
+  return restoreAttemptedManifest(input, latestFile.etag);
 }
 
 export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<ExecutePlanResult> {
@@ -265,36 +292,53 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     }
     signal?.throwIfAborted();
 
-    // Once issued, publication is deliberately detached from cancellation. Its outcome must be
-    // observed before recovery so a late server commit cannot escape reconciliation.
+    const publication = await repository.prepareManifestPublish(
+      serializeManifest(finalManifest),
+      input.remoteManifestEtag,
+      signal,
+    );
+    observeLocal();
+    if (localChanged) {
+      unsubscribe();
+      try { await repository.cancelManifestPublish(publication, signal); } catch { /* orphan temp only */ }
+      return { kind: "deferred", reason: "local-changed" };
+    }
+    signal?.throwIfAborted();
+
+    // Once issued, MOVE is deliberately detached from cancellation. A network error is reconciled
+    // through the conditionally deletable source, never through repeated destination observations.
     const publicationSignal = new AbortController().signal;
     let publishError: unknown = null;
     try {
-      await repository.publishManifest(
-        serializeManifest(finalManifest),
-        input.remoteManifestEtag,
-        publicationSignal,
-      );
+      await repository.commitManifestPublish(publication, publicationSignal);
     } catch (error) {
       publishError = error;
     } finally {
       observeLocal();
       unsubscribe();
     }
-    if (localChanged) {
-      if (publishError instanceof WebDavError && publishError.code === "REMOTE_CAS_MISMATCH") {
-        return { kind: "deferred", reason: "remote-changed" };
-      }
-      const recovery = await reconcileLocalRace(input, finalManifest);
-      return recovery === "local-restored"
-        ? { kind: "deferred", reason: "local-changed" }
-        : { kind: "deferred", reason: "remote-changed" };
+
+    if (publishError instanceof WebDavError && publishError.code === "REMOTE_CAS_MISMATCH") {
+      try { await repository.cancelManifestPublish(publication, signal); } catch { /* orphan temp only */ }
+      return { kind: "deferred", reason: "remote-changed" };
     }
+
     if (publishError) {
-      if (publishError instanceof WebDavError && publishError.code === "REMOTE_CAS_MISMATCH") {
-        return { kind: "deferred", reason: "remote-changed" };
+      const recovery = await reconcileUncertainMove(input, finalManifest, publication);
+      if (recovery === "source-cancelled" || recovery === "attempted-restored") {
+        if (localChanged) return { kind: "deferred", reason: "local-changed" };
+        throw publishError;
       }
-      throw publishError;
+      return { kind: "deferred", reason: recovery };
+    } else if (localChanged) {
+      const recovery = await reconcileKnownSuccessfulMove(input, finalManifest);
+      if (recovery === "attempted-restored") {
+        return { kind: "deferred", reason: "local-changed" };
+      }
+      return {
+        kind: "deferred",
+        reason: recovery === "remote-changed" ? "remote-changed" : "remote-uncertain",
+      };
     }
   }
 

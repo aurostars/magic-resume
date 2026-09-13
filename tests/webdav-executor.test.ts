@@ -5,6 +5,7 @@ import { executeSyncPlan } from "../src/lib/webdav/executor";
 import { createManifest, serializeManifest } from "../src/lib/webdav/manifest";
 import { calculateResumeHash, serializeResumeJson } from "../src/lib/webdav/resume-codec";
 import { LocalCasMismatchError, WebDavError } from "../src/lib/webdav/errors";
+import type { ManifestPublishOperation } from "../src/lib/webdav/repository";
 import type { ManifestV2, MultiFileBaseline, ResumeSyncData, SyncPlan } from "../src/lib/webdav/types";
 import type { ResumeData } from "../src/types/resume";
 
@@ -30,8 +31,14 @@ class FakeRepository {
   failPublish = false;
   failMirror = false;
   publishNetworkError = false;
-  pendingManifestText: string | null = null;
-  pendingManifestReads = 0;
+  deferredMove: "delete-wins" | "move-wins" | "third-party" | "source-lost" | null = null;
+  thirdPartyManifestText: string | null = null;
+  pendingPublish: { operation: ManifestPublishOperation; text: string } | null = null;
+  preparedManifestText = "";
+  temporarySourceExists = false;
+  deferredMoveAfterReads = Number.POSITIVE_INFINITY;
+  destinationReadsAfterError = 0;
+  lateMoveFailed = false;
   onWrite: ((path: string) => void) | null = null;
   onPublish: ((signal?: AbortSignal) => void | Promise<void>) | null = null;
   onReadManifest: (() => void) | null = null;
@@ -43,10 +50,9 @@ class FakeRepository {
   async readManifest(signal?: AbortSignal) {
     this.calls.push("read-manifest"); this.seenSignals.push(signal);
     this.onReadManifest?.();
-    if (this.pendingManifestText !== null && this.pendingManifestReads-- <= 0) {
-      this.manifestText = this.pendingManifestText;
-      this.manifestEtag = '"published"';
-      this.pendingManifestText = null;
+    if (this.pendingPublish && ++this.destinationReadsAfterError >= this.deferredMoveAfterReads) {
+      if (this.temporarySourceExists) this.completePendingMove();
+      else this.lateMoveFailed = true;
     }
     return this.manifestText === null ? null : { path: "manifest.json", text: this.manifestText, etag: this.manifestEtag };
   }
@@ -69,21 +75,59 @@ class FakeRepository {
     const file = this.files.get(from);
     if (file) { this.files.set(to, file); this.files.delete(from); }
   }
-  async publishManifest(text: string, expectedEtag: string | null, signal?: AbortSignal) {
+  async prepareManifestPublish(text: string, expectedEtag: string | null, signal?: AbortSignal) {
+    this.calls.push(`prepare:${expectedEtag}`); this.seenSignals.push(signal);
+    this.preparedManifestText = text;
+    this.temporarySourceExists = true;
+    return {
+      sourcePath: "/magic-resume/manifest.json.tmp-device-a-operation",
+      sourceEtag: '"temp-etag"',
+      destinationPrecondition: expectedEtag === null
+        ? { kind: "missing" as const }
+        : { kind: "match" as const, etag: expectedEtag },
+    };
+  }
+  async commitManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal) {
+    const expectedEtag = operation.destinationPrecondition.kind === "match"
+      ? operation.destinationPrecondition.etag
+      : null;
     this.calls.push(`publish:${expectedEtag}`); this.seenSignals.push(signal);
     await this.onPublish?.(signal);
     if (signal?.aborted) throw signal.reason;
     if (this.failPublish) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
     if (this.publishNetworkError) {
       this.publishNetworkError = false;
-      this.pendingManifestText = text;
-      this.pendingManifestReads = 1;
+      this.pendingPublish = { operation, text: this.preparedManifestText };
+      if (this.deferredMove === "source-lost") this.temporarySourceExists = false;
       throw new WebDavError("NETWORK");
     }
     if (expectedEtag === '"published"') this.onRestore?.();
     if (expectedEtag !== this.manifestEtag) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
-    this.manifestText = text;
+    this.manifestText = this.preparedManifestText;
     this.manifestEtag = '"published"';
+    this.temporarySourceExists = false;
+  }
+  async cancelManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal) {
+    this.calls.push(`cancel-source:${operation.sourceEtag}`); this.seenSignals.push(signal);
+    if (this.pendingPublish && this.deferredMove === "move-wins") this.completePendingMove();
+    if (this.pendingPublish && this.deferredMove === "third-party") {
+      this.temporarySourceExists = false;
+      this.manifestText = this.thirdPartyManifestText;
+      this.manifestEtag = '"third-party"';
+    }
+    if (!this.temporarySourceExists) {
+      throw this.deferredMove === "third-party"
+        ? new WebDavError("REMOTE_CAS_MISMATCH", 412)
+        : new WebDavError("NOT_FOUND", 404);
+    }
+    this.temporarySourceExists = false;
+  }
+  private completePendingMove() {
+    if (!this.pendingPublish || !this.temporarySourceExists) return;
+    this.manifestText = this.pendingPublish.text;
+    this.manifestEtag = '"published"';
+    this.temporarySourceExists = false;
+    this.pendingPublish = null;
   }
   async deleteManifest(expectedEtag: string, signal?: AbortSignal) {
     this.calls.push(`delete-manifest:${expectedEtag}`); this.seenSignals.push(signal);
@@ -171,7 +215,7 @@ test("uploads and verifies immutable objects, publishes manifest, then writes re
   assert.deepEqual(state.repository.calls, [
     "ensure-layout", `ensure-object:${item.id}`,
     `read:${objectPath(item.id, hash)}`, `write:${objectPath(item.id, hash)}`,
-    `read:${objectPath(item.id, hash)}`, `read:${objectPath(item.id, hash)}`, "publish:null",
+    `read:${objectPath(item.id, hash)}`, `read:${objectPath(item.id, hash)}`, "prepare:null", "publish:null",
     "read:resumes/Readable--resume.json", "write:resumes/Readable--resume.json", "read:resumes/Readable--resume.json",
   ]);
   const published = JSON.parse(state.repository.manifestText!) as ManifestV2;
@@ -216,7 +260,9 @@ for (const scenario of ["content update", "title rename", "deletion"] as const) 
     assert.equal(state.repository.calls.slice(0, publishIndex).some(
       (call) => call.startsWith("write:resumes/") || call.startsWith("write:trash/") || call.startsWith("move:"),
     ), false);
-    assert.equal(state.repository.calls.slice(publishIndex + 1).length, 0);
+    assert.equal(state.repository.calls.slice(publishIndex + 1).some(
+      (call) => call.startsWith("write:resumes/") || call.startsWith("write:trash/") || call.startsWith("move:"),
+    ), false);
   });
 }
 
@@ -337,7 +383,7 @@ test("in-flight local change waits for delayed publish success then conditionall
   assert.equal(state.repository.calls.includes('delete-manifest:"published"'), true);
 });
 
-test("network error after server commit is polled until attempted manifest can be restored", async () => {
+test("uncertain MOVE is neutralized when conditional temp DELETE wins", async () => {
   const old = resume("same-id", "Old");
   const oldEntry = await entryFor(old);
   const remote = await manifest({ [old.id]: oldEntry }, old.id);
@@ -349,16 +395,59 @@ test("network error after server commit is polled until attempted manifest can b
   seed(state.repository, oldEntry.objectPath, old);
   const original = state.repository.manifestText;
   state.repository.publishNetworkError = true;
+  state.repository.deferredMove = "delete-wins";
+  state.repository.deferredMoveAfterReads = 5;
   state.repository.onPublish = () => state.setLocalToken("changed-during-uncertain-publish");
 
   assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
   assert.equal(state.repository.manifestText, original);
-  assert.equal(state.repository.pendingManifestText, null);
-  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length >= 2, true);
+  assert.equal(state.repository.calls.includes('cancel-source:"temp-etag"'), true);
+  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 0);
+
+  for (let read = 0; read < 5; read += 1) await state.repository.readManifest();
+  assert.equal(state.repository.lateMoveFailed, true);
+  assert.equal(state.repository.manifestText, original);
+});
+
+test("uncertain MOVE that wins before temp DELETE is identified and restored", async () => {
+  const old = resume("move-wins", "Old");
+  const oldEntry = await entryFor(old);
+  const remote = await manifest({ [old.id]: oldEntry }, old.id);
+  const changed = resume(old.id, "Changed");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: changed, mirrorPath: "resumes/Changed--move-w.json", previousMirrorPath: oldEntry.mirrorPath }];
+  plan.nextActiveResumeId = old.id;
+  const state = setup({ local: data(changed), remote, plan });
+  seed(state.repository, oldEntry.objectPath, old);
+  const original = state.repository.manifestText;
+  state.repository.publishNetworkError = true;
+  state.repository.deferredMove = "move-wins";
+  state.repository.onPublish = () => state.setLocalToken("changed-in-flight");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
+  assert.equal(state.repository.manifestText, original);
+  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 1);
   assert.equal(state.repository.calls.includes('publish:"published"'), true);
 });
 
-test("third-party manifest committed before recovery is never overwritten", async () => {
+test("missing temp with previous destination remains remote-uncertain without polling proof", async () => {
+  const old = resume("source-lost", "Old");
+  const oldEntry = await entryFor(old);
+  const remote = await manifest({ [old.id]: oldEntry }, old.id);
+  const changed = resume(old.id, "Changed");
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: changed, mirrorPath: "resumes/Changed--source.json", previousMirrorPath: oldEntry.mirrorPath }];
+  const state = setup({ local: data(changed), remote, plan });
+  seed(state.repository, oldEntry.objectPath, old);
+  state.repository.publishNetworkError = true;
+  state.repository.deferredMove = "source-lost";
+  state.repository.onPublish = () => state.setLocalToken("changed-in-flight");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-uncertain" });
+  assert.equal(state.repository.calls.filter((call) => call === "read-manifest").length, 1);
+});
+
+test("third-party manifest committed before uncertain MOVE recovery is never overwritten", async () => {
   const old = resume("third-party-id", "Old");
   const oldEntry = await entryFor(old);
   const remote = await manifest({ [old.id]: oldEntry }, old.id);
@@ -372,14 +461,14 @@ test("third-party manifest committed before recovery is never overwritten", asyn
   plan.nextActiveResumeId = old.id;
   const state = setup({ local: data(changed), remote, plan });
   seed(state.repository, oldEntry.objectPath, old);
+  state.repository.publishNetworkError = true;
+  state.repository.deferredMove = "third-party";
+  state.repository.thirdPartyManifestText = serializeManifest(thirdParty);
   state.repository.onPublish = () => state.setLocalToken("changed-in-flight");
-  state.repository.onRestore = () => {
-    state.repository.manifestText = serializeManifest(thirdParty);
-    state.repository.manifestEtag = '"third-party"';
-  };
 
   assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-changed" });
   assert.equal(state.repository.manifestText, serializeManifest(thirdParty));
+  assert.equal(state.repository.calls.includes('publish:"third-party"'), false);
 });
 
 test("executor forwards AbortSignal to object writes, moves, and mirror repair", async () => {

@@ -25,6 +25,12 @@ export interface RemoteResumeCandidate {
   etag: string | null;
 }
 
+export interface ManifestPublishOperation {
+  sourcePath: string;
+  sourceEtag: string;
+  destinationPrecondition: RemotePrecondition;
+}
+
 export interface WebDavResumeRepositoryOptions {
   deviceId: string;
   remoteDirectory?: string;
@@ -137,8 +143,42 @@ export class WebDavResumeRepository {
     );
   }
 
-  async publishManifest(text: string, expectedEtag: string | null, signal?: AbortSignal): Promise<void> {
-    await this.writeAtomic(MANIFEST_FILE, text, preconditionFor(expectedEtag), signal);
+  async prepareManifestPublish(
+    text: string,
+    expectedEtag: string | null,
+    signal?: AbortSignal,
+  ): Promise<ManifestPublishOperation> {
+    const sourcePath = this.temporaryPathFor(MANIFEST_FILE);
+    try {
+      await this.client.putText(sourcePath, text, { kind: "missing" }, signal);
+      const source = await this.client.getTextWithMetadata(sourcePath, signal);
+      if (!source?.etag || source.text !== text) throw new WebDavError("REMOTE_CONTENT_MISMATCH");
+      return {
+        sourcePath,
+        sourceEtag: source.etag,
+        destinationPrecondition: preconditionFor(expectedEtag),
+      };
+    } catch (error) {
+      try { await this.client.delete(sourcePath); } catch { /* best-effort prepare cleanup */ }
+      throw error;
+    }
+  }
+
+  async commitManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal): Promise<void> {
+    await this.client.move(
+      operation.sourcePath,
+      `${this.root}${MANIFEST_FILE}`,
+      operation.destinationPrecondition,
+      signal,
+    );
+  }
+
+  async cancelManifestPublish(operation: ManifestPublishOperation, signal?: AbortSignal): Promise<void> {
+    await this.client.delete(
+      operation.sourcePath,
+      { kind: "match", etag: operation.sourceEtag },
+      signal,
+    );
   }
 
   async deleteManifest(expectedEtag: string, signal?: AbortSignal): Promise<void> {
@@ -154,16 +194,20 @@ export class WebDavResumeRepository {
     return remote === null ? null : { path, ...remote };
   }
 
+  private temporaryPathFor(path: string): string {
+    const operationId = this.createOperationId();
+    assertSafeToken(operationId);
+    return `${this.root}${path}.tmp-${this.deviceId}-${operationId}`;
+  }
+
   private async writeAtomic(
     path: string,
     text: string,
     finalPrecondition: RemotePrecondition,
     signal?: AbortSignal,
   ): Promise<void> {
-    const operationId = this.createOperationId();
-    assertSafeToken(operationId);
     const finalPath = `${this.root}${path}`;
-    const temporaryPath = `${finalPath}.tmp-${this.deviceId}-${operationId}`;
+    const temporaryPath = this.temporaryPathFor(path);
     try {
       await this.client.putText(temporaryPath, text, { kind: "missing" }, signal);
       await this.client.move(temporaryPath, finalPath, finalPrecondition, signal);
