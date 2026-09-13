@@ -72,10 +72,11 @@ test("runtime injection precedes application scripts and cannot terminate its sc
   assert.doesNotMatch(injected, /<\/script>\?value/);
 });
 
-test("an injected built shell bootstraps Miaobi navigation with hash history", async () => {
+test("an injected built shell bootstraps getRouter with hash history", async () => {
   const directory = await mkdtemp(join(tmpdir(), "magic-resume-spa-bootstrap-"));
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
+  const originalSelf = globalThis.self;
   const dom = new JSDOM("", {
     url: "https://magic-resume.test/",
     runScripts: "outside-only",
@@ -100,14 +101,18 @@ test("an injected built shell bootstraps Miaobi navigation with hash history", a
     Object.defineProperties(globalThis, {
       window: { configurable: true, value: dom.window },
       document: { configurable: true, value: dom.window.document },
+      self: { configurable: true, value: dom.window },
     });
     dom.window.eval(runtimeScript.textContent);
 
-    const { createAppHistory } = await import("../src/config/runtime-endpoints");
-    const history = createAppHistory();
+    const { getRouter } = await import("../src/router");
+    const router = getRouter();
+    const history = router.options.history;
+    assert.ok(history);
     history.push("/app/settings");
     await Promise.resolve();
 
+    assert.equal(history.location.pathname, "/app/settings");
     assert.equal(dom.window.location.pathname, "/");
     assert.equal(dom.window.location.hash, "#/app/settings");
   } finally {
@@ -125,6 +130,14 @@ test("an injected built shell bootstraps Miaobi navigation with hash history", a
       Object.defineProperty(globalThis, "document", {
         configurable: true,
         value: originalDocument,
+      });
+    }
+    if (originalSelf === undefined) {
+      Reflect.deleteProperty(globalThis, "self");
+    } else {
+      Object.defineProperty(globalThis, "self", {
+        configurable: true,
+        value: originalSelf,
       });
     }
     dom.window.close();
