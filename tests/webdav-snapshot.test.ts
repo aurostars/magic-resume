@@ -154,6 +154,16 @@ test("parser reports validation codes for malformed snapshot boundaries", async 
     async () => parseCloudSnapshot(await snapshotWithData(emptyId)),
     "SNAPSHOT_RESUME",
   );
+
+  const sparseResume = resume("a");
+  sparseResume.education = new Array(1) as ResumeData["education"];
+  await assertValidationCode(
+    async () => parseCloudSnapshot(await snapshotWithData({
+      resumes: [sparseResume],
+      activeResumeId: "a",
+    })),
+    "SNAPSHOT_RESUME",
+  );
 });
 
 test("parser rejects non-canonical raw data instead of normalizing before hash verification", async () => {

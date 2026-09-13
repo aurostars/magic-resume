@@ -35,6 +35,16 @@ test("serializes exactly one import-compatible ResumeData payload", () => {
   assert.deepEqual(parseResumeJson(text), resume);
 });
 
+test("serializeResumeJson rejects invalid ResumeData before writing JSON", () => {
+  const invalid = createCompleteResume();
+  invalid.education = new Array(1) as ResumeData["education"];
+
+  assert.throws(
+    () => serializeResumeJson(invalid),
+    /SNAPSHOT_RESUME/,
+  );
+});
+
 test("uses safe title and six-character stable suffix", () => {
   assert.equal(getResumeFileName(resume), "产品_经理_ _核心_--a81f32.json");
 });

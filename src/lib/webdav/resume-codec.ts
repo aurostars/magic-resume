@@ -1,5 +1,5 @@
 import type { ResumeData } from "@/types/resume";
-import { assertResumeData, sha256, stableStringify } from "./snapshot";
+import { assertResumeData, sha256, stableStringify } from "./resume-codec-core";
 
 const INVALID_FILE_NAME_CHAR_REGEX = /[\\/:*?"<>|]/g;
 
