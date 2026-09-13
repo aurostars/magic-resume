@@ -39,6 +39,11 @@ function normalizeEndpoint(value: unknown): string | null {
   }
 }
 
+function isCloudflareWorkersHostname(endpoint: string): boolean {
+  const hostname = new URL(endpoint).hostname.toLowerCase().replace(/\.+$/, "");
+  return hostname === "workers.dev" || hostname.endsWith(".workers.dev");
+}
+
 export function getRuntimeConfig(): MagicResumeRuntimeConfig {
   if (typeof window === "undefined" || !window.__MAGIC_RESUME_RUNTIME__) {
     return { ...DEFAULT_RUNTIME_CONFIG };
@@ -60,8 +65,7 @@ export function getRuntimeConfig(): MagicResumeRuntimeConfig {
   if (
     config.platform === "miaobi" &&
     [config.apiFunctionUrl, config.assetBaseUrl].some(
-      (endpoint) =>
-        endpoint !== null && new URL(endpoint).hostname.endsWith(".workers.dev")
+      (endpoint) => endpoint !== null && isCloudflareWorkersHostname(endpoint)
     )
   ) {
     throw invalidRuntimeConfig();

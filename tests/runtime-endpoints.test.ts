@@ -99,6 +99,42 @@ test("Miaobi rejects missing or Cloudflare runtime endpoints without exposing va
   }
 });
 
+test("Miaobi rejects the bare workers.dev hostname", () => {
+  injectRuntime({
+    platform: "miaobi",
+    apiFunctionUrl: "https://workers.dev/path?token=bare-secret",
+    assetBaseUrl: null,
+  });
+
+  assert.throws(
+    () => getRuntimeConfig(),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "Invalid runtime endpoint configuration");
+      assert.doesNotMatch(error.message, /bare-secret/);
+      return true;
+    },
+  );
+});
+
+test("Miaobi rejects workers.dev hostnames with a DNS trailing dot", () => {
+  injectRuntime({
+    platform: "miaobi",
+    apiFunctionUrl: "https://private-worker.workers.dev./path?token=dot-secret",
+    assetBaseUrl: null,
+  });
+
+  assert.throws(
+    () => getRuntimeConfig(),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "Invalid runtime endpoint configuration");
+      assert.doesNotMatch(error.message, /dot-secret/);
+      return true;
+    },
+  );
+});
+
 test("invalid or non-HTTPS runtime endpoints are rejected without exposing their values", () => {
   const secrets = [
     "http://user:password@example.test/functions?token=api-secret",

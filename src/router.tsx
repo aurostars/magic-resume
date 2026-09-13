@@ -1,10 +1,12 @@
-import { createHashHistory, createRouter } from "@tanstack/react-router";
+import { createRouter } from "@tanstack/react-router";
+import { createAppHistory, getRuntimeConfig } from "./config/runtime-endpoints";
 import { routeTree } from "./routeTree.gen";
 
-export function getRouter(options: { platform?: "default" | "miaobi" } = {}) {
+export function getRouter() {
+  const runtimeConfig = getRuntimeConfig();
   return createRouter({
     routeTree,
-    history: options.platform === "miaobi" ? createHashHistory() : undefined,
+    history: runtimeConfig.platform === "miaobi" ? createAppHistory() : undefined,
     scrollRestoration: true
   });
 }

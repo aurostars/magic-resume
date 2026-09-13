@@ -158,11 +158,12 @@ afterEach(() => {
 });
 after(() => dom.window.close());
 
-test("router leaves browser history as the default and uses hash navigation for Miaobi", async () => {
+test("router keeps default behavior and follows injected Miaobi runtime without options", async () => {
   const defaultRouter = getRouter();
   assert.equal(defaultRouter.options.history, undefined);
 
-  const miaobiRouter = getRouter({ platform: "miaobi" });
+  setMiaobiRuntime();
+  const miaobiRouter = getRouter();
   const miaobiHistory = miaobiRouter.options.history;
   assert.ok(miaobiHistory);
   miaobiHistory.push("/resumes");
