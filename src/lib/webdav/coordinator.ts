@@ -22,11 +22,13 @@ import type {
 export type ConflictDecision = {
   resumeId: string;
   resolution: "keep-local" | "use-cloud";
+  seenRemoteEtag?: string | null;
+  seenManifestRevision?: number;
 };
 
 export interface CoordinatorDependencies {
   repository: Pick<WebDavResumeRepository,
-    "ensureLayout" | "readManifest" | "readResume" | "listResumeCandidates" |
+    "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "listResumeCandidates" |
     "writeResumeAtomic" | "moveResumeAtomic" | "publishManifest">;
   getLocalData: () => ResumeSyncData;
   getBaseline: () => MultiFileBaseline | null;
@@ -93,21 +95,22 @@ async function localHashes(data: ResumeSyncData): Promise<Record<string, string>
 export class WebDavSyncCoordinator {
   constructor(private readonly dependencies: CoordinatorDependencies) {}
 
-  async inspect(_signal?: AbortSignal): Promise<SyncInspection> {
+  async inspect(signal?: AbortSignal): Promise<SyncInspection> {
     const localData = this.dependencies.getLocalData();
     const localToken = canonicalizeSyncData(localData);
     const hashes = await localHashes(localData);
-    const remoteFile = await this.dependencies.repository.readManifest();
+    const remoteFile = await this.dependencies.repository.readManifest(signal);
     let manifest = remoteFile ? await parseManifest(remoteFile.text) : null;
     const warnings: SyncWarning[] = [];
+    const manualImports: NonNullable<SyncPlan["manualImports"]> = [];
     let discoveredRemoteFiles = false;
 
     if (manifest) {
       const entries = structuredClone(manifest.entries);
-      const indexedPaths = new Set(Object.values(entries).map((entry) => entry.path));
-      for (const candidate of await this.dependencies.repository.listResumeCandidates()) {
+      const indexedPaths = new Set(Object.values(entries).map((entry) => entry.mirrorPath));
+      for (const candidate of await this.dependencies.repository.listResumeCandidates(signal)) {
         if (indexedPaths.has(candidate.path)) continue;
-        const file = await this.dependencies.repository.readResume(candidate.path);
+        const file = await this.dependencies.repository.readResume(candidate.path, signal);
         if (!file) continue;
         try {
           const discovered = parseResumeJson(file.text);
@@ -115,11 +118,13 @@ export class WebDavSyncCoordinator {
           const existing = entries[discovered.id];
           if (existing?.contentHash === contentHash) continue;
           entries[discovered.id] = {
-            path: candidate.path,
+            objectPath: `objects/${discovered.id}/${contentHash}.json`,
+            mirrorPath: candidate.path,
             contentHash,
             updatedAt: discovered.updatedAt,
             deleted: false,
           };
+          manualImports.push({ resume: discovered, mirrorPath: candidate.path });
           discoveredRemoteFiles = true;
         } catch {
           warnings.push({ code: "INVALID_REMOTE_RESUME" });
@@ -134,6 +139,7 @@ export class WebDavSyncCoordinator {
       remote: manifest,
       baseline: this.dependencies.getBaseline(),
     });
+    plan.manualImports = manualImports;
     return {
       decision: decisionFor(plan),
       localData,
@@ -157,6 +163,12 @@ export class WebDavSyncCoordinator {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       requestSignal?.throwIfAborted();
       const inspection = await this.inspect(requestSignal);
+      if (decision && (
+        (decision.seenRemoteEtag !== undefined && decision.seenRemoteEtag !== inspection.remoteEtag) ||
+        (decision.seenManifestRevision !== undefined && decision.seenManifestRevision !== inspection.manifest?.revision)
+      )) {
+        return { status: "deferred", warning: null, reason: "REMOTE_CHANGED" };
+      }
       const plan = decision ? this.resolve(inspection.plan, decision) : inspection.plan;
       if (plan.conflicts.length > 0) {
         return { ...inspection, decision: "conflict", plan, conflicts: plan.conflicts };
@@ -167,14 +179,6 @@ export class WebDavSyncCoordinator {
         : plan.downloads.length > 0 || plan.remoteDeletions.length > 0
         ? "downloaded"
         : "unchanged";
-      const baseline = this.dependencies.getBaseline();
-      if (
-        intendedStatus === "unchanged" &&
-        inspection.manifest !== null &&
-        baseline?.manifestHash === inspection.manifest.manifestHash
-      ) {
-        return { status: "unchanged", warning: null, syncedCount: 0 };
-      }
       const result = await executeSyncPlan({
         repository: this.dependencies.repository,
         plan,
@@ -182,10 +186,12 @@ export class WebDavSyncCoordinator {
         remoteManifest: inspection.manifest,
         remoteManifestEtag: inspection.remoteEtag,
         expectedLocalToken: inspection.localToken,
+        getLocalToken: () => canonicalizeSyncData(this.dependencies.getLocalData()),
         deviceId: this.dependencies.deviceId,
         now: this.dependencies.now,
         commit: this.dependencies.commit,
         forceManifestPublish: inspection.discoveredRemoteFiles,
+        signal: requestSignal,
       });
       if (result.kind === "conflict") {
         return { ...inspection, decision: "conflict", plan, conflicts: result.conflicts };
@@ -210,19 +216,31 @@ export class WebDavSyncCoordinator {
   /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
   keepLocal(
     cloud: Pick<CloudSnapshotV1, "revision">,
-    _expectedEtagOrSignal?: string | null | AbortSignal,
+    expectedEtagOrSignal?: string | null | AbortSignal,
     signal?: AbortSignal,
   ): Promise<SyncExecuteResult> {
-    return this.execute({ resumeId: cloud.revision, resolution: "keep-local" }, signal);
+    const expectedEtag = expectedEtagOrSignal instanceof AbortSignal ? undefined : expectedEtagOrSignal;
+    const requestSignal = expectedEtagOrSignal instanceof AbortSignal ? expectedEtagOrSignal : signal;
+    return this.execute({
+      resumeId: cloud.revision,
+      resolution: "keep-local",
+      ...(expectedEtag !== undefined ? { seenRemoteEtag: expectedEtag } : {}),
+    }, requestSignal);
   }
 
   /** Compatibility bridge for the current controller; Task 7 replaces its aggregate dialog model. */
   useCloud(
     cloud: Pick<CloudSnapshotV1, "revision">,
-    _expectedEtagOrSignal?: string | null | AbortSignal,
+    expectedEtagOrSignal?: string | null | AbortSignal,
     signal?: AbortSignal,
   ): Promise<SyncExecuteResult> {
-    return this.execute({ resumeId: cloud.revision, resolution: "use-cloud" }, signal);
+    const expectedEtag = expectedEtagOrSignal instanceof AbortSignal ? undefined : expectedEtagOrSignal;
+    const requestSignal = expectedEtagOrSignal instanceof AbortSignal ? expectedEtagOrSignal : signal;
+    return this.execute({
+      resumeId: cloud.revision,
+      resolution: "use-cloud",
+      ...(expectedEtag !== undefined ? { seenRemoteEtag: expectedEtag } : {}),
+    }, requestSignal);
   }
 
   private resolve(plan: SyncPlan, decision: ConflictDecision): SyncPlan {
@@ -238,20 +256,20 @@ export class WebDavSyncCoordinator {
     };
     if (decision.resolution === "keep-local") {
       if (conflict.local) {
-        const path = getResumeRelativePath(conflict.local);
+        const mirrorPath = getResumeRelativePath(conflict.local);
         next.uploads.push({
           resume: conflict.local,
-          path,
-          previousPath: conflict.remoteEntry && !conflict.remoteEntry.deleted &&
-              conflict.remoteEntry.path !== path
-            ? conflict.remoteEntry.path
+          mirrorPath,
+          previousMirrorPath: conflict.remoteEntry && !conflict.remoteEntry.deleted &&
+              conflict.remoteEntry.mirrorPath !== mirrorPath
+            ? conflict.remoteEntry.mirrorPath
             : null,
         });
       } else if (conflict.remoteEntry && !conflict.remoteEntry.deleted) {
         next.trashMoves.push({
           resumeId: conflict.resumeId,
-          from: conflict.remoteEntry.path,
-          to: `trash/${conflict.remoteEntry.path.split("/").at(-1)}`,
+          from: conflict.remoteEntry.mirrorPath,
+          to: `trash/${conflict.remoteEntry.mirrorPath.split("/").at(-1)}`,
         });
       }
     } else if (!conflict.remoteEntry || conflict.remoteEntry.deleted) {
@@ -259,7 +277,7 @@ export class WebDavSyncCoordinator {
     } else {
       next.downloads.push({
         resumeId: conflict.resumeId,
-        path: conflict.remoteEntry.path,
+        objectPath: conflict.remoteEntry.objectPath,
         contentHash: conflict.remoteEntry.contentHash,
       });
     }

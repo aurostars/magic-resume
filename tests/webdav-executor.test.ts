@@ -9,254 +9,235 @@ import type { ManifestV2, MultiFileBaseline, ResumeSyncData, SyncPlan } from "..
 import type { ResumeData } from "../src/types/resume";
 
 const NOW = "2026-09-13T03:00:00.000Z";
-const resume = (id: string, title = `Resume ${id}`): ResumeData => ({
+const resume = (id: string, title = `Resume ${id}`, updatedAt = NOW): ResumeData => ({
   ...structuredClone(initialResumeState), id, title,
-  createdAt: NOW, updatedAt: NOW, templateId: null,
+  createdAt: NOW, updatedAt, templateId: null,
+});
+const data = (...items: ResumeData[]): ResumeSyncData => ({
+  resumes: items, activeResumeId: items[0]?.id ?? null,
 });
 const emptyPlan = (): SyncPlan => ({
   uploads: [], downloads: [], trashMoves: [], remoteDeletions: [], conflicts: [],
   nextActiveResumeId: null,
 });
+const objectPath = (id: string, hash: string): string => `objects/${id}/${hash}.json`;
 
 class FakeRepository {
   readonly calls: string[] = [];
-  files = new Map<string, { text: string; etag: string | null }>();
+  readonly files = new Map<string, { text: string; etag: string | null }>();
   manifestText: string | null = null;
   manifestEtag: string | null = null;
-  failWritePath: string | null = null;
-  writeEtags = new Map<string, string | null | undefined>();
   failPublish = false;
+  failMirror = false;
+  onWrite: ((path: string) => void) | null = null;
 
-  async ensureLayout(): Promise<void> { this.calls.push("ensure-layout"); }
-  async readManifest() {
-    this.calls.push("read-manifest");
-    return this.manifestText === null ? null : { path: "manifest.json", text: this.manifestText, etag: this.manifestEtag };
-  }
+  async ensureLayout() { this.calls.push("ensure-layout"); }
+  async ensureObjectDirectory(id: string) { this.calls.push(`ensure-object:${id}`); }
   async readResume(path: string) {
     this.calls.push(`read:${path}`);
     const file = this.files.get(path);
     return file ? { path, ...file } : null;
   }
-  async listResumeCandidates() { return []; }
-  async writeResumeAtomic(path: string, text: string, expectedEtag?: string | null): Promise<void> {
+  async writeResumeAtomic(path: string, text: string) {
     this.calls.push(`write:${path}`);
-    this.writeEtags.set(path, expectedEtag);
-    if (path === this.failWritePath) throw new WebDavError("SERVER", 503);
+    if (this.failMirror && (path.startsWith("resumes/") || path.startsWith("trash/"))) {
+      throw new WebDavError("SERVER", 503);
+    }
     this.files.set(path, { text, etag: `etag:${path}` });
+    this.onWrite?.(path);
   }
-  async moveResumeAtomic(from: string, to: string): Promise<void> {
+  async moveResumeAtomic(from: string, to: string) {
     this.calls.push(`move:${from}->${to}`);
+    if (this.failMirror) throw new WebDavError("SERVER", 503);
     const file = this.files.get(from);
     if (file) { this.files.set(to, file); this.files.delete(from); }
   }
-  async publishManifest(text: string, expectedEtag: string | null): Promise<void> {
+  async publishManifest(text: string, expectedEtag: string | null) {
     this.calls.push(`publish:${expectedEtag}`);
     if (this.failPublish) throw new WebDavError("REMOTE_CAS_MISMATCH", 412);
     this.manifestText = text;
   }
 }
 
-const setup = async (options: {
-  local?: ResumeSyncData;
-  remote?: ManifestV2 | null;
-  remoteEtag?: string | null;
-  plan?: SyncPlan;
-} = {}) => {
-  const repository = new FakeRepository();
-  const local = structuredClone(options.local ?? { resumes: [], activeResumeId: null });
-  const remote = options.remote ?? null;
-  if (remote) repository.manifestText = serializeManifest(remote);
-  repository.manifestEtag = options.remoteEtag ?? (remote ? '"manifest-etag"' : null);
-  const commits: Array<{ data: ResumeSyncData; baseline: MultiFileBaseline; token: string }> = [];
-  const input = {
-    repository,
-    plan: options.plan ?? emptyPlan(),
-    localData: local,
-    remoteManifest: remote,
-    remoteManifestEtag: repository.manifestEtag,
-    expectedLocalToken: "local-token",
-    deviceId: "device-a",
-    now: () => NOW,
-    commit: (data: ResumeSyncData, baseline: MultiFileBaseline, token: string) => {
-      commits.push({ data: structuredClone(data), baseline: structuredClone(baseline), token });
-    },
+const entryFor = async (item: ResumeData, mirrorPath = `resumes/${item.id}.json`) => {
+  const contentHash = await calculateResumeHash(item);
+  return {
+    objectPath: objectPath(item.id, contentHash), mirrorPath,
+    contentHash, updatedAt: item.updatedAt, deleted: false,
   };
-  return { repository, commits, input };
 };
-
 const manifest = async (entries: ManifestV2["entries"], activeResumeId: string | null = null) => createManifest({
   schemaVersion: 2, revision: 4, parentRevision: 3, updatedAt: NOW,
   deviceId: "remote", activeResumeId, entries,
 });
+const setup = (options: { local?: ResumeSyncData; remote?: ManifestV2 | null; plan?: SyncPlan } = {}) => {
+  const repository = new FakeRepository();
+  const remote = options.remote ?? null;
+  if (remote) repository.manifestText = serializeManifest(remote);
+  repository.manifestEtag = remote ? '"manifest-etag"' : null;
+  const commits: Array<{ data: ResumeSyncData; baseline: MultiFileBaseline }> = [];
+  let localToken = "stable-token";
+  return {
+    repository,
+    commits,
+    setLocalToken: (value: string) => { localToken = value; },
+    input: {
+      repository,
+      plan: options.plan ?? emptyPlan(),
+      localData: structuredClone(options.local ?? data()),
+      remoteManifest: remote,
+      remoteManifestEtag: repository.manifestEtag,
+      expectedLocalToken: "stable-token",
+      getLocalToken: () => localToken,
+      deviceId: "device-a",
+      now: () => NOW,
+      commit: (next: ResumeSyncData, baseline: MultiFileBaseline) => {
+        if (localToken !== "stable-token") throw new LocalCasMismatchError();
+        commits.push({ data: structuredClone(next), baseline: structuredClone(baseline) });
+      },
+    },
+  };
+};
 
-test("ensures directories before writes and publishes the manifest only after every upload completes", async () => {
-  const a = resume("a", "Alpha");
-  const b = resume("b", "Beta");
+const seed = (repository: FakeRepository, path: string, item: ResumeData) => {
+  repository.files.set(path, { text: serializeResumeJson(item), etag: `etag:${path}` });
+};
+
+test("initial local token mismatch defers before ensureLayout or any repository call", async () => {
+  const item = resume("local");
   const plan = emptyPlan();
-  plan.uploads = [
-    { resume: a, path: "resumes/a.json", previousPath: null },
-    { resume: b, path: "resumes/b.json", previousPath: null },
-  ];
-  plan.nextActiveResumeId = "a";
-  const state = await setup({ local: { resumes: [a, b], activeResumeId: "a" }, plan });
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Local--local.json", previousMirrorPath: null }];
+  const state = setup({ local: data(item), plan });
+  state.setLocalToken("changed-before-start");
+
+  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
+  assert.deepEqual(state.repository.calls, []);
+});
+
+test("uploads and verifies immutable objects, publishes manifest, then writes readable mirrors", async () => {
+  const item = resume("resume-full-id", "Readable");
+  const hash = await calculateResumeHash(item);
+  const plan = emptyPlan();
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Readable--resume.json", previousMirrorPath: null }];
+  plan.nextActiveResumeId = item.id;
+  const state = setup({ local: data(item), plan });
 
   const result = await executeSyncPlan(state.input);
 
   assert.equal(result.kind, "applied");
   assert.deepEqual(state.repository.calls, [
-    "ensure-layout", "write:resumes/a.json", "read:resumes/a.json",
-    "write:resumes/b.json", "read:resumes/b.json", "publish:null",
+    "ensure-layout", `ensure-object:${item.id}`,
+    `read:${objectPath(item.id, hash)}`, `write:${objectPath(item.id, hash)}`,
+    `read:${objectPath(item.id, hash)}`, "publish:null",
+    "read:resumes/Readable--resume.json", "write:resumes/Readable--resume.json", "read:resumes/Readable--resume.json",
   ]);
-  assert.equal(state.commits.length, 1);
+  const published = JSON.parse(state.repository.manifestText!) as ManifestV2;
+  assert.equal(published.entries[item.id].objectPath, objectPath(item.id, hash));
+  assert.equal(published.entries[item.id].mirrorPath, "resumes/Readable--resume.json");
 });
 
-test("an upload failure never publishes a manifest or commits local state", async () => {
-  const item = resume("a");
+for (const scenario of ["content update", "title rename", "deletion"] as const) {
+  test(`${scenario} manifest CAS failure preserves old manifest/object and performs no mirror mutation`, async () => {
+    const old = resume("resume-full-id", "Old", "2026-09-13T01:00:00.000Z");
+    const oldEntry = await entryFor(old, "resumes/Old--resume.json");
+    const remote = await manifest({ [old.id]: oldEntry }, old.id);
+    const plan = emptyPlan();
+    let local = data(old);
+    if (scenario === "deletion") {
+      local = data();
+      plan.trashMoves = [{
+        resumeId: old.id,
+        from: oldEntry.mirrorPath,
+        to: "trash/Old--resume.json",
+      }];
+    } else {
+      const changed = resume(old.id, scenario === "title rename" ? "New" : "Old", "2026-09-13T02:00:00.000Z");
+      local = data(changed);
+      plan.uploads = [{
+        resume: changed,
+        mirrorPath: scenario === "title rename" ? "resumes/New--resume.json" : oldEntry.mirrorPath,
+        previousMirrorPath: scenario === "title rename" ? oldEntry.mirrorPath : null,
+      }];
+    }
+    const state = setup({ local, remote, plan });
+    seed(state.repository, oldEntry.objectPath, old);
+    seed(state.repository, oldEntry.mirrorPath, old);
+    const oldManifestText = state.repository.manifestText;
+    state.repository.failPublish = true;
+
+    assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-changed" });
+
+    assert.equal(state.repository.manifestText, oldManifestText);
+    assert.deepEqual(JSON.parse(state.repository.files.get(oldEntry.objectPath)!.text), old);
+    const publishIndex = state.repository.calls.findIndex((call) => call.startsWith("publish:"));
+    assert.equal(state.repository.calls.slice(0, publishIndex).some(
+      (call) => call.startsWith("write:resumes/") || call.startsWith("write:trash/") || call.startsWith("move:"),
+    ), false);
+    assert.equal(state.repository.calls.slice(publishIndex + 1).length, 0);
+  });
+}
+
+test("downloads from immutable objectPath, not the readable mirror", async () => {
+  const cloud = resume("cloud", "Cloud");
+  const entry = await entryFor(cloud, "resumes/Human name--cloud.json");
+  const remote = await manifest({ cloud: entry }, "cloud");
   const plan = emptyPlan();
-  plan.uploads = [{ resume: item, path: "resumes/a.json", previousPath: null }];
-  const state = await setup({ local: { resumes: [item], activeResumeId: "a" }, plan });
-  state.repository.failWritePath = "resumes/a.json";
-
-  await assert.rejects(() => executeSyncPlan(state.input), (error: unknown) => error instanceof WebDavError && error.code === "SERVER");
-
-  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
-  assert.equal(state.commits.length, 0);
-});
-
-test("parses and hash-verifies a downloaded resume before adding it to committed data", async () => {
-  const remoteResume = resume("remote", "Cloud");
-  const contentHash = await calculateResumeHash(remoteResume);
-  const remote = await manifest({ remote: { path: "resumes/remote.json", contentHash, updatedAt: NOW, deleted: false } }, "remote");
-  const plan = emptyPlan();
-  plan.downloads = [{ resumeId: "remote", path: "resumes/remote.json", contentHash }];
-  plan.nextActiveResumeId = "remote";
-  const state = await setup({ remote, plan });
-  state.repository.files.set("resumes/remote.json", { text: serializeResumeJson(remoteResume), etag: '"r"' });
+  plan.downloads = [{ resumeId: cloud.id, objectPath: entry.objectPath, contentHash: entry.contentHash }];
+  plan.nextActiveResumeId = cloud.id;
+  const state = setup({ remote, plan });
+  seed(state.repository, entry.objectPath, cloud);
+  seed(state.repository, entry.mirrorPath, resume("cloud", "Tampered mirror"));
 
   const result = await executeSyncPlan(state.input);
 
   assert.equal(result.kind, "applied");
-  assert.deepEqual(state.commits[0].data, { resumes: [remoteResume], activeResumeId: "remote" });
-
-  state.repository.files.set("resumes/remote.json", { text: serializeResumeJson(resume("remote", "Tampered")), etag: '"r2"' });
-  await assert.rejects(() => executeSyncPlan(state.input), (error: unknown) => error instanceof WebDavError && error.code === "REMOTE_CONTENT_MISMATCH");
+  assert.deepEqual(state.commits[0].data, data(cloud));
+  assert.equal(state.repository.calls.includes(`read:${entry.mirrorPath}`), false);
 });
 
-test("a missing downloaded file defers as remote-changed without commit or publication", async () => {
-  const remote = await manifest({ a: { path: "resumes/a.json", contentHash: "a".repeat(64), updatedAt: NOW, deleted: false } }, "a");
+test("mirror failure after manifest publication does not invalidate source of truth or local commit", async () => {
+  const item = resume("a", "Readable");
   const plan = emptyPlan();
-  plan.downloads = [{ resumeId: "a", path: "resumes/a.json", contentHash: "a".repeat(64) }];
-  const state = await setup({ remote, plan });
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Readable--a.json", previousMirrorPath: null }];
+  plan.nextActiveResumeId = item.id;
+  const state = setup({ local: data(item), plan });
+  state.repository.failMirror = true;
 
-  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-changed" });
+  const result = await executeSyncPlan(state.input);
+
+  assert.equal(result.kind, "applied");
+  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), true);
+  assert.equal(state.commits.length, 1);
+});
+
+test("a later no-op repairs a missing readable mirror from immutable source", async () => {
+  const item = resume("a", "Readable");
+  const entry = await entryFor(item, "resumes/Readable--a.json");
+  const remote = await manifest({ a: entry }, "a");
+  const state = setup({ local: data(item), remote });
+  state.input.plan.nextActiveResumeId = "a";
+  seed(state.repository, entry.objectPath, item);
+
+  await executeSyncPlan(state.input);
+
+  assert.equal(state.repository.files.has(entry.mirrorPath), true);
   assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
-  assert.equal(state.commits.length, 0);
 });
 
-test("a manifest CAS mismatch defers as remote-changed and does not commit", async () => {
-  const item = resume("a");
+test("local change after immutable object write prevents manifest publication and leaves only a safe orphan", async () => {
+  const item = resume("local-race");
+  const hash = await calculateResumeHash(item);
   const plan = emptyPlan();
-  plan.uploads = [{ resume: item, path: "resumes/a.json", previousPath: null }];
-  const state = await setup({ local: { resumes: [item], activeResumeId: "a" }, plan });
-  state.repository.failPublish = true;
-
-  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-changed" });
-  assert.equal(state.commits.length, 0);
-});
-
-test("a local expected-token mismatch defers as local-changed after remote publication", async () => {
-  const item = resume("a");
-  const plan = emptyPlan();
-  plan.uploads = [{ resume: item, path: "resumes/a.json", previousPath: null }];
-  const state = await setup({ local: { resumes: [item], activeResumeId: "a" }, plan });
-  state.input.commit = () => { throw new LocalCasMismatchError(); };
+  plan.uploads = [{ resume: item, mirrorPath: "resumes/Local--local-.json", previousMirrorPath: null }];
+  plan.nextActiveResumeId = item.id;
+  const state = setup({ local: data(item), plan });
+  state.repository.onWrite = (path) => {
+    if (path.startsWith("objects/")) state.setLocalToken("changed-during-upload");
+  };
 
   assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "local-changed" });
-  assert.equal(state.repository.calls.at(-1), "publish:null");
-});
-
-test("title rename writes and verifies the new path before moving the old path away", async () => {
-  const item = resume("a", "New");
-  const old = "resumes/Old--a.json";
-  const oldResume = resume("a", "Old");
-  const oldHash = await calculateResumeHash(oldResume);
-  const plan = emptyPlan();
-  plan.uploads = [{ resume: item, path: "resumes/New--a.json", previousPath: old }];
-  const remote = await manifest({ a: { path: old, contentHash: oldHash, updatedAt: NOW, deleted: false } }, "a");
-  const state = await setup({ local: { resumes: [item], activeResumeId: "a" }, remote, plan });
-  state.repository.files.set(old, { text: serializeResumeJson(oldResume), etag: '"old"' });
-
-  await executeSyncPlan(state.input);
-
-  assert.deepEqual(state.repository.calls.slice(1), [
-    "read:resumes/Old--a.json", "write:resumes/New--a.json",
-    "read:resumes/New--a.json", "move:resumes/Old--a.json->trash/Old--a.json",
-    "publish:\"manifest-etag\"",
-  ]);
-});
-
-test("trash move completes before the manifest publishes the deleted entry", async () => {
-  const old = "resumes/a.json";
-  const deletedResume = resume("a");
-  const contentHash = await calculateResumeHash(deletedResume);
-  const remote = await manifest({ a: { path: old, contentHash, updatedAt: NOW, deleted: false } }, "a");
-  const plan = emptyPlan();
-  plan.trashMoves = [{ resumeId: "a", from: old, to: "trash/a.json" }];
-  const state = await setup({ remote, plan });
-  state.repository.files.set(old, { text: serializeResumeJson(deletedResume), etag: '"old"' });
-
-  await executeSyncPlan(state.input);
-
-  assert.deepEqual(state.repository.calls.slice(1), [
-    "read:resumes/a.json", "move:resumes/a.json->trash/a.json", "read:trash/a.json",
-    "publish:\"manifest-etag\"",
-  ]);
-  assert.equal(JSON.parse(state.repository.manifestText!).entries.a.deleted, true);
-});
-
-test("overwriting an existing resume uses its inspected ETag as a file-level CAS", async () => {
-  const oldResume = resume("a", "Old");
-  const nextResume = resume("a", "New");
-  const oldHash = await calculateResumeHash(oldResume);
-  const remote = await manifest({
-    a: { path: "resumes/a.json", contentHash: oldHash, updatedAt: NOW, deleted: false },
-  }, "a");
-  const plan = emptyPlan();
-  plan.uploads = [{ resume: nextResume, path: "resumes/a.json", previousPath: null }];
-  const state = await setup({ local: dataFor(nextResume), remote, plan });
-  state.repository.files.set("resumes/a.json", { text: serializeResumeJson(oldResume), etag: '"old-etag"' });
-
-  await executeSyncPlan(state.input);
-
-  assert.equal(state.repository.writeEtags.get("resumes/a.json"), '"old-etag"');
-});
-
-test("a newly published manifest references only files confirmed available", async () => {
-  const upload = resume("a");
-  const remoteOnly = resume("b");
-  const remoteHash = await calculateResumeHash(remoteOnly);
-  const remote = await manifest({
-    b: { path: "resumes/b.json", contentHash: remoteHash, updatedAt: NOW, deleted: false },
-  }, "b");
-  const plan = emptyPlan();
-  plan.uploads = [{ resume: upload, path: "resumes/a.json", previousPath: null }];
-  const state = await setup({ local: dataFor(upload), remote, plan });
-
-  assert.deepEqual(await executeSyncPlan(state.input), { kind: "deferred", reason: "remote-changed" });
+  assert.equal(state.repository.manifestText, null);
+  assert.equal(state.repository.files.has(objectPath(item.id, hash)), true);
   assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
-});
-
-const dataFor = (...items: ResumeData[]): ResumeSyncData => ({
-  resumes: items,
-  activeResumeId: items[0]?.id ?? null,
-});
-
-test("conflicts including a hard-deleted remote entry are returned without dereferencing remoteEntry", async () => {
-  const item = resume("a");
-  const plan = emptyPlan();
-  plan.conflicts = [{ resumeId: "a", title: item.title, kind: "delete-vs-modify", local: item, remoteEntry: null }];
-  const state = await setup({ local: { resumes: [item], activeResumeId: "a" }, plan });
-
-  assert.deepEqual(await executeSyncPlan(state.input), { kind: "conflict", conflicts: plan.conflicts });
-  assert.deepEqual(state.repository.calls, []);
+  assert.equal(state.repository.calls.some((call) => call.startsWith("write:resumes/")), false);
 });

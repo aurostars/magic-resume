@@ -1,40 +1,34 @@
 import { getResumeRelativePath } from "./resume-codec";
-import type {
-  PlanSyncInput,
-  ResumeManifestEntry,
-  ResumeSyncConflict,
-  SyncPlan,
-} from "./types";
+import type { PlanSyncInput, ResumeManifestEntry, SyncPlan } from "./types";
 
-const compareIds = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
-
+const compareIds = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const remoteTitle = (entry: ResumeManifestEntry): string => {
-  const fileName = entry.path.split("/").at(-1) ?? entry.path;
+  const fileName = entry.mirrorPath.split("/").at(-1) ?? entry.mirrorPath;
   return fileName.replace(/\.json$/, "").replace(/--[^-]*$/, "");
 };
-
-const trashPathFor = (path: string): string =>
-  `trash/${path.split("/").at(-1) ?? path}`;
+const trashPathFor = (path: string): string => `trash/${path.split("/").at(-1) ?? path}`;
 
 export function planSync(input: PlanSyncInput): SyncPlan {
   const localById = new Map(input.local.resumes.map((resume) => [resume.id, resume]));
   const remoteEntries = input.remote?.entries ?? {};
   const baselineEntries = input.baseline?.entries ?? {};
   const ids = Array.from(new Set([
-    ...input.local.resumes.map((resume) => resume.id),
-    ...Object.keys(remoteEntries),
-    ...Object.keys(baselineEntries),
+    ...input.local.resumes.map((resume) => resume.id), ...Object.keys(remoteEntries), ...Object.keys(baselineEntries),
   ])).sort(compareIds);
-
   const plan: SyncPlan = {
-    uploads: [],
-    downloads: [],
-    trashMoves: [],
-    remoteDeletions: [],
-    conflicts: [],
-    nextActiveResumeId: null,
+    uploads: [], downloads: [], trashMoves: [], remoteDeletions: [], conflicts: [], nextActiveResumeId: null,
   };
+
+  const conflict = (resumeId: string, local: ReturnType<typeof localById.get> | null,
+    remoteEntry: ResumeManifestEntry | null, kind: "both-modified" | "delete-vs-modify") => ({
+    resumeId,
+    title: local?.title ?? (remoteEntry ? remoteTitle(remoteEntry) : resumeId),
+    kind,
+    localUpdatedAt: local?.updatedAt ?? null,
+    remoteUpdatedAt: remoteEntry?.updatedAt ?? input.remote?.updatedAt ?? null,
+    local: local ?? null,
+    remoteEntry,
+  });
 
   for (const resumeId of ids) {
     const local = localById.get(resumeId) ?? null;
@@ -44,49 +38,28 @@ export function planSync(input: PlanSyncInput): SyncPlan {
 
     if (!previous) {
       if (local && (!remoteEntry || remoteEntry.deleted)) {
-        plan.uploads.push({
-          resume: local,
-          path: getResumeRelativePath(local),
-          previousPath: null,
-        });
+        plan.uploads.push({ resume: local, mirrorPath: getResumeRelativePath(local), previousMirrorPath: null });
       } else if (!local && remoteEntry && !remoteEntry.deleted) {
-        plan.downloads.push({
-          resumeId,
-          path: remoteEntry.path,
-          contentHash: remoteEntry.contentHash,
-        });
+        plan.downloads.push({ resumeId, objectPath: remoteEntry.objectPath, contentHash: remoteEntry.contentHash });
       } else if (local && remoteEntry && localHash !== remoteEntry.contentHash) {
-        plan.conflicts.push({
-          resumeId,
-          title: local.title,
-          kind: "both-modified",
-          local,
-          remoteEntry,
-        });
+        plan.conflicts.push(conflict(resumeId, local, remoteEntry, "both-modified"));
       }
       continue;
     }
 
     const localDeleted = !local;
     const remoteDeleted = !remoteEntry || remoteEntry.deleted;
-    const localChanged = localDeleted !== previous.deleted ||
-      (!localDeleted && localHash !== previous.contentHash);
-    const remoteChanged = remoteDeleted !== previous.deleted ||
-      (!remoteDeleted && remoteEntry.contentHash !== previous.contentHash);
-
+    const localChanged = localDeleted !== previous.deleted || (!localDeleted && localHash !== previous.contentHash);
+    const remoteChanged = remoteDeleted !== previous.deleted || (!remoteDeleted && remoteEntry.contentHash !== previous.contentHash);
     if (!localChanged && !remoteChanged) continue;
 
     if (localChanged && remoteChanged) {
       if (localDeleted && remoteDeleted) continue;
       if (!localDeleted && !remoteDeleted && localHash === remoteEntry.contentHash) continue;
-
-      plan.conflicts.push({
-        resumeId,
-        title: local?.title ?? (remoteEntry ? remoteTitle(remoteEntry) : resumeId),
-        kind: localDeleted || remoteDeleted ? "delete-vs-modify" : "both-modified",
-        local,
-        remoteEntry: remoteEntry ?? null,
-      });
+      plan.conflicts.push(conflict(
+        resumeId, local, remoteEntry ?? null,
+        localDeleted || remoteDeleted ? "delete-vs-modify" : "both-modified",
+      ));
       continue;
     }
 
@@ -94,19 +67,16 @@ export function planSync(input: PlanSyncInput): SyncPlan {
       if (localDeleted) {
         if (remoteEntry && !remoteEntry.deleted) {
           plan.trashMoves.push({
-            resumeId,
-            from: remoteEntry.path,
-            to: trashPathFor(remoteEntry.path),
+            resumeId, from: remoteEntry.mirrorPath, to: trashPathFor(remoteEntry.mirrorPath),
           });
         }
       } else {
-        const path = getResumeRelativePath(local);
+        const mirrorPath = getResumeRelativePath(local);
         plan.uploads.push({
           resume: local,
-          path,
-          previousPath: remoteEntry && !remoteEntry.deleted && remoteEntry.path !== path
-            ? remoteEntry.path
-            : null,
+          mirrorPath,
+          previousMirrorPath: remoteEntry && !remoteEntry.deleted && remoteEntry.mirrorPath !== mirrorPath
+            ? remoteEntry.mirrorPath : null,
         });
       }
       continue;
@@ -115,18 +85,11 @@ export function planSync(input: PlanSyncInput): SyncPlan {
     if (remoteDeleted) {
       if (local) plan.remoteDeletions.push(resumeId);
     } else {
-      plan.downloads.push({
-        resumeId,
-        path: remoteEntry.path,
-        contentHash: remoteEntry.contentHash,
-      });
+      plan.downloads.push({ resumeId, objectPath: remoteEntry.objectPath, contentHash: remoteEntry.contentHash });
     }
   }
 
-  const removedIds = new Set([
-    ...plan.remoteDeletions,
-    ...plan.trashMoves.map(({ resumeId }) => resumeId),
-  ]);
+  const removedIds = new Set([...plan.remoteDeletions, ...plan.trashMoves.map(({ resumeId }) => resumeId)]);
   const liveIds = ids.filter((id) => {
     if (removedIds.has(id)) return false;
     if (localById.has(id)) return true;
@@ -137,6 +100,5 @@ export function planSync(input: PlanSyncInput): SyncPlan {
   plan.nextActiveResumeId = preferredIds.find(
     (id): id is string => id !== null && id !== undefined && liveIds.includes(id),
   ) ?? liveIds[0] ?? null;
-
   return plan;
 }

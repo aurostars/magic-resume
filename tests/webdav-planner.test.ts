@@ -24,9 +24,10 @@ const entry = (
   id: string,
   contentHash: string,
   deleted = false,
-  path = `${deleted ? "trash" : "resumes"}/Resume ${id}--${id.slice(0, 6).toLowerCase()}.json`,
+  mirrorPath = `${deleted ? "trash" : "resumes"}/Resume ${id}--${id.slice(0, 6).toLowerCase()}.json`,
 ): ResumeManifestEntry => ({
-  path,
+  objectPath: `objects/${id}/${contentHash}.json`,
+  mirrorPath,
   contentHash,
   updatedAt: "2026-09-13T03:00:00.000Z",
   deleted,
@@ -60,8 +61,8 @@ const baselineEntry = (
   id: string,
   contentHash: string,
   deleted = false,
-  path = `${deleted ? "trash" : "resumes"}/Resume ${id}--${id.slice(0, 6).toLowerCase()}.json`,
-) => ({ contentHash, deleted, path });
+  mirrorPath = `${deleted ? "trash" : "resumes"}/Resume ${id}--${id.slice(0, 6).toLowerCase()}.json`,
+) => ({ contentHash, deleted, objectPath: `objects/${id}/${contentHash}.json`, mirrorPath });
 
 const plan = ({
   resumes = [],
@@ -127,8 +128,8 @@ test("only local changed uploads the resume", () => {
 
   assert.deepEqual(result.uploads, [{
     resume: local,
-    path: "resumes/Resume resume-a--resume.json",
-    previousPath: null,
+    mirrorPath: "resumes/Resume resume-a--resume.json",
+    previousMirrorPath: null,
   }]);
   assert.deepEqual(result.downloads, []);
 });
@@ -148,7 +149,7 @@ test("only remote changed downloads the resume and ignores timestamps", () => {
 
   assert.deepEqual(result.downloads, [{
     resumeId: local.id,
-    path: remoteEntry.path,
+    objectPath: remoteEntry.objectPath,
     contentHash: hash("b"),
   }]);
   assert.deepEqual(result.uploads, []);
@@ -182,6 +183,8 @@ test("both changed to different hashes produces a both-modified conflict", () =>
     resumeId: local.id,
     title: local.title,
     kind: "both-modified",
+    localUpdatedAt: local.updatedAt,
+    remoteUpdatedAt: remoteEntry.updatedAt,
     local,
     remoteEntry,
   }]);
@@ -199,7 +202,7 @@ test("local deletion with unchanged remote moves the remote file to trash", () =
 
   assert.deepEqual(result.trashMoves, [{
     resumeId: id,
-    from: remoteEntry.path,
+    from: remoteEntry.mirrorPath,
     to: "trash/Resume resume-a--resume.json",
   }]);
 });
@@ -227,6 +230,8 @@ test("local deletion with changed remote produces a delete-vs-modify conflict", 
   assert.equal(result.conflicts.length, 1);
   assert.equal(result.conflicts[0].resumeId, id);
   assert.equal(result.conflicts[0].kind, "delete-vs-modify");
+  assert.equal(result.conflicts[0].localUpdatedAt, null);
+  assert.equal(result.conflicts[0].remoteUpdatedAt, remoteEntry.updatedAt);
   assert.equal(result.conflicts[0].local, null);
   assert.deepEqual(result.conflicts[0].remoteEntry, remoteEntry);
 });
@@ -245,6 +250,8 @@ test("remote deletion with changed local produces a delete-vs-modify conflict", 
     resumeId: local.id,
     title: local.title,
     kind: "delete-vs-modify",
+    localUpdatedAt: local.updatedAt,
+    remoteUpdatedAt: remoteEntry.updatedAt,
     local,
     remoteEntry,
   }]);
@@ -285,8 +292,8 @@ test("title-only change uploads to the new path and retains previousPath", () =>
 
   assert.deepEqual(result.uploads, [{
     resume: local,
-    path: "resumes/New Title--resume.json",
-    previousPath: oldPath,
+    mirrorPath: "resumes/New Title--resume.json",
+    previousMirrorPath: oldPath,
   }]);
 });
 
@@ -322,6 +329,8 @@ test("remote hard deletion with changed local produces a delete-vs-modify confli
     resumeId: local.id,
     title: local.title,
     kind: "delete-vs-modify",
+    localUpdatedAt: local.updatedAt,
+    remoteUpdatedAt: "2026-09-13T03:00:00.000Z",
     local,
     remoteEntry: null,
   }]);

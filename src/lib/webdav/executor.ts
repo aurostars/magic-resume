@@ -11,7 +11,8 @@ export type ExecutePlanResult =
   | { kind: "deferred"; reason: "local-changed" | "remote-changed" };
 
 type RepositoryApi = Pick<WebDavResumeRepository,
-  "ensureLayout" | "readResume" | "writeResumeAtomic" | "moveResumeAtomic" | "publishManifest">;
+  "ensureLayout" | "ensureObjectDirectory" | "readResume" | "writeResumeAtomic" |
+  "moveResumeAtomic" | "publishManifest">;
 
 export interface ExecuteSyncPlanInput {
   repository: RepositoryApi;
@@ -20,130 +21,154 @@ export interface ExecuteSyncPlanInput {
   remoteManifest: ManifestV2 | null;
   remoteManifestEtag: string | null;
   expectedLocalToken: string;
+  getLocalToken: () => string;
   deviceId: string;
   now: () => string;
   forceManifestPublish?: boolean;
+  signal?: AbortSignal;
   commit: (data: ResumeSyncData, baseline: MultiFileBaseline, expectedLocalToken: string) => void;
 }
 
-const trashPath = (path: string): string => `trash/${path.split("/").at(-1) ?? path}`;
+const objectPathFor = (id: string, hash: string): string => `objects/${id}/${hash}.json`;
 const baselineFor = (manifest: ManifestV2): MultiFileBaseline => ({
   manifestRevision: manifest.revision,
   manifestHash: manifest.manifestHash,
   activeResumeId: manifest.activeResumeId,
   entries: Object.fromEntries(Object.entries(manifest.entries).map(([id, entry]) => [id, {
-    contentHash: entry.contentHash, deleted: entry.deleted, path: entry.path,
+    contentHash: entry.contentHash,
+    deleted: entry.deleted,
+    objectPath: entry.objectPath,
+    mirrorPath: entry.mirrorPath,
   }])),
 });
 
-async function verifiedResume(repository: RepositoryApi, path: string, expectedHash: string): Promise<ResumeData | null> {
-  const file = await repository.readResume(path);
+async function verifiedResume(
+  repository: RepositoryApi,
+  path: string,
+  expectedHash: string,
+  signal?: AbortSignal,
+): Promise<ResumeData | null> {
+  const file = await repository.readResume(path, signal);
   if (!file) return null;
   let resume: ResumeData;
-  try {
-    resume = parseResumeJson(file.text);
-  } catch {
-    throw new WebDavError("REMOTE_CONTENT_MISMATCH");
-  }
+  try { resume = parseResumeJson(file.text); } catch { throw new WebDavError("REMOTE_CONTENT_MISMATCH"); }
   if (await calculateResumeHash(resume) !== expectedHash) throw new WebDavError("REMOTE_CONTENT_MISMATCH");
   return resume;
+}
+
+async function publish(
+  repository: RepositoryApi,
+  manifest: ManifestV2,
+  etag: string | null,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    await repository.publishManifest(serializeManifest(manifest), etag, signal);
+    return true;
+  } catch (error) {
+    if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") return false;
+    throw error;
+  }
+}
+
+async function repairMirror(
+  repository: RepositoryApi,
+  entry: ManifestV2["entries"][string],
+  resume: ResumeData,
+): Promise<void> {
+  try {
+    const current = await repository.readResume(entry.mirrorPath);
+    if (current) {
+      try {
+        const parsed = parseResumeJson(current.text);
+        if (await calculateResumeHash(parsed) === entry.contentHash) return;
+      } catch { /* replace malformed mirror */ }
+    }
+    await repository.writeResumeAtomic(entry.mirrorPath, serializeResumeJson(resume), current?.etag ?? null);
+    const verified = await verifiedResume(repository, entry.mirrorPath, entry.contentHash);
+    if (!verified || verified.id !== resume.id) throw new WebDavError("REMOTE_CONTENT_MISMATCH");
+  } catch {
+    // Mirrors are repairable projections. Manifest + immutable object remain authoritative.
+  }
 }
 
 export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<ExecutePlanResult> {
   const { plan, repository } = input;
   if (plan.conflicts.length > 0) return { kind: "conflict", conflicts: plan.conflicts };
+  if (input.getLocalToken() !== input.expectedLocalToken) {
+    return { kind: "deferred", reason: "local-changed" };
+  }
 
   const resumes = new Map(input.localData.resumes.map((resume) => [resume.id, resume]));
   const entries = structuredClone(input.remoteManifest?.entries ?? {});
-  const confirmedPaths = new Set<string>();
-  const remoteEtags = new Map<string, string | null>();
+  const objectResumes = new Map<string, ResumeData>();
   let remoteMutated = false;
   let syncedCount = 0;
 
-  if (plan.uploads.length > 0 || plan.trashMoves.length > 0 || input.remoteManifest === null) {
+  if (plan.uploads.length > 0 || (plan.manualImports?.length ?? 0) > 0 || plan.trashMoves.length > 0 || input.remoteManifest === null) {
     await repository.ensureLayout();
   }
 
-  if (plan.uploads.length > 0 || plan.trashMoves.length > 0 || input.forceManifestPublish) {
-    for (const [resumeId, entry] of Object.entries(entries)) {
-      const file = await repository.readResume(entry.path);
-      if (!file) return { kind: "deferred", reason: "remote-changed" };
-      let parsed: ResumeData;
+  for (const imported of plan.manualImports ?? []) {
+    const contentHash = await calculateResumeHash(imported.resume);
+    const objectPath = objectPathFor(imported.resume.id, contentHash);
+    await repository.ensureObjectDirectory(imported.resume.id);
+    const existing = await repository.readResume(objectPath);
+    if (!existing) {
       try {
-        parsed = parseResumeJson(file.text);
-      } catch {
-        return { kind: "deferred", reason: "remote-changed" };
+        await repository.writeResumeAtomic(objectPath, serializeResumeJson(imported.resume), null);
+      } catch (error) {
+        if (!(error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH")) throw error;
       }
-      if (parsed.id !== resumeId || await calculateResumeHash(parsed) !== entry.contentHash) {
-        return { kind: "deferred", reason: "remote-changed" };
-      }
-      confirmedPaths.add(entry.path);
-      remoteEtags.set(entry.path, file.etag);
     }
+    const confirmed = await verifiedResume(repository, objectPath, contentHash);
+    if (!confirmed || confirmed.id !== imported.resume.id) throw new WebDavError("REMOTE_CONTENT_MISMATCH");
+    objectResumes.set(imported.resume.id, imported.resume);
   }
 
   for (const upload of plan.uploads) {
     const text = serializeResumeJson(upload.resume);
     const contentHash = await calculateResumeHash(upload.resume);
-    try {
-      await repository.writeResumeAtomic(
-        upload.path,
-        text,
-        remoteEtags.has(upload.path) ? remoteEtags.get(upload.path) : null,
-      );
-    } catch (error) {
-      if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
-        return { kind: "deferred", reason: "remote-changed" };
+    const objectPath = objectPathFor(upload.resume.id, contentHash);
+    await repository.ensureObjectDirectory(upload.resume.id);
+    const existing = await repository.readResume(objectPath);
+    if (!existing) {
+      try {
+        await repository.writeResumeAtomic(objectPath, text, null);
+      } catch (error) {
+        if (!(error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH")) throw error;
       }
-      throw error;
     }
-    const confirmed = await verifiedResume(repository, upload.path, contentHash);
+    const confirmed = await verifiedResume(repository, objectPath, contentHash);
     if (!confirmed || confirmed.id !== upload.resume.id) throw new WebDavError("REMOTE_CONTENT_MISMATCH");
-    confirmedPaths.add(upload.path);
-    if (upload.previousPath && upload.previousPath !== upload.path) {
-      const oldEtag = remoteEtags.get(upload.previousPath);
-      if (oldEtag !== undefined) {
-        try {
-          await repository.moveResumeAtomic(upload.previousPath, trashPath(upload.previousPath), oldEtag);
-        } catch (error) {
-          if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
-            return { kind: "deferred", reason: "remote-changed" };
-          }
-          throw error;
-        }
-      }
-    }
-    entries[upload.resume.id] = { path: upload.path, contentHash, updatedAt: input.now(), deleted: false };
+    objectResumes.set(upload.resume.id, upload.resume);
+    entries[upload.resume.id] = {
+      objectPath,
+      mirrorPath: upload.mirrorPath,
+      contentHash,
+      updatedAt: input.now(),
+      deleted: false,
+    };
     remoteMutated = true;
     syncedCount += 1;
   }
 
   for (const move of plan.trashMoves) {
-    const sourceEtag = remoteEtags.get(move.from);
-    if (sourceEtag === undefined) return { kind: "deferred", reason: "remote-changed" };
     const previous = entries[move.resumeId];
     if (!previous) return { kind: "deferred", reason: "remote-changed" };
-    try {
-      await repository.moveResumeAtomic(move.from, move.to, sourceEtag);
-    } catch (error) {
-      if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
-        return { kind: "deferred", reason: "remote-changed" };
-      }
-      throw error;
-    }
-    if (!await verifiedResume(repository, move.to, previous.contentHash)) {
-      return { kind: "deferred", reason: "remote-changed" };
-    }
-    entries[move.resumeId] = { ...previous, path: move.to, updatedAt: input.now(), deleted: true };
+    const object = await verifiedResume(repository, previous.objectPath, previous.contentHash);
+    if (!object || object.id !== move.resumeId) return { kind: "deferred", reason: "remote-changed" };
+    objectResumes.set(move.resumeId, object);
+    entries[move.resumeId] = { ...previous, mirrorPath: move.to, updatedAt: input.now(), deleted: true };
     resumes.delete(move.resumeId);
     remoteMutated = true;
     syncedCount += 1;
   }
 
   for (const download of plan.downloads) {
-    const downloaded = await verifiedResume(repository, download.path, download.contentHash);
+    const downloaded = await verifiedResume(repository, download.objectPath, download.contentHash);
     if (!downloaded || downloaded.id !== download.resumeId) return { kind: "deferred", reason: "remote-changed" };
-    confirmedPaths.add(download.path);
+    objectResumes.set(download.resumeId, downloaded);
     resumes.set(download.resumeId, downloaded);
     syncedCount += 1;
   }
@@ -154,11 +179,8 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
 
   let finalManifest = input.remoteManifest;
   if (remoteMutated || finalManifest === null || input.forceManifestPublish) {
-    for (const [resumeId, entry] of Object.entries(entries)) {
-      if (entry.deleted || confirmedPaths.has(entry.path)) continue;
-      const confirmed = await verifiedResume(repository, entry.path, entry.contentHash);
-      if (!confirmed || confirmed.id !== resumeId) return { kind: "deferred", reason: "remote-changed" };
-      confirmedPaths.add(entry.path);
+    if (input.getLocalToken() !== input.expectedLocalToken) {
+      return { kind: "deferred", reason: "local-changed" };
     }
     finalManifest = await createManifest({
       schemaVersion: 2,
@@ -169,14 +191,36 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
       activeResumeId: plan.nextActiveResumeId,
       entries,
     });
-    try {
-      await repository.publishManifest(serializeManifest(finalManifest), input.remoteManifestEtag);
-    } catch (error) {
-      if (error instanceof WebDavError && error.code === "REMOTE_CAS_MISMATCH") {
-        return { kind: "deferred", reason: "remote-changed" };
-      }
-      throw error;
+    if (!await publish(repository, finalManifest, input.remoteManifestEtag)) {
+      return { kind: "deferred", reason: "remote-changed" };
     }
+  }
+
+  // Manifest publication is the commit point. Readable mirrors are updated only afterward.
+  for (const upload of plan.uploads) {
+    const entry = finalManifest.entries[upload.resume.id];
+    if (upload.previousMirrorPath && upload.previousMirrorPath !== entry.mirrorPath) {
+      try {
+        const old = await repository.readResume(upload.previousMirrorPath);
+        if (old) await repository.moveResumeAtomic(upload.previousMirrorPath, entry.mirrorPath, old.etag);
+      } catch { /* mirror rename is repairable */ }
+    }
+    await repairMirror(repository, entry, upload.resume);
+  }
+  for (const move of plan.trashMoves) {
+    const entry = finalManifest.entries[move.resumeId];
+    const object = objectResumes.get(move.resumeId);
+    try {
+      const old = await repository.readResume(move.from);
+      if (old) await repository.moveResumeAtomic(move.from, move.to, old.etag);
+    } catch { /* trash mirror move is repairable */ }
+    if (object) await repairMirror(repository, entry, object);
+  }
+  // Also heals missing/stale mirrors on a no-op sync.
+  for (const [resumeId, entry] of Object.entries(finalManifest.entries)) {
+    if (objectResumes.has(resumeId)) continue;
+    const object = await verifiedResume(repository, entry.objectPath, entry.contentHash);
+    if (object?.id === resumeId) await repairMirror(repository, entry, object);
   }
 
   const data: ResumeSyncData = {
@@ -184,6 +228,9 @@ export async function executeSyncPlan(input: ExecuteSyncPlanInput): Promise<Exec
     activeResumeId: plan.nextActiveResumeId,
   };
   const baseline = baselineFor(finalManifest);
+  if (syncedCount === 0 && !remoteMutated && !input.forceManifestPublish) {
+    return { kind: "applied", data, baseline, syncedCount };
+  }
   try {
     input.commit(data, baseline, input.expectedLocalToken);
   } catch (error) {

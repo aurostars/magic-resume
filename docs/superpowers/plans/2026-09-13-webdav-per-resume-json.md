@@ -10,7 +10,9 @@
 
 ## Global Constraints
 
-- Every `resumes/*.json` and `trash/*.json` file MUST contain only a valid `ResumeData` payload accepted by the existing manual JSON import path.
+- `/magic-resume/objects/<full-resume-id>/<content-hash>.json` is the immutable source of truth. Published objects MUST never be overwritten, moved, or deleted.
+- `resumes/*.json` and `trash/*.json` are readable, repairable mirrors; they are updated only after manifest CAS succeeds.
+- Every object and mirror JSON file MUST contain only a valid `ResumeData` payload accepted by the existing manual JSON import path.
 - Resume files MUST NOT contain `schemaVersion`, `revision`, `parentRevision`, `deviceId`, `contentHash`, ETag, or `activeResumeId` synchronization metadata.
 - Resume filenames MUST be `<safe-title>--<first-six-resume-id-characters>.json`; full resume ID remains the authoritative identity.
 - Synchronization metadata MUST live in `/magic-resume/manifest.json` with `schemaVersion: 2`.
@@ -205,7 +207,8 @@ git commit -m "feat(webdav): share per-resume JSON codec"
 
 ```ts
 export interface ResumeManifestEntry {
-  path: string;
+  objectPath: string;
+  mirrorPath: string;
   contentHash: string;
   updatedAt: string;
   deleted: boolean;
@@ -237,10 +240,10 @@ Cover all of these exact cases:
 ```ts
 test("accepts a valid v2 manifest and verifies its hash", async () => { /* valid body */ });
 test("rejects schema versions other than 2", async () => { /* schemaVersion: 1 */ });
-test("rejects an absolute entry path", async () => { /* /resumes/a.json */ });
-test("rejects path traversal", async () => { /* resumes/../trash/a.json */ });
-test("rejects duplicate entry paths for different IDs", async () => { /* same path */ });
-test("requires live entries under resumes and deleted entries under trash", async () => { /* mismatch */ });
+test("rejects an invalid immutable object path", async () => { /* objects/id/hash.json */ });
+test("rejects path traversal in object or mirror paths", async () => { /* ../ */ });
+test("rejects duplicate object or mirror paths", async () => { /* same path */ });
+test("requires live mirrors under resumes and deleted mirrors under trash", async () => { /* mismatch */ });
 test("rejects a missing or mismatched manifestHash", async () => { /* tamper */ });
 test("rejects activeResumeId when it references a deleted or absent entry", async () => { /* bad id */ });
 ```
@@ -260,9 +263,9 @@ Implement own-property allowlists for both manifest and entry objects. Validate:
 - finite non-negative integer revisions;
 - valid ISO timestamps that round-trip through `new Date(value).toISOString()`;
 - non-empty `deviceId` and 64-character lowercase SHA-256 hashes;
-- safe relative POSIX paths with no empty, `.` or `..` segment;
-- full resume ID keys and unique paths;
-- folder/delete-state consistency;
+- safe relative POSIX `objectPath` and `mirrorPath` values with no empty, `.` or `..` segment;
+- `objectPath === objects/<full-id>/<contentHash>.json`, plus unique object and mirror paths;
+- mirror folder/delete-state consistency;
 - computed hash equality before returning parsed data.
 
 Do not silently normalize unknown keys before hash validation.
@@ -309,7 +312,8 @@ export interface RemoteResumeCandidate {
 }
 
 export class WebDavResumeRepository {
-  ensureLayout(): Promise<void>;
+  ensureLayout(): Promise<void>; // root + objects/ + resumes/ + trash/
+  ensureObjectDirectory(resumeId: string): Promise<void>;
   readManifest(): Promise<RemoteTextFile | null>;
   readResume(path: string): Promise<RemoteTextFile | null>;
   listResumeCandidates(): Promise<RemoteResumeCandidate[]>;
@@ -335,6 +339,7 @@ Use a fake client call log and assert exact order:
 ```ts
 assert.deepEqual(calls, [
   ["ensureDirectory", "/magic-resume/"],
+  ["ensureDirectory", "/magic-resume/objects/"],
   ["ensureDirectory", "/magic-resume/resumes/"],
   ["ensureDirectory", "/magic-resume/trash/"],
 ]);
@@ -397,7 +402,8 @@ git commit -m "feat(webdav): add atomic resume repository"
 export interface MultiFileBaselineEntry {
   contentHash: string;
   deleted: boolean;
-  path: string;
+  objectPath: string;
+  mirrorPath: string;
 }
 
 export interface MultiFileBaseline {
@@ -413,13 +419,15 @@ export interface ResumeSyncConflict {
   resumeId: string;
   title: string;
   kind: ResumeConflictKind;
+  localUpdatedAt: string | null;
+  remoteUpdatedAt: string | null;
   local: ResumeData | null;
-  remoteEntry: ResumeManifestEntry;
+  remoteEntry: ResumeManifestEntry | null;
 }
 
 export interface SyncPlan {
-  uploads: Array<{ resume: ResumeData; path: string; previousPath: string | null }>;
-  downloads: Array<{ resumeId: string; path: string; contentHash: string }>;
+  uploads: Array<{ resume: ResumeData; mirrorPath: string; previousMirrorPath: string | null }>;
+  downloads: Array<{ resumeId: string; objectPath: string; contentHash: string }>;
   trashMoves: Array<{ resumeId: string; from: string; to: string }>;
   remoteDeletions: string[];
   conflicts: ResumeSyncConflict[];
@@ -444,7 +452,8 @@ Create one named test for each decision:
 - local deletes changed remote → `delete-vs-modify` conflict;
 - remote deletes changed local → `delete-vs-modify` conflict;
 - device A modifies resume 1 while device B modifies resume 2 → upload one and download one with no conflict;
-- title-only change → upload to new path and retain `previousPath`;
+- title-only change → retain immutable object identity and update `mirrorPath` / `previousMirrorPath` after manifest publish;
+- every conflict records local/remote timestamps; hard deletion uses `manifest.updatedAt`;
 - invalid active ID → deterministic first live resume or `null`.
 
 - [ ] **Step 2: Run planner tests and confirm RED**
@@ -580,6 +589,8 @@ Conflict decisions become resume-scoped:
 type ConflictDecision = {
   resumeId: string;
   resolution: "keep-local" | "use-cloud";
+  seenRemoteEtag: string | null;
+  seenManifestRevision: number;
 };
 ```
 
@@ -587,16 +598,16 @@ type ConflictDecision = {
 
 Assert exact safety properties:
 
-- directories ensured before writes;
-- every upload completes before manifest publication;
-- upload failure means `publishManifest` is never called;
-- downloaded file is parsed and hash-verified before entering result data;
-- missing remote file after manifest read returns `deferred: remote-changed`;
-- manifest CAS mismatch returns `deferred: remote-changed`;
-- local expected-token mismatch returns `deferred: local-changed`;
-- title rename writes/verifies new path before removing old path;
-- trash move precedes publishing the deleted entry;
-- manifest references only files confirmed available.
+- initial local expected-token mismatch is checked before `ensureLayout` and causes zero repository calls;
+- directories, including `objects/`, are ensured before object writes;
+- every new immutable object is created and hash-verified before manifest publication;
+- a second local-token check immediately before publication turns intervening edits into safe object orphans;
+- upload/object failure means `publishManifest` is never called;
+- downloaded content is read from `objectPath`, parsed, and hash-verified before entering result data;
+- manifest CAS mismatch returns `deferred: remote-changed` and performs no mirror mutation;
+- only after manifest CAS succeeds may `resumes/` and `trash/` mirrors be written/moved;
+- mirror failure does not invalidate the authoritative manifest and is repaired by a later sync;
+- stale conflict decisions whose visible ETag/revision no longer matches are deferred before application.
 
 - [ ] **Step 2: Rewrite coordinator tests around per-resume outcomes**
 

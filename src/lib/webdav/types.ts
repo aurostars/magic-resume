@@ -22,7 +22,8 @@ export interface CloudSnapshotV1 {
 }
 
 export interface ResumeManifestEntry {
-  path: string;
+  objectPath: string;
+  mirrorPath: string;
   contentHash: string;
   updatedAt: string;
   deleted: boolean;
@@ -45,7 +46,8 @@ export interface ManifestV2 extends ManifestV2Body {
 export interface MultiFileBaselineEntry {
   contentHash: string;
   deleted: boolean;
-  path: string;
+  objectPath: string;
+  mirrorPath: string;
 }
 
 export interface MultiFileBaseline {
@@ -61,16 +63,23 @@ export interface ResumeSyncConflict {
   resumeId: string;
   title: string;
   kind: ResumeConflictKind;
+  localUpdatedAt: string | null;
+  remoteUpdatedAt: string | null;
   local: ResumeData | null;
   remoteEntry: ResumeManifestEntry | null;
 }
 
 export interface SyncPlan {
-  uploads: Array<{ resume: ResumeData; path: string; previousPath: string | null }>;
-  downloads: Array<{ resumeId: string; path: string; contentHash: string }>;
+  uploads: Array<{
+    resume: ResumeData;
+    mirrorPath: string;
+    previousMirrorPath: string | null;
+  }>;
+  downloads: Array<{ resumeId: string; objectPath: string; contentHash: string }>;
   trashMoves: Array<{ resumeId: string; from: string; to: string }>;
   remoteDeletions: string[];
   conflicts: ResumeSyncConflict[];
+  manualImports?: Array<{ resume: ResumeData; mirrorPath: string }>;
   nextActiveResumeId: string | null;
 }
 

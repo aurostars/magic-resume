@@ -22,15 +22,21 @@ const baselineFor = (manifest: ManifestV2): MultiFileBaseline => ({
   manifestHash: manifest.manifestHash,
   activeResumeId: manifest.activeResumeId,
   entries: Object.fromEntries(Object.entries(manifest.entries).map(([id, entry]) => [id, {
-    path: entry.path, contentHash: entry.contentHash, deleted: entry.deleted,
+    objectPath: entry.objectPath, mirrorPath: entry.mirrorPath,
+    contentHash: entry.contentHash, deleted: entry.deleted,
   }])),
 });
 const makeManifest = async (items: ResumeData[], revision = 1): Promise<ManifestV2> => {
   const entries: ManifestV2["entries"] = {};
-  for (const item of items) entries[item.id] = {
-    path: `resumes/${item.id}.json`, contentHash: await calculateResumeHash(item),
-    updatedAt: NOW, deleted: false,
-  };
+  for (const item of items) {
+    const contentHash = await calculateResumeHash(item);
+    entries[item.id] = {
+      objectPath: `objects/${item.id}/${contentHash}.json`,
+      mirrorPath: `resumes/${item.title}--${item.id.slice(0, 6).toLowerCase()}.json`,
+      contentHash,
+      updatedAt: NOW, deleted: false,
+    };
+  }
   return createManifest({
     schemaVersion: 2, revision, parentRevision: revision === 1 ? null : revision - 1,
     updatedAt: NOW, deviceId: "remote", activeResumeId: items[0]?.id ?? null, entries,
@@ -45,6 +51,7 @@ class MemoryRepository {
   publishRaces = 0;
 
   async ensureLayout() { this.calls.push("ensure-layout"); }
+  async ensureObjectDirectory(id: string) { this.calls.push(`ensure-object:${id}`); }
   async readManifest() {
     this.calls.push("read-manifest");
     return this.manifest ? { path: "manifest.json", ...this.manifest } : null;
@@ -108,10 +115,13 @@ const setup = async (options: {
   };
 };
 
-const seedRemoteFiles = (repository: MemoryRepository, items: ResumeData[]) => {
-  for (const item of items) repository.files.set(`resumes/${item.id}.json`, {
-    text: serializeResumeJson(item), etag: `"${item.id}"`,
-  });
+const seedRemoteFiles = async (repository: MemoryRepository, items: ResumeData[]) => {
+  for (const item of items) {
+    const hash = await calculateResumeHash(item);
+    const value = { text: serializeResumeJson(item), etag: `"${item.id}"` };
+    repository.files.set(`objects/${item.id}/${hash}.json`, value);
+    repository.files.set(`resumes/${item.title}--${item.id.slice(0, 6).toLowerCase()}.json`, value);
+  }
 };
 
 test("first local-only sync uploads resumes then creates revision 1 and commits a matching baseline", async () => {
@@ -124,7 +134,9 @@ test("first local-only sync uploads resumes then creates revision 1 and commits 
   const published = await parseManifest(state.repository.manifest!.text);
   assert.equal(published.revision, 1);
   assert.equal(published.parentRevision, null);
-  assert.equal(state.repository.calls.at(-1), "publish:null");
+  const publishIndex = state.repository.calls.indexOf("publish:null");
+  const mirrorWriteIndex = state.repository.calls.findIndex((call) => call.startsWith("write:resumes/"));
+  assert.ok(publishIndex >= 0 && mirrorWriteIndex > publishIndex);
   assert.deepEqual(state.baseline(), baselineFor(published));
 });
 
@@ -132,7 +144,7 @@ test("cloud-only bootstrap downloads verified resumes and atomically commits the
   const cloud = resume("cloud");
   const remote = await makeManifest([cloud]);
   const state = await setup({ remote });
-  seedRemoteFiles(state.repository, [cloud]);
+  await seedRemoteFiles(state.repository, [cloud]);
 
   const result = await state.coordinator.execute();
 
@@ -145,7 +157,7 @@ test("an unchanged synchronized state does not rewrite files or manifest", async
   const same = resume("same");
   const remote = await makeManifest([same]);
   const state = await setup({ local: data(same), remote, baseline: baselineFor(remote) });
-  seedRemoteFiles(state.repository, [same]);
+  await seedRemoteFiles(state.repository, [same]);
 
   assert.deepEqual(await state.coordinator.execute(), { status: "unchanged", warning: null, syncedCount: 0 });
   assert.equal(state.commits(), 0);
@@ -160,7 +172,7 @@ test("independent local and remote changes upload one resume and download the ot
   const cloudB = resume("b", "Cloud B");
   const remote = await makeManifest([oldA, cloudB], 2);
   const state = await setup({ local: data(localA, oldB), remote, baseline: baselineFor(base) });
-  seedRemoteFiles(state.repository, [oldA, cloudB]);
+  await seedRemoteFiles(state.repository, [oldA, cloudB]);
 
   const result = await state.coordinator.execute();
 
@@ -178,7 +190,7 @@ test("both-modified and hard-delete conflicts are resume scoped and resolution a
   const cloudA = resume("a", "Cloud A");
   const remote = await makeManifest([cloudA], 2);
   const state = await setup({ local: data(localA, localB), remote, baseline: baselineFor(base) });
-  seedRemoteFiles(state.repository, [cloudA]);
+  await seedRemoteFiles(state.repository, [cloudA]);
 
   const inspection = await state.coordinator.inspect();
 
@@ -202,13 +214,13 @@ test("keep-local and use-cloud resolutions execute the selected resume outcome",
   const remote = await makeManifest([cloud], 2);
 
   const keep = await setup({ local: data(local), remote, baseline: baselineFor(base) });
-  seedRemoteFiles(keep.repository, [cloud]);
+  await seedRemoteFiles(keep.repository, [cloud]);
   assert.equal((await keep.coordinator.execute({ resumeId: "a", resolution: "keep-local" })).status, "uploaded");
   const keptManifest = await parseManifest(keep.repository.manifest!.text);
-  assert.equal(parseResumeTitle(keep.repository.files.get(keptManifest.entries.a.path)!.text), "Local");
+  assert.equal(parseResumeTitle(keep.repository.files.get(keptManifest.entries.a.objectPath)!.text), "Local");
 
   const use = await setup({ local: data(local), remote, baseline: baselineFor(base) });
-  seedRemoteFiles(use.repository, [cloud]);
+  await seedRemoteFiles(use.repository, [cloud]);
   assert.equal((await use.coordinator.execute({ resumeId: "a", resolution: "use-cloud" })).status, "downloaded");
   assert.equal(use.local().resumes[0].title, "Cloud");
 });
@@ -228,7 +240,7 @@ test("remote and local CAS races are bounded and always reread and replan", asyn
   const cloud = resume("cloud");
   const remote = await makeManifest([cloud]);
   const localRace = await setup({ remote });
-  seedRemoteFiles(localRace.repository, [cloud]);
+  await seedRemoteFiles(localRace.repository, [cloud]);
   localRace.setLocalRace(true);
   assert.deepEqual(await localRace.coordinator.execute(), {
     status: "deferred", warning: null, reason: "LOCAL_CHANGED",
@@ -242,7 +254,7 @@ test("manual discovery scans resumes only, imports valid JSON, and surfaces sani
   const ignoredTrash = resume("trash-only");
   const remote = await makeManifest([indexed]);
   const state = await setup({ remote });
-  seedRemoteFiles(state.repository, [indexed]);
+  await seedRemoteFiles(state.repository, [indexed]);
   state.repository.files.set("resumes/manual.json", { text: serializeResumeJson(manual), etag: '"manual"' });
   state.repository.files.set("resumes/bad.json", { text: "{secret malformed", etag: '"bad"' });
   state.repository.files.set("trash/trash-only.json", { text: serializeResumeJson(ignoredTrash), etag: '"trash"' });
@@ -252,4 +264,26 @@ test("manual discovery scans resumes only, imports valid JSON, and surfaces sani
   assert.deepEqual(inspection.warnings, [{ code: "INVALID_REMOTE_RESUME" }]);
   assert.deepEqual(inspection.plan.downloads.map((item) => item.resumeId), ["indexed", "manual"]);
   assert.equal(state.repository.calls.includes("read:trash/trash-only.json"), false);
+});
+
+test("conflict decisions are rejected when the visible manifest ETag or revision is stale", async () => {
+  const baseItem = resume("a", "Base");
+  const local = resume("a", "Local");
+  const cloud = resume("a", "Cloud");
+  const base = await makeManifest([baseItem]);
+  const remote = await makeManifest([cloud], 2);
+  const state = await setup({ local: data(local), remote, baseline: baselineFor(base) });
+  await seedRemoteFiles(state.repository, [cloud]);
+
+  const byEtag = await state.coordinator.execute({
+    resumeId: "a", resolution: "keep-local", seenRemoteEtag: '"stale"', seenManifestRevision: 2,
+  });
+  const byRevision = await state.coordinator.execute({
+    resumeId: "a", resolution: "use-cloud", seenRemoteEtag: '"m1"', seenManifestRevision: 1,
+  });
+
+  assert.deepEqual(byEtag, { status: "deferred", warning: null, reason: "REMOTE_CHANGED" });
+  assert.deepEqual(byRevision, { status: "deferred", warning: null, reason: "REMOTE_CHANGED" });
+  assert.equal(state.repository.calls.some((call) => call.startsWith("publish:")), false);
+  assert.equal(state.commits(), 0);
 });

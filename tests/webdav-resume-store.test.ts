@@ -15,12 +15,14 @@ const makeBaseline = (
     alpha: {
       contentHash: hash("a"),
       deleted: false,
-      path: "resumes/Alpha--alpha.json",
+      objectPath: `objects/alpha/${hash("a")}.json`,
+      mirrorPath: "resumes/Alpha--alpha.json",
     },
     deleted: {
       contentHash: hash("d"),
       deleted: true,
-      path: "trash/Deleted--delete.json",
+      objectPath: `objects/deleted/${hash("d")}.json`,
+      mirrorPath: "trash/Deleted--delete.json",
     },
   },
 ): MultiFileBaseline => ({
@@ -256,7 +258,10 @@ test("rehydration discards a malformed multi-file baseline without discarding re
           webDavBaseline: {
             ...makeBaseline(),
             entries: {
-              safe: { contentHash: "not-a-hash", deleted: false, path: "../escape.json" },
+              safe: {
+                contentHash: "not-a-hash", deleted: false,
+                objectPath: "../escape.json", mirrorPath: "resumes/Safe--safe.json",
+              },
             },
           },
         },
@@ -281,7 +286,10 @@ test("commitWebDavSync publishes matching resume data and baseline in one set", 
   const local = makeResume({ id: "local", title: "Local" });
   const remote = makeResume({ id: "remote", title: "Remote" });
   const nextBaseline = makeBaseline(2, {
-    remote: { contentHash: hash("b"), deleted: false, path: "resumes/Remote--remote.json" },
+    remote: {
+      contentHash: hash("b"), deleted: false,
+      objectPath: `objects/remote/${hash("b")}.json`, mirrorPath: "resumes/Remote--remote.json",
+    },
   });
   useResumeStore.setState({
     resumes: { local },

@@ -30,6 +30,9 @@ Magic Resume 当前将所有简历及活动简历 ID 打包进单个 `magic-resu
 ```text
 /magic-resume/
 ├── manifest.json
+├── objects/
+│   ├── a81f32-full-id/<content-hash>.json
+│   └── 72be91-full-id/<content-hash>.json
 ├── resumes/
 │   ├── 产品经理简历--a81f32.json
 │   └── 英文简历--72be91.json
@@ -37,7 +40,7 @@ Magic Resume 当前将所有简历及活动简历 ID 打包进单个 `magic-resu
     └── 已删除简历--d09c17.json
 ```
 
-用户仍可在设置中修改根目录。`manifest.json`、`resumes/` 和 `trash/` 均相对于该根目录解析。
+用户仍可在设置中修改根目录。所有路径均相对于该根目录解析。`objects/` 是不可变内容对象的事实源；`resumes/` 与 `trash/` 只是可读、可修复的镜像。
 
 ## 简历文件格式
 
@@ -82,7 +85,8 @@ Magic Resume 当前将所有简历及活动简历 ID 打包进单个 `magic-resu
   "activeResumeId": "resume-id",
   "entries": {
     "resume-id": {
-      "path": "resumes/产品经理简历--a81f32.json",
+      "objectPath": "objects/resume-id/<content-hash>.json",
+      "mirrorPath": "resumes/产品经理简历--a81f32.json",
       "contentHash": "sha256-hash",
       "updatedAt": "2026-09-13T01:59:00.000Z",
       "deleted": false
@@ -98,9 +102,10 @@ Magic Resume 当前将所有简历及活动简历 ID 打包进单个 `magic-resu
 - `revision` / `parentRevision`：用于清单级三方比较和 CAS 重试。
 - `activeResumeId`：全局活动简历；指向不存在或已删除条目时回退到本地有效简历。
 - `entries`：以完整简历 ID 为键的文件索引。
-- `path`：相对于 WebDAV 根目录的规范路径。
+- `objectPath`：不可变事实源路径，必须精确为 `objects/<完整简历 ID>/<contentHash>.json`；对象发布后永不覆盖、移动或删除。
+- `mirrorPath`：可读镜像路径；live 条目位于 `resumes/`，deleted 条目位于 `trash/`。
 - `contentHash`：对纯 `ResumeData` canonical JSON 计算的 SHA-256。
-- `deleted`：删除标记；删除后路径指向 `trash/`。
+- `deleted`：删除标记；只改变清单状态与 `mirrorPath`，不改变历史 `objectPath`。
 - `manifestHash`：对排除自身后的清单 canonical JSON 计算哈希。
 
 ETag 属于一次远端读取获得的传输层 CAS token，不写入 `manifest.json`，避免服务端重写 ETag 后造成陈旧元数据。
@@ -131,11 +136,11 @@ ETag 属于一次远端读取获得的传输层 CAS token，不写入 `manifest.
 
 在现有 `WebDavClient` 上封装多文件操作：
 
-- 确保根目录、`resumes/`、`trash/` 存在。
+- 确保根目录、`objects/`、`resumes/`、`trash/` 存在。
 - 读取清单与其 ETag。
-- 按条目读取简历并校验 ETag/内容哈希。
-- 使用临时文件 + 条件 `MOVE` 原子写入简历和清单。
-- 安全重命名文件、移动到垃圾箱。
+- 从 `objectPath` 读取权威简历并校验内容哈希。
+- 使用临时文件 + 条件 `MOVE` 原子创建不可变对象和发布清单。
+- 在清单提交后尽力更新、重命名或移动可读镜像；镜像失败留待后续修复。
 - 枚举 `resumes/` 中可人工加入的 JSON 文件。
 
 ### Sync Planner
@@ -153,27 +158,29 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 
 按依赖顺序执行计划：
 
-1. 创建必要目录。
-2. 上传新文件或新文件名。
-3. 下载并验证远端文件。
-4. 处理重命名和垃圾箱移动。
-5. 原子提交本地 Resume Store 与同步基线。
-6. 最后使用读取清单时获得的 ETag 条件更新 `manifest.json`。
+1. 在任何 repository 调用前校验 `expectedLocalToken`；不匹配则零网络操作并 deferred/replan。
+2. 创建必要目录（包括 `objects/`）。
+3. 创建并回读验证所有新的不可变 `objects/<id>/<hash>.json`；既有对象只校验、永不覆盖。
+4. 下载从 `objectPath` 读取并验证；发布前再次校验本地 token。
+5. 使用读取清单时获得的 ETag CAS 发布 `manifest.json`，这是远端事务提交点。
+6. 仅在清单成功后尽力更新 `resumes/` / `trash/` 可读镜像。
+7. 原子提交本地 Resume Store 与同步基线。
 
-任一步失败时，不发布指向缺失文件的新清单。
+清单 CAS 失败时不执行镜像操作；本轮新对象只是安全孤儿，旧清单仍完整指向旧对象。镜像失败不回滚清单，因为后续同步可从不可变对象修复镜像。
 
 ## 首次同步
 
 远端没有 `manifest.json` 时：
 
-1. 确保三个目录存在。
+1. 确保根目录及 `objects/`、`resumes/`、`trash/` 四个目录存在。
 2. 获取当前本地所有简历。
 3. 逐份生成纯 `ResumeData` JSON 和哈希。
-4. 原子上传到 `resumes/`。
-5. 所有文件成功后创建并条件写入初始 `manifest.json`。
-6. 原子保存本地基线。
+4. 原子创建并验证不可变 `objects/<id>/<hash>.json`。
+5. 所有对象成功后条件创建初始 `manifest.json`。
+6. 清单成功后生成 `resumes/` 可读镜像。
+7. 原子保存本地基线。
 
-如果在清单创建前出现失败，远端可能存在未索引文件；下次同步通过目录扫描识别并复用有效文件，不重复创建。
+如果在清单创建前出现失败，远端只会留下未索引的不可变对象；它们不影响旧事实源，也不会被 `resumes/` 人工导入扫描误识别。
 
 ## 日常同步
 
@@ -201,23 +208,16 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 
 ## 重命名
 
-标题变化导致目标文件名变化时：
-
-1. 在旧 ETag/清单基线保护下，将内容原子写入新路径。
-2. 验证新路径可读取且哈希一致。
-3. 删除或移动旧路径。
-4. 最后更新清单映射。
-
-若旧路径清理失败，清单只指向新路径，旧文件视为可清理孤儿；后续同步应识别并清理，不得重复导入。
+标题变化只改变 `mirrorPath`；内容对应的不可变 `objectPath` 仍由内容哈希决定。新对象（若内容变化）验证完成并成功 CAS 发布清单后，才更新新镜像并清理旧镜像。清理失败只留下可修复的陈旧镜像，不影响清单事实源。
 
 ## 删除与垃圾箱
 
 用户在网站删除简历时：
 
-- 对应 JSON 通过条件 `MOVE` 移入 `trash/`。
-- 垃圾箱文件继续保持纯 `ResumeData`，可人工下载并导入恢复。
-- 清单条目保留完整 ID、垃圾箱路径、原内容哈希和删除标记。
-- 其他设备看到删除标记后不得从旧 `resumes/` 文件恢复该简历。
+- 清单保留原不可变 `objectPath`、内容哈希和完整 ID，将 `deleted` 设为 `true`，并把 `mirrorPath` 改到 `trash/`。
+- 清单 CAS 成功后，才在 `trash/` 写入可读镜像；原对象永不移动或删除。
+- 垃圾箱镜像继续保持纯 `ResumeData`，可人工下载并导入恢复。
+- 其他设备以清单删除标记为准；`trash/` 不参加人工导入扫描。
 - 网页不提供垃圾箱管理；用户在 WebDAV 中自行整理。
 
 垃圾箱目标重名时使用稳定短 ID，并在极端路径冲突时附加确定性哈希后缀。
@@ -234,6 +234,8 @@ Planner 不执行网络和 Store 写入，便于完整单元测试。
 - 一侧删除、另一侧修改：产生该简历的冲突。
 - 两侧同时修改同一简历且哈希不同：产生该简历的冲突。
 - 两侧结果哈希相同：视为无冲突。
+- 每个冲突携带 `localUpdatedAt: string | null` 与 `remoteUpdatedAt: string | null`。本地值来自 `ResumeData.updatedAt`；远端 live/tombstone 值来自 entry `updatedAt`；远端 hard deletion（`remoteEntry: null`）使用 `manifest.updatedAt`。
+- 冲突决策携带用户看到的 manifest ETag/revision；应用前必须重读校验，陈旧对话框只能 deferred/replan。
 
 冲突对话框展示具体简历标题，并提供：
 

@@ -11,7 +11,7 @@ const BODY_KEYS = [
   "activeResumeId", "entries",
 ] as const;
 const MANIFEST_KEYS = [...BODY_KEYS, "manifestHash"] as const;
-const ENTRY_KEYS = ["path", "contentHash", "updatedAt", "deleted"] as const;
+const ENTRY_KEYS = ["objectPath", "mirrorPath", "contentHash", "updatedAt", "deleted"] as const;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -32,7 +32,8 @@ const isSafeRelativePosixPath = (value: unknown): value is string => {
 const isEntry = (value: unknown): value is ResumeManifestEntry =>
   isRecord(value) &&
   hasOnlyKeys(value, ENTRY_KEYS) &&
-  isSafeRelativePosixPath(value.path) &&
+  isSafeRelativePosixPath(value.objectPath) &&
+  isSafeRelativePosixPath(value.mirrorPath) &&
   typeof value.contentHash === "string" && HASH_PATTERN.test(value.contentHash) &&
   isIsoTimestamp(value.updatedAt) &&
   typeof value.deleted === "boolean";
@@ -52,24 +53,28 @@ const validateBody = (candidate: unknown): ManifestV2Body => {
     throw new ManifestValidationError("MANIFEST_SHAPE");
   }
 
-  const paths = new Set<string>();
+  const objectPaths = new Set<string>();
+  const mirrorPaths = new Set<string>();
   for (const [id, entry] of Object.entries(candidate.entries)) {
     if (!isNonEmptyString(id) || !isEntry(entry)) {
       throw new ManifestValidationError("MANIFEST_SHAPE");
     }
+    const objectSegments = entry.objectPath.split("/");
+    const mirrorSegments = entry.mirrorPath.split("/");
     const directory = entry.deleted ? "trash" : "resumes";
-    const fileName = entry.path.split("/").at(-1) ?? "";
+    const fileName = mirrorSegments.at(-1) ?? "";
     const shortId = id.trim().toLowerCase().slice(0, 6);
-    const hasExpectedName = fileName === `${id}.json` || fileName.endsWith(`--${shortId}.json`);
     if (
-      !entry.path.startsWith(`${directory}/`) ||
-      entry.path.split("/").length !== 2 ||
-      !hasExpectedName ||
-      paths.has(entry.path)
+      objectSegments.length !== 3 || objectSegments[0] !== "objects" ||
+      objectSegments[1] !== id || objectSegments[2] !== `${entry.contentHash}.json` ||
+      mirrorSegments.length !== 2 || mirrorSegments[0] !== directory ||
+      !fileName.endsWith(`--${shortId}.json`) ||
+      objectPaths.has(entry.objectPath) || mirrorPaths.has(entry.mirrorPath)
     ) {
       throw new ManifestValidationError("MANIFEST_SHAPE");
     }
-    paths.add(entry.path);
+    objectPaths.add(entry.objectPath);
+    mirrorPaths.add(entry.mirrorPath);
   }
 
   if (candidate.activeResumeId !== null) {
@@ -88,26 +93,16 @@ const manifestBody = (manifest: ManifestV2): ManifestV2Body => {
 
 export async function createManifest(body: ManifestV2Body): Promise<ManifestV2> {
   const validBody = validateBody(body);
-  return {
-    ...validBody,
-    manifestHash: await sha256(stableStringify(validBody)),
-  };
+  return { ...validBody, manifestHash: await sha256(stableStringify(validBody)) };
 }
 
 export async function parseManifest(text: string): Promise<ManifestV2> {
   let candidate: unknown;
-  try {
-    candidate = JSON.parse(text);
-  } catch {
-    throw new ManifestValidationError("MANIFEST_JSON");
-  }
+  try { candidate = JSON.parse(text); } catch { throw new ManifestValidationError("MANIFEST_JSON"); }
   if (!isRecord(candidate)) throw new ManifestValidationError("MANIFEST_SHAPE");
   if (candidate.schemaVersion !== 2) throw new ManifestValidationError("MANIFEST_VERSION");
-  if (
-    !hasOnlyKeys(candidate, MANIFEST_KEYS) ||
-    typeof candidate.manifestHash !== "string" ||
-    !HASH_PATTERN.test(candidate.manifestHash)
-  ) {
+  if (!hasOnlyKeys(candidate, MANIFEST_KEYS) || typeof candidate.manifestHash !== "string" ||
+      !HASH_PATTERN.test(candidate.manifestHash)) {
     throw new ManifestValidationError("MANIFEST_SHAPE");
   }
   const manifest = candidate as unknown as ManifestV2;

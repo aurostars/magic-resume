@@ -19,7 +19,9 @@ import {
   canonicalizeSyncData,
   createCloudSnapshot,
 } from "../src/lib/webdav/snapshot";
-import type { CloudSnapshotV1 } from "../src/lib/webdav/types";
+import { createManifest, serializeManifest } from "../src/lib/webdav/manifest";
+import { calculateResumeHash, serializeResumeJson } from "../src/lib/webdav/resume-codec";
+import type { CloudSnapshotV1, ManifestV2, MultiFileBaseline } from "../src/lib/webdav/types";
 import { useResumeStore } from "../src/store/useResumeStore";
 import { useWebDavStore, type WebDavConflict } from "../src/store/useWebDavStore";
 import {
@@ -750,47 +752,66 @@ const configuredSettings = {
   autoSyncEnabled: false,
 };
 
-test("configured controller downloads through real stores without scheduling remote apply back", async () => {
+test("configured controller downloads immutable objects through real stores without scheduling remote apply back", async () => {
   const local = makeIntegratedResume("local", "Local");
   const remote = makeIntegratedResume("remote", "Remote");
-  const localData = { resumes: [local], activeResumeId: "local" };
-  const remoteData = { resumes: [remote], activeResumeId: "remote" };
-  const baseline = {
-    revision: "revision-1",
-    contentHash: await calculateContentHash(localData),
-    syncedAt: "2026-09-12T00:00:00.000Z",
-  };
-  const snapshot = await createCloudSnapshot(remoteData, {
-    revision: "revision-2",
-    parentRevision: "revision-1",
+  const localHash = await calculateResumeHash(local);
+  const remoteHash = await calculateResumeHash(remote);
+  const manifest = await createManifest({
+    schemaVersion: 2,
+    revision: 2,
+    parentRevision: 1,
     updatedAt: "2026-09-12T01:00:00.000Z",
     deviceId: "remote-device",
+    activeResumeId: "remote",
+    entries: {
+      remote: {
+        objectPath: `objects/remote/${remoteHash}.json`,
+        mirrorPath: "resumes/Remote--remote.json",
+        contentHash: remoteHash,
+        updatedAt: remote.updatedAt,
+        deleted: false,
+      },
+    },
   });
-  useResumeStore.setState({
-    resumes: { local },
+  const baseline: MultiFileBaseline = {
+    manifestRevision: 1,
+    manifestHash: "a".repeat(64),
     activeResumeId: "local",
-    activeResume: local,
-    history: {},
-    future: {},
-    _hasHydrated: true,
-    _isApplyingSyncSnapshot: false,
+    entries: {
+      local: {
+        objectPath: `objects/local/${localHash}.json`,
+        mirrorPath: "resumes/Local--local.json",
+        contentHash: localHash,
+        deleted: false,
+      },
+    },
+  };
+  useResumeStore.setState({
+    resumes: { local }, activeResumeId: "local", activeResume: local,
+    history: {}, future: {}, _hasHydrated: true, _isApplyingSyncSnapshot: false,
     webDavBaseline: baseline,
   });
   useWebDavStore.setState({
-    settings: configuredSettings,
-    deviceId: "local-device",
-    conflict: null,
-    error: null,
-    warning: null,
-    status: "idle",
-    isSyncing: false,
-    abortController: null,
+    settings: configuredSettings, deviceId: "local-device", conflict: null,
+    error: null, warning: null, status: "idle", isSyncing: false, abortController: null,
   });
   const requests: string[] = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
-    requests.push(init?.method ?? "GET");
-    return new Response(JSON.stringify(snapshot), { status: 200 });
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    requests.push(`${method} ${new URL(url).pathname}`);
+    if (method === "PROPFIND") {
+      return new Response('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>', { status: 207 });
+    }
+    if (url.endsWith("/manifest.json")) {
+      return new Response(serializeManifest(manifest), { status: 200, headers: { ETag: '"m2"' } });
+    }
+    if (url.endsWith(manifest.entries.remote.objectPath)) {
+      return new Response(serializeResumeJson(remote), { status: 200, headers: { ETag: '"remote"' } });
+    }
+    return new Response(null, { status: 404 });
   }) as typeof fetch;
 
   try {
@@ -806,14 +827,10 @@ test("configured controller downloads through real stores without scheduling rem
     await controller.syncNow("manual");
     await controller.whenIdle();
 
-    assert.deepEqual(requests, ["GET"]);
     assert.deepEqual(Object.keys(useResumeStore.getState().resumes), ["remote"]);
     assert.equal(useResumeStore.getState()._isApplyingSyncSnapshot, false);
-    assert.deepEqual(useResumeStore.getState().webDavBaseline, {
-      revision: "revision-2",
-      contentHash: snapshot.contentHash,
-      syncedAt: useResumeStore.getState().webDavBaseline?.syncedAt,
-    });
+    assert.equal(useResumeStore.getState().webDavBaseline?.manifestHash, manifest.manifestHash);
+    assert.equal(requests.some((request) => request.includes(manifest.entries.remote.objectPath)), true);
     cleanup();
   } finally {
     globalThis.fetch = originalFetch;
@@ -887,7 +904,7 @@ test("configured controller stores only safe error code and status", async () =>
   }
 });
 
-test("snapshot validation failures preserve their safe code without remote content", async () => {
+test("legacy aggregate payload failures surface only a safe manifest code", async () => {
   useResumeStore.setState({ _hasHydrated: true, webDavBaseline: null });
   useWebDavStore.setState({ settings: configuredSettings, error: null });
   const originalFetch = globalThis.fetch;
@@ -901,12 +918,12 @@ test("snapshot validation failures preserve their safe code without remote conte
     data: { resumes: [], activeResumeId: null },
   };
   const cases = [
-    ["SNAPSHOT_VERSION", { ...baseSnapshot, schemaVersion: 2 }],
-    ["SNAPSHOT_RESUME", {
+    ["MANIFEST_SHAPE", { ...baseSnapshot, schemaVersion: 2 }],
+    ["MANIFEST_VERSION", {
       ...baseSnapshot,
       data: { resumes: [{ id: "raw-server-body-password=secret" }], activeResumeId: null },
     }],
-    ["SNAPSHOT_HASH", baseSnapshot],
+    ["MANIFEST_VERSION", baseSnapshot],
   ] as const;
 
   try {
@@ -991,7 +1008,7 @@ test("lifecycle ignores guard-only reset after remote commit but forwards a real
   cleanup();
 });
 
-test("configured controller migrates legacy baseline once into synchronized Resume state", () => {
+test("configured controller does not migrate a legacy aggregate baseline", () => {
   const legacyBaseline = {
     revision: "legacy-r1",
     contentHash: "d".repeat(64),
@@ -1003,8 +1020,8 @@ test("configured controller migrates legacy baseline once into synchronized Resu
   const controller = createConfiguredController(configuredSettings, "device");
 
   assert.ok(controller);
-  assert.equal(useResumeStore.getState().webDavBaseline, legacyBaseline);
-  assert.equal(useWebDavStore.getState().legacyBaseline, null);
+  assert.equal(useResumeStore.getState().webDavBaseline, null);
+  assert.equal(useWebDavStore.getState().legacyBaseline, legacyBaseline);
   controller.dispose();
 });
 
@@ -1045,7 +1062,8 @@ test("reconfiguration after clearCredentials performs first sync without the old
 
     assert.deepEqual(Object.keys(useResumeStore.getState().resumes), ["local"]);
     assert.equal(useResumeStore.getState().webDavBaseline, null);
-    assert.equal(useWebDavStore.getState().conflict?.snapshot.revision, "new-server-r1");
+    assert.equal(useWebDavStore.getState().conflict, null);
+    assert.deepEqual(useWebDavStore.getState().error, { code: "MANIFEST_VERSION", status: null });
     controller.dispose();
   } finally {
     globalThis.fetch = originalFetch;
@@ -1081,18 +1099,29 @@ test("lifecycle recognizes a later local edit after guarded commit notification 
   const unsubscribeThrowing = useResumeStore.subscribe(() => {
     throw new Error("subscriber failed");
   });
-  const baseline = { revision: "r2", contentHash: "b".repeat(64), syncedAt: "new" };
+  const baseline: MultiFileBaseline = {
+    manifestRevision: 2,
+    manifestHash: "b".repeat(64),
+    activeResumeId: "remote",
+    entries: {
+      remote: {
+        contentHash: "c".repeat(64), deleted: false,
+        objectPath: `objects/remote/${"c".repeat(64)}.json`,
+        mirrorPath: "resumes/Remote--remote.json",
+      },
+    },
+  };
 
-  assert.throws(() => useResumeStore.getState().commitWebDavSnapshot(
-    { resumes: [remote], activeResumeId: "remote" },
+  assert.throws(() => useResumeStore.getState().commitWebDavSync({
+    data: { resumes: [remote], activeResumeId: "remote" },
     baseline,
-    canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
-  ), /subscriber failed/);
+    expectedLocalToken: canonicalizeSyncData({ resumes: [local], activeResumeId: "local" }),
+  }), /subscriber failed/);
   unsubscribeThrowing();
   useResumeStore.setState({ resumes: { ...useResumeStore.getState().resumes } });
 
   assert.equal(useResumeStore.getState()._isApplyingSyncSnapshot, false);
-  assert.equal(useResumeStore.getState().webDavBaseline, baseline);
+  assert.deepEqual(useResumeStore.getState().webDavBaseline, baseline);
   assert.equal(localChanges, 1);
   cleanup();
 });

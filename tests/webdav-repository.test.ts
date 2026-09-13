@@ -82,13 +82,14 @@ const validResumeText = JSON.stringify({
   templateId: null,
 });
 
-test("ensureLayout creates the root, resumes, and trash collections in order", async () => {
+test("ensureLayout creates root, objects, resumes, and trash collections in order", async () => {
   const client = new FakeClient();
 
   await repositoryWith(client).ensureLayout();
 
   assert.deepEqual(client.calls, [
     ["ensureDirectory", "/magic-resume/"],
+    ["ensureDirectory", "/magic-resume/objects/"],
     ["ensureDirectory", "/magic-resume/resumes/"],
     ["ensureDirectory", "/magic-resume/trash/"],
   ]);
@@ -215,4 +216,22 @@ test("repository rejects unnormalized paths before making WebDAV calls", async (
   await assert.rejects(repository.writeResumeAtomic("resumes/../secret.json", "{}"), WebDavError);
   await assert.rejects(repository.moveResumeAtomic("resumes/CV.json", "/outside.json", null), WebDavError);
   assert.deepEqual(client.calls, []);
+});
+
+test("managed immutable object paths accept full IDs and hashes while rejecting malformed nesting", async () => {
+  const client = new FakeClient();
+  const repository = repositoryWith(client);
+  const hash = "a".repeat(64);
+  const objectPath = `objects/resume-id/${hash}.json`;
+
+  await repository.writeResumeAtomic(objectPath, validResumeText, null);
+
+  assert.equal(client.calls.some((call) => call[0] === "move" && call[2] === `/magic-resume/${objectPath}`), true);
+  for (const invalid of [
+    `objects/resume-id/${"b".repeat(63)}.json`,
+    `objects/resume-id/nested/${hash}.json`,
+    `objects/../resume-id/${hash}.json`,
+  ]) {
+    await assert.rejects(repository.writeResumeAtomic(invalid, validResumeText, null), WebDavError);
+  }
 });

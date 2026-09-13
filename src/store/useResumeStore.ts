@@ -191,13 +191,15 @@ const isMultiFileBaseline = (value: unknown): value is MultiFileBaseline => {
     if (
       resumeId.length === 0 ||
       !isRecord(entry) ||
-      !hasExactKeys(entry, ["contentHash", "deleted", "path"]) ||
+      !hasExactKeys(entry, ["contentHash", "deleted", "mirrorPath", "objectPath"]) ||
       typeof entry.contentHash !== "string" ||
       !HASH_PATTERN.test(entry.contentHash) ||
       typeof entry.deleted !== "boolean" ||
-      typeof entry.path !== "string" ||
-      !entry.path.startsWith(entry.deleted ? "trash/" : "resumes/") ||
-      entry.path.split("/").some((segment) => !segment || segment === "." || segment === "..")
+      typeof entry.objectPath !== "string" ||
+      entry.objectPath !== `objects/${resumeId}/${entry.contentHash}.json` ||
+      typeof entry.mirrorPath !== "string" ||
+      !entry.mirrorPath.startsWith(entry.deleted ? "trash/" : "resumes/") ||
+      entry.mirrorPath.split("/").some((segment) => !segment || segment === "." || segment === "..")
     ) {
       return false;
     }
