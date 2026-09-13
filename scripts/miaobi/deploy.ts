@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import config from "../../miaobi.config.json" with { type: "json" };
@@ -89,6 +89,23 @@ const RESOURCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const BUILD_MARKER_PATTERN = /^([0-9a-f]{40})\.([0-9a-f]{32,128})$/;
 const LOCK_GRACE_MS = 30_000;
+// A 30 s heartbeat and 120 s lease tolerate three missed ticks plus ordinary
+// event-loop stalls before recovery is allowed. A lock is live only while both
+// its PID and this token-bound inode heartbeat are live.
+const LOCK_HEARTBEAT_MS = 30_000;
+const LOCK_LEASE_MS = 120_000;
+
+export type StateLockClock = {
+  now: () => number;
+  setInterval: (callback: () => void, milliseconds: number) => { unref?: () => void };
+  clearInterval: (timer: unknown) => void;
+};
+
+const systemLockClock: StateLockClock = {
+  now: Date.now,
+  setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+  clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+};
 
 function deploymentPaths() {
   return {
@@ -184,15 +201,39 @@ async function assertStorageIdentity(state: TrustedStorage): Promise<void> {
   }
 }
 
-async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<void>> {
+async function refreshLockHeartbeat(
+  state: TrustedRecovery,
+  token: string,
+  claimed: { dev: number; ino: number },
+  now: number,
+): Promise<void> {
+  await assertStorageIdentity(state);
+  const current = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
+  const beforeTouch = await lstat(state.lockPath);
+  if (
+    current?.token !== token || beforeTouch.dev !== claimed.dev || beforeTouch.ino !== claimed.ino ||
+    !beforeTouch.isFile() || beforeTouch.isSymbolicLink()
+  ) throw codedError("MIAOBI_STATE_LOCKED");
+  const heartbeatAt = new Date(now);
+  await utimes(state.lockPath, heartbeatAt, heartbeatAt);
+  const afterTouch = await lstat(state.lockPath);
+  if (afterTouch.dev !== claimed.dev || afterTouch.ino !== claimed.ino) {
+    throw codedError("MIAOBI_STATE_LOCKED");
+  }
+}
+
+async function acquireStateLock(
+  state: TrustedRecovery,
+  clock: StateLockClock,
+): Promise<() => Promise<void>> {
   await assertStorageIdentity(state);
   const token = randomUUID().replaceAll("-", "");
-  const processStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
+  const processStartedAt = new Date(clock.now() - process.uptime() * 1000).toISOString();
   const owner = {
     schemaVersion: 1,
     pid: process.pid,
     token,
-    startedAt: new Date().toISOString(),
+    startedAt: new Date(clock.now()).toISOString(),
     processStartedAt,
   };
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -213,7 +254,17 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
       await rm(stagedLockPath);
       const claimed = await lstat(state.lockPath);
       if (!claimed.isFile() || claimed.isSymbolicLink()) throw new Error();
+      let heartbeatRunning = false;
+      const heartbeatTimer = clock.setInterval(() => {
+        if (heartbeatRunning) return;
+        heartbeatRunning = true;
+        void refreshLockHeartbeat(state, token, claimed, clock.now())
+          .catch(() => clock.clearInterval(heartbeatTimer))
+          .finally(() => { heartbeatRunning = false; });
+      }, LOCK_HEARTBEAT_MS);
+      heartbeatTimer.unref?.();
       return async () => {
+        clock.clearInterval(heartbeatTimer);
         try {
           await assertStorageIdentity(state);
           const current = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
@@ -239,9 +290,11 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
       } catch {
         throw codedError("MIAOBI_STATE_LOCKED");
       }
-      const ageMs = Date.now() - metadata.mtimeMs;
+      const ageMs = clock.now() - metadata.mtimeMs;
       if (ageMs < LOCK_GRACE_MS) throw codedError("MIAOBI_STATE_LOCKED");
       let stale = false;
+      let validOwner = false;
+      let staleAfterMs = LOCK_GRACE_MS;
       let existing: {
         schemaVersion?: unknown; pid?: unknown; token?: unknown; startedAt?: unknown; processStartedAt?: unknown;
       } | undefined;
@@ -258,10 +311,9 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
           !Number.isFinite(startedAt) || !Number.isFinite(recordedProcessStart) ||
           recordedProcessStart > startedAt
         ) throw new Error();
-        if (existing.pid === process.pid) {
-          const actualProcessStart = Date.now() - process.uptime() * 1000;
-          stale = Math.abs(recordedProcessStart - actualProcessStart) > 5_000;
-        }
+        validOwner = true;
+        stale = ageMs > LOCK_LEASE_MS;
+        if (stale) staleAfterMs = LOCK_LEASE_MS;
       } catch {
         stale = true;
       }
@@ -274,8 +326,13 @@ async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<v
       if (!stale) throw codedError("MIAOBI_STATE_LOCKED");
       await assertStorageIdentity(state);
       const beforeRemove = await lstat(state.lockPath);
-      if (beforeRemove.dev !== metadata.dev || beforeRemove.ino !== metadata.ino) {
-        throw codedError("MIAOBI_STATE_LOCKED");
+      if (
+        beforeRemove.dev !== metadata.dev || beforeRemove.ino !== metadata.ino ||
+        clock.now() - beforeRemove.mtimeMs <= staleAfterMs
+      ) throw codedError("MIAOBI_STATE_LOCKED");
+      if (validOwner) {
+        const beforeRemoveOwner = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
+        if (beforeRemoveOwner?.token !== existing?.token) throw codedError("MIAOBI_STATE_LOCKED");
       }
       await rm(state.lockPath);
     }
@@ -445,43 +502,91 @@ function migrateLegacyPending(
   }
 }
 
+type PendingRecord = {
+  pending: PendingDeployment;
+  cleanup: Array<{ path: string; storage: TrustedStorage }>;
+};
+
+function samePendingSemantics(left: PendingDeployment, right: PendingDeployment): boolean {
+  return (
+    left.platformOrigin === right.platformOrigin &&
+    left.apiBuildMarker === right.apiBuildMarker &&
+    left.deployment.schemaVersion === right.deployment.schemaVersion &&
+    left.deployment.apiBuildMarker === right.deployment.apiBuildMarker &&
+    left.deployment.releaseId === right.deployment.releaseId &&
+    left.deployment.apiFaasId === right.deployment.apiFaasId &&
+    left.deployment.apiFaasUrl === right.deployment.apiFaasUrl &&
+    left.deployment.webFaasId === right.deployment.webFaasId &&
+    left.deployment.webFaasUrl === right.deployment.webFaasUrl &&
+    left.deployment.pageId === right.deployment.pageId &&
+    left.deployment.deployedAt === right.deployment.deployedAt &&
+    left.page.id === right.page.id &&
+    left.page.artifactPath === right.page.artifactPath &&
+    left.page.sha256 === right.page.sha256
+  );
+}
+
 async function pendingState(
   state: TrustedState,
   recovery: TrustedRecovery,
   platformOrigin: string,
   outputDirectory: string,
   gitCommit: string,
-): Promise<{ pending: PendingDeployment; sourcePath: string; sourceStorage: TrustedStorage } | undefined> {
+): Promise<PendingRecord | undefined> {
   await assertStorageIdentity(recovery);
   const current = await readJsonFile(recovery.pendingPath);
-  if (current !== undefined) {
-    if ((current as { schemaVersion?: unknown }).schemaVersion === 2) {
-      return {
-        pending: parsePending(current, platformOrigin),
-        sourcePath: recovery.pendingPath,
-        sourceStorage: recovery,
-      };
-    }
+  await assertStorageIdentity(state);
+  const legacy = await readJsonFile(recovery.legacyPendingPath);
+  if (current === undefined && legacy === undefined) return undefined;
+
+  let metadata: ApiBuildMetadata | undefined;
+  const migrate = async (value: unknown): Promise<PendingDeployment> => {
+    metadata ??= await readApiBuildMetadata(outputDirectory, gitCommit);
+    return migrateLegacyPending(value, platformOrigin, metadata.buildMarker);
+  };
+  const parseCurrent = async (): Promise<PendingDeployment | undefined> => {
+    if (current === undefined) return undefined;
+    return (current as { schemaVersion?: unknown }).schemaVersion === 2
+      ? parsePending(current, platformOrigin)
+      : migrate(current);
+  };
+
+  if (current !== undefined && legacy !== undefined) {
     try {
-      const metadata = await readApiBuildMetadata(outputDirectory, gitCommit);
+      const currentPending = await parseCurrent();
+      const legacyPending = await migrate(legacy);
+      if (!currentPending || !samePendingSemantics(currentPending, legacyPending)) throw new Error();
       return {
-        pending: migrateLegacyPending(current, platformOrigin, metadata.buildMarker),
-        sourcePath: recovery.pendingPath,
-        sourceStorage: recovery,
+        pending: currentPending,
+        cleanup: [
+          { path: recovery.pendingPath, storage: recovery },
+          { path: recovery.legacyPendingPath, storage: state },
+        ],
       };
     } catch {
       throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
     }
   }
-  await assertStorageIdentity(state);
-  const legacy = await readJsonFile(recovery.legacyPendingPath);
-  if (legacy === undefined) return undefined;
+  if (current !== undefined) {
+    if ((current as { schemaVersion?: unknown }).schemaVersion === 2) {
+      return {
+        pending: parsePending(current, platformOrigin),
+        cleanup: [{ path: recovery.pendingPath, storage: recovery }],
+      };
+    }
+    try {
+      return {
+        pending: await migrate(current),
+        cleanup: [{ path: recovery.pendingPath, storage: recovery }],
+      };
+    } catch {
+      throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+    }
+  }
   try {
-    const metadata = await readApiBuildMetadata(outputDirectory, gitCommit);
     return {
-      pending: migrateLegacyPending(legacy, platformOrigin, metadata.buildMarker),
-      sourcePath: recovery.legacyPendingPath,
-      sourceStorage: state,
+      pending: await migrate(legacy),
+      cleanup: [{ path: recovery.legacyPendingPath, storage: state }],
     };
   } catch {
     throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
@@ -677,8 +782,7 @@ async function publishPage(runner: MagicBuilderRunner, pagePath: string, platfor
 
 async function reconcilePending(
   pending: PendingDeployment,
-  pendingSourcePath: string,
-  pendingSourceStorage: TrustedStorage,
+  cleanup: Array<{ path: string; storage: TrustedStorage }>,
   state: TrustedState,
   recovery: TrustedRecovery,
   runner: MagicBuilderRunner,
@@ -706,8 +810,10 @@ async function reconcilePending(
     await assertStorageIdentity(recovery);
     await publishPage(runner, temporaryPage, platformOrigin);
     await writeAtomicJson(state, state.path, pending.deployment);
-    await assertStorageIdentity(pendingSourceStorage);
-    await rm(pendingSourcePath, { force: true });
+    for (const entry of cleanup) {
+      await assertStorageIdentity(entry.storage);
+      await rm(entry.path, { force: true });
+    }
     return pending.deployment;
   } finally {
     await handle?.close().catch(() => undefined);
@@ -721,6 +827,7 @@ export async function deployMiaobi(options: {
   now: Date;
   fetch?: typeof globalThis.fetch;
   healthTimeoutMs?: number;
+  lockClock?: StateLockClock;
 }): Promise<MiaobiDeploymentState> {
   let releaseLock: (() => Promise<void>) | undefined;
   try {
@@ -728,7 +835,7 @@ export async function deployMiaobi(options: {
     const { outputDirectory, statePath, legacyPendingPath, recoveryPath } = deploymentPaths();
     const stateStorage = await trustedState(statePath);
     const recoveryStorage = await trustedRecovery(recoveryPath, legacyPendingPath);
-    releaseLock = await acquireStateLock(recoveryStorage);
+    releaseLock = await acquireStateLock(recoveryStorage, options.lockClock ?? systemLockClock);
 
     const pendingRecord = await pendingState(
       stateStorage,
@@ -743,8 +850,7 @@ export async function deployMiaobi(options: {
       }
       return await reconcilePending(
         pendingRecord.pending,
-        pendingRecord.sourcePath,
-        pendingRecord.sourceStorage,
+        pendingRecord.cleanup,
         stateStorage,
         recoveryStorage,
         options.runner,

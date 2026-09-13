@@ -13,6 +13,42 @@ const BUILD_NONCE = "0123456789abcdef0123456789abcdef";
 const BUILD_MARKER = `${COMMIT}.${BUILD_NONCE}`;
 const NOW = new Date("2026-09-13T16:46:00.000Z");
 const RELEASE_ID = "59a06b5c2c12-20260913164600";
+const LOCK_LEASE_MS = 120_000;
+
+type FakeLockTimer = {
+  callback: () => void | Promise<void>;
+  unref: () => void;
+};
+
+class FakeLockClock {
+  current = Date.now();
+  readonly timers = new Set<FakeLockTimer>();
+  unrefCount = 0;
+
+  now = () => this.current;
+
+  setInterval = (callback: () => void | Promise<void>): FakeLockTimer => {
+    const timer = {
+      callback,
+      unref: () => { this.unrefCount += 1; },
+    };
+    this.timers.add(timer);
+    return timer;
+  };
+
+  clearInterval = (timer: unknown): void => {
+    this.timers.delete(timer as FakeLockTimer);
+  };
+
+  async advance(milliseconds: number): Promise<void> {
+    this.current += milliseconds;
+    for (const timer of [...this.timers]) await timer.callback();
+  }
+
+  stop(): void {
+    this.timers.clear();
+  }
+}
 
 type Stage = "asset" | "api" | "web" | "page";
 
@@ -874,7 +910,7 @@ test("a recent live single-file lock remains exclusive", { concurrency: false },
   });
 });
 
-test("does not reclaim an old lock while its valid owner PID is alive", { concurrency: false }, async () => {
+test("reclaims a stale heartbeat even when the recorded PID is alive and may have been reused", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     await new Promise<void>((resolve, reject) => {
@@ -884,7 +920,7 @@ test("does not reclaim an old lock while its valid owner PID is alive", { concur
     try {
       await mkdir(join(root, ".miaobi-recovery"), { mode: 0o700 });
       const lockPath = join(root, ".miaobi-recovery/deployment.lock");
-      const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const old = new Date(Date.now() - LOCK_LEASE_MS - 1);
       await writeFile(lockPath, JSON.stringify({
         schemaVersion: 1,
         pid: child.pid,
@@ -893,12 +929,9 @@ test("does not reclaim an old lock while its valid owner PID is alive", { concur
         processStartedAt: new Date(old.getTime() - 1000).toISOString(),
       }), { mode: 0o600 });
       await utimes(lockPath, old, old);
-      let calls = 0;
-      await assert.rejects(
-        deployMiaobi({ runner: { async run() { calls += 1; throw new Error(); } }, gitCommit: COMMIT, now: NOW }),
-        (error: unknown) => (error as Error).message === "MIAOBI_STATE_LOCKED",
-      );
-      assert.equal(calls, 0);
+      globalThis.fetch = async (input) => healthyResponse(input);
+      const state = await deployMiaobi({ runner: fakeRunner([]), gitCommit: COMMIT, now: NOW });
+      assert.equal(state.schemaVersion, 2);
     } finally {
       child.kill();
       if (child.exitCode === null) await new Promise<void>((resolve) => child.once("close", () => resolve()));
@@ -1091,5 +1124,163 @@ test("rejects release and API marker commit-prefix mismatches in state and pendi
       assert.equal(calls, 0);
       assert.equal((await readFile(pendingPath, "utf8")).length > 0, true);
     });
+  });
+});
+
+
+test("an active owner refreshes its token-bound heartbeat and remains exclusive", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const clock = new FakeLockClock();
+    let resolveOwner!: (result: { stdout: string; stderr: string }) => void;
+    const blocked = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolveOwner = resolve; });
+    const owner = deployMiaobi({
+      runner: { async run() { return blocked; } },
+      gitCommit: COMMIT,
+      now: NOW,
+      lockClock: clock,
+    });
+    const ownerOutcome = owner.catch((error: unknown) => error as Error);
+    while (clock.timers.size === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clock.unrefCount, 1);
+    await clock.advance(LOCK_LEASE_MS + 10_000);
+    const lockPath = join(root, ".miaobi-recovery/deployment.lock");
+    for (let attempt = 0; attempt < 100 && (await stat(lockPath)).mtimeMs < clock.current - 1; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal((await stat(lockPath)).mtimeMs >= clock.current - 1, true);
+
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({
+        runner: { async run() { calls += 1; throw new Error("must not run"); } },
+        gitCommit: COMMIT,
+        now: NOW,
+        lockClock: clock,
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_STATE_LOCKED",
+    );
+    assert.equal(calls, 0);
+
+    resolveOwner({ stdout: "invalid", stderr: "" });
+    assert.ok((await ownerOutcome) instanceof Error);
+    assert.equal(clock.timers.size, 0);
+    await assert.rejects(readFile(join(root, ".miaobi-recovery/deployment.lock"), "utf8"));
+  });
+});
+
+test("a stopped heartbeat expires after the generous lease and can be recovered", { concurrency: false }, async () => {
+  await inFixture(async () => {
+    const clock = new FakeLockClock();
+    let resolveOwner!: (result: { stdout: string; stderr: string }) => void;
+    const blocked = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolveOwner = resolve; });
+    const owner = deployMiaobi({
+      runner: { async run() { return blocked; } },
+      gitCommit: COMMIT,
+      now: NOW,
+      lockClock: clock,
+    });
+    const ownerOutcome = owner.catch((error: unknown) => error as Error);
+    while (clock.timers.size === 0) await new Promise((resolve) => setImmediate(resolve));
+    clock.stop();
+    clock.current += LOCK_LEASE_MS + 10_000;
+    globalThis.fetch = async (input) => healthyResponse(
+      input,
+      "api-new",
+      "59a06b5c2c12-20260913164700",
+    );
+
+    const recovered = await deployMiaobi({
+      runner: fakeRunner([]),
+      gitCommit: COMMIT,
+      now: new Date("2026-09-13T16:47:00.000Z"),
+      lockClock: clock,
+    });
+    assert.equal(recovered.schemaVersion, 2);
+
+    resolveOwner({ stdout: "invalid", stderr: "" });
+    assert.ok((await ownerOutcome) instanceof Error);
+  });
+});
+
+test("different external and legacy pending records block every page action and remain intact", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const base = fakeRunner([]);
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(deployMiaobi({
+      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      gitCommit: COMMIT,
+      now: NOW,
+    }));
+    const externalPath = join(root, ".miaobi-recovery/deployment.pending.json");
+    const legacyPath = join(root, ".miaobi/deployment.pending.json");
+    const external = JSON.parse(await readFile(externalPath, "utf8"));
+    const legacy = structuredClone(external);
+    legacy.schemaVersion = 1;
+    delete legacy.apiBuildMarker;
+    legacy.deployment.schemaVersion = 1;
+    delete legacy.deployment.apiBuildMarker;
+    legacy.deployment.webFaasId = "web-other";
+    legacy.deployment.webFaasUrl = "https://magic.solutionsuite.cn/api/faas/web-other";
+    const otherPage = '<!doctype html><meta charset="utf-8"><script>location.replace("https://magic.solutionsuite.cn/api/faas/web-other")</script><a href="https://magic.solutionsuite.cn/api/faas/web-other">打开魔方简历</a>';
+    legacy.page.sha256 = createHash("sha256").update(otherPage).digest("hex");
+    await writeFile(legacyPath, JSON.stringify(legacy), { mode: 0o600 });
+    const externalBefore = await readFile(externalPath, "utf8");
+    const legacyBefore = await readFile(legacyPath, "utf8");
+
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({ runner: { async run() { calls += 1; throw new Error("must not run"); } }, gitCommit: COMMIT, now: NOW }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_RECOVERY_REQUIRED",
+    );
+    assert.equal(calls, 0);
+    assert.equal(await readFile(externalPath, "utf8"), externalBefore);
+    assert.equal(await readFile(legacyPath, "utf8"), legacyBefore);
+  });
+});
+
+test("identical external and legacy pending records reconcile once and clear both anchors", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const base = fakeRunner([]);
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(deployMiaobi({
+      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      gitCommit: COMMIT,
+      now: NOW,
+    }));
+    const externalPath = join(root, ".miaobi-recovery/deployment.pending.json");
+    const legacyPath = join(root, ".miaobi/deployment.pending.json");
+    const legacy = JSON.parse(await readFile(externalPath, "utf8"));
+    legacy.schemaVersion = 1;
+    delete legacy.apiBuildMarker;
+    legacy.deployment.schemaVersion = 1;
+    delete legacy.deployment.apiBuildMarker;
+    await writeFile(legacyPath, JSON.stringify(legacy), { mode: 0o600 });
+
+    const calls: string[][] = [];
+    const recovered = await deployMiaobi({
+      runner: {
+        async run(args) {
+          calls.push(args);
+          return {
+            stdout: JSON.stringify({ id: "vv6BtLE8MTR", html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR" }),
+            stderr: "",
+          };
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+    });
+    assert.equal(recovered.webFaasId, "web-new");
+    assert.equal(calls.filter((args) => args[0] === "page").length, 1);
+    await assert.rejects(readFile(externalPath, "utf8"));
+    await assert.rejects(readFile(legacyPath, "utf8"));
+
+    const nextEvents: string[] = [];
+    await assert.rejects(deployMiaobi({
+      runner: fakeRunner(nextEvents, "asset"),
+      gitCommit: COMMIT,
+      now: new Date("2026-09-13T16:47:00.000Z"),
+    }));
+    assert.deepEqual(nextEvents, ["asset"]);
   });
 });
