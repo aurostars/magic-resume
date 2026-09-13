@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -11,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { contentTypeFor, isRewritableTextAsset } from "./content-types";
 import {
   MagicBuilderError,
@@ -49,10 +51,20 @@ class InvalidPathError extends Error {
 type SourceAsset = {
   relativePath: string;
   sourcePath: string;
+  sourceDevice: number;
+  sourceInode: number;
   contentType: string;
 };
 
-type FinalAsset = SourceAsset & {
+type DirectoryIdentity = {
+  path: string;
+  device: number;
+  inode: number;
+};
+
+type FinalAsset = {
+  relativePath: string;
+  contentType: string;
   content: Buffer;
   contentHash: string;
 };
@@ -65,12 +77,39 @@ function shouldExclude(relativePath: string): boolean {
     segments.some((segment) => /(?:^|[.-])server(?:[.-]|$)/i.test(segment));
 }
 
-async function collectAssets(directory: string): Promise<SourceAsset[]> {
-  if ((await lstat(directory)).isSymbolicLink()) throw new InvalidPathError();
-  const root = await realpath(directory);
+async function rejectSymlinkPathComponents(path: string): Promise<void> {
+  const absolutePath = resolve(path);
+  const root = parse(absolutePath).root;
+  const components = relative(root, absolutePath).split(sep).filter(Boolean);
+  let current = root;
+  for (const component of components) {
+    current = join(current, component);
+    if ((await lstat(current)).isSymbolicLink()) throw new InvalidPathError();
+  }
+}
+
+async function collectAssets(directory: string): Promise<{
+  assets: SourceAsset[];
+  directories: DirectoryIdentity[];
+  root: string;
+}> {
+  const requestedRoot = resolve(directory);
+  await rejectSymlinkPathComponents(requestedRoot);
+  const root = await realpath(requestedRoot);
+  if (root !== requestedRoot) throw new InvalidPathError();
   const assets: SourceAsset[] = [];
+  const directories: DirectoryIdentity[] = [];
 
   async function visit(currentDirectory: string, prefix: string): Promise<void> {
+    const directoryMetadata = await lstat(currentDirectory);
+    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) {
+      throw new InvalidPathError();
+    }
+    directories.push({
+      path: currentDirectory,
+      device: directoryMetadata.dev,
+      inode: directoryMetadata.ino,
+    });
     const entries = await readdir(currentDirectory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
@@ -84,13 +123,70 @@ async function collectAssets(directory: string): Promise<SourceAsset[]> {
         await visit(entryPath, relativePath);
       } else if (metadata.isFile()) {
         const contentType = contentTypeFor(relativePath);
-        if (contentType) assets.push({ relativePath, sourcePath: entryPath, contentType });
+        if (contentType) {
+          assets.push({
+            relativePath,
+            sourcePath: entryPath,
+            sourceDevice: metadata.dev,
+            sourceInode: metadata.ino,
+            contentType,
+          });
+        }
       }
     }
   }
 
   await visit(root, "");
-  return assets;
+  return { assets, directories, root };
+}
+
+async function readTrustedAsset(asset: SourceAsset): Promise<Buffer> {
+  let handle;
+  try {
+    handle = await open(asset.sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
+    if (
+      !metadata.isFile() ||
+      metadata.dev !== asset.sourceDevice ||
+      metadata.ino !== asset.sourceInode
+    ) {
+      throw new InvalidPathError();
+    }
+    return await handle.readFile();
+  } catch (error) {
+    if (error instanceof InvalidPathError) throw error;
+    throw new InvalidPathError();
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function snapshotAssets(directory: string): Promise<{
+  assets: FinalAsset[];
+  root: string;
+}> {
+  const collected = await collectAssets(directory);
+  const snapshots: FinalAsset[] = [];
+  for (const asset of collected.assets) {
+    snapshots.push({
+      relativePath: asset.relativePath,
+      contentType: asset.contentType,
+      content: await readTrustedAsset(asset),
+      contentHash: "",
+    });
+  }
+  for (const directoryIdentity of collected.directories) {
+    const metadata = await lstat(directoryIdentity.path);
+    if (
+      metadata.isSymbolicLink() ||
+      !metadata.isDirectory() ||
+      metadata.dev !== directoryIdentity.device ||
+      metadata.ino !== directoryIdentity.inode
+    ) {
+      throw new InvalidPathError();
+    }
+  }
+  return { assets: snapshots, root: collected.root };
 }
 
 function parseHttpsUrl(value: string): URL {
@@ -110,12 +206,26 @@ function parseHttpsUrl(value: string): URL {
   return parsed;
 }
 
-function deriveReleaseBaseUrl(markerUrl: string, markerKey: string): string {
-  const parsed = parseHttpsUrl(markerUrl);
-  if (!parsed.pathname.endsWith(`/${markerKey}`)) {
+function validateUploadedUrl(
+  value: string,
+  key: string,
+  expectedOrigin?: string,
+): URL {
+  const parsed = parseHttpsUrl(value);
+  const expectedPath = new URL(`/${key}`, parsed.origin).pathname;
+  if (
+    parsed.pathname !== expectedPath ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    (expectedOrigin !== undefined && parsed.origin !== expectedOrigin)
+  ) {
     throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
   }
-  return new URL(".", parsed).toString();
+  return parsed;
+}
+
+function deriveReleaseBaseUrl(markerUrl: string, markerKey: string): string {
+  return new URL(".", validateUploadedUrl(markerUrl, markerKey)).toString();
 }
 
 async function upload(
@@ -125,16 +235,94 @@ async function upload(
   contentType: string,
 ): Promise<{ id: string; url: string }> {
   return runMagicBuilderJson(runner, [
-    "tos",
+    "file",
     "upload",
-    "--file",
     filePath,
     "--key",
     key,
     "--content-type",
     contentType,
-    "--json",
+    "--format",
+    "json",
+    "--quiet",
   ]);
+}
+
+function codedError(code: string): Error & { code: string } {
+  const error = new Error(code) as Error & { code: string };
+  error.code = code;
+  return error;
+}
+
+async function updateReleaseState(
+  stateDirectory: string,
+  releaseId: string,
+  status: "reserved" | "published",
+): Promise<void> {
+  const lockPath = join(stateDirectory, "state.lock");
+  try {
+    await mkdir(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw codedError("MIAOBI_STATE_LOCKED");
+    }
+    throw error;
+  }
+
+  try {
+    const statePath = join(stateDirectory, "state.json");
+    let state: {
+      schemaVersion: 1;
+      releases: Record<string, { status: "reserved" | "published" }>;
+    } = { schemaVersion: 1, releases: {} };
+    try {
+      state = JSON.parse(await readFile(statePath, "utf8")) as typeof state;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    state.releases[releaseId] = { status };
+    await writeJsonAtomically(statePath, state);
+  } finally {
+    await rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+async function ensureLocalDirectory(path: string): Promise<DirectoryIdentity> {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const metadata = await lstat(path);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new InvalidPathError();
+  }
+  return { path, device: metadata.dev, inode: metadata.ino };
+}
+
+async function reserveRelease(trustedRoot: string, releaseId: string): Promise<string> {
+  const stateDirectory = resolve(trustedRoot, "../../..", ".miaobi");
+  const stateIdentity = await ensureLocalDirectory(stateDirectory);
+  const reservationsDirectory = join(stateDirectory, "reservations");
+  await ensureLocalDirectory(reservationsDirectory);
+  try {
+    await mkdir(join(reservationsDirectory, releaseId), { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw codedError("MIAOBI_RELEASE_RESERVED");
+    }
+    throw error;
+  }
+  const currentStateMetadata = await lstat(stateDirectory);
+  if (
+    currentStateMetadata.isSymbolicLink() ||
+    currentStateMetadata.dev !== stateIdentity.device ||
+    currentStateMetadata.ino !== stateIdentity.inode
+  ) {
+    throw new InvalidPathError();
+  }
+  await updateReleaseState(stateDirectory, releaseId, "reserved");
+  return stateDirectory;
 }
 
 async function writeJsonAtomically(path: string, value: unknown): Promise<void> {
@@ -156,13 +344,22 @@ export async function publishAssets(input: {
   releaseId: string;
   runner: MagicBuilderRunner;
 }): Promise<MiaobiAssetManifest> {
+  if (input.runner.guaranteesCreateOnly !== true) {
+    const error = new Error("MIAOBI_IMMUTABILITY_UNCONFIRMED") as Error & {
+      code: string;
+    };
+    error.code = "MIAOBI_IMMUTABILITY_UNCONFIRMED";
+    throw error;
+  }
   if (!RELEASE_ID_PATTERN.test(input.releaseId)) throw new InvalidPathError();
 
-  const assets = await collectAssets(input.directory);
+  const snapshot = await snapshotAssets(input.directory);
+  const assets = snapshot.assets;
+  const stateDirectory = await reserveRelease(snapshot.root, input.releaseId);
   const workingDirectory = await mkdtemp(join(tmpdir(), "miaobi-publish-"));
   const releasePrefix = `${RELEASE_PREFIX}/${input.releaseId}`;
   const markerKey = `${releasePrefix}/release.json`;
-  const manifestPath = resolve(input.directory, "..", "asset-manifest.json");
+  const manifestPath = resolve(snapshot.root, "..", "asset-manifest.json");
 
   try {
     const markerPath = join(workingDirectory, "release.json");
@@ -181,12 +378,12 @@ export async function publishAssets(input: {
 
     const finalAssets: FinalAsset[] = [];
     for (const asset of assets) {
-      const source = await readFile(asset.sourcePath);
       const content = isRewritableTextAsset(asset.relativePath)
-        ? Buffer.from(source.toString("utf8").replaceAll(PLACEHOLDER, baseUrl), "utf8")
-        : source;
+        ? Buffer.from(asset.content.toString("utf8").replaceAll(PLACEHOLDER, baseUrl), "utf8")
+        : asset.content;
       finalAssets.push({
-        ...asset,
+        relativePath: asset.relativePath,
+        contentType: asset.contentType,
         content,
         contentHash: createHash("sha256").update(content).digest("hex"),
       });
@@ -213,7 +410,7 @@ export async function publishAssets(input: {
           if (error instanceof MagicBuilderError) throw error;
           throw new MagicBuilderError("MIAOBI_CLI_FAILED");
         }
-        parseHttpsUrl(response.url);
+        validateUploadedUrl(response.url, key, new URL(baseUrl).origin);
         destination = { key, url: response.url };
         uploaded.set(duplicateKey, destination);
       }
@@ -234,6 +431,7 @@ export async function publishAssets(input: {
       files: records,
     };
     await writeJsonAtomically(manifestPath, manifest);
+    await updateReleaseState(stateDirectory, input.releaseId, "published");
     return manifest;
   } finally {
     await rm(workingDirectory, { recursive: true, force: true });

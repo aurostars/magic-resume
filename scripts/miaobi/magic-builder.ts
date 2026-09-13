@@ -16,14 +16,50 @@ export class MagicBuilderError extends Error {
   }
 }
 
-export function createMagicBuilderRunner(options: {
+export interface MagicBuilderRunnerOptions {
   command?: string;
-} = {}): MagicBuilderRunner {
+  authEnv?: Readonly<{
+    MAGIC_TOKEN?: string;
+    MAGIC_BASE_URL?: string;
+  }>;
+}
+
+function minimalSpawnEnv(
+  authEnv: MagicBuilderRunnerOptions["authEnv"] = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SystemRoot",
+    "COMSPEC",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+  ] as const) {
+    const value = process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  if (authEnv.MAGIC_TOKEN !== undefined) env.MAGIC_TOKEN = authEnv.MAGIC_TOKEN;
+  if (authEnv.MAGIC_BASE_URL !== undefined) {
+    env.MAGIC_BASE_URL = authEnv.MAGIC_BASE_URL;
+  }
+  return env;
+}
+
+export function createMagicBuilderRunner(
+  options: MagicBuilderRunnerOptions = {},
+): MagicBuilderRunner {
   const command = options.command ?? "magic-builder";
   return {
+    guaranteesCreateOnly: false,
     run(args) {
       return new Promise((resolve, reject) => {
         const child = spawn(command, args, {
+          env: minimalSpawnEnv(options.authEnv),
           shell: false,
           stdio: ["ignore", "pipe", "pipe"],
         });
@@ -53,15 +89,17 @@ export function createMagicBuilderRunner(options: {
   };
 }
 
-function firstJsonObject(output: string): unknown {
-  const start = output.indexOf("{");
-  if (start < 0) throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+function parseSingleJsonObject(output: string): unknown {
+  const normalized = output.replace(/^\uFEFF/, "").trimStart();
+  if (!normalized.startsWith("{")) {
+    throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+  }
 
   let depth = 0;
   let quoted = false;
   let escaped = false;
-  for (let index = start; index < output.length; index += 1) {
-    const character = output[index];
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index];
     if (quoted) {
       if (escaped) escaped = false;
       else if (character === "\\") escaped = true;
@@ -71,8 +109,18 @@ function firstJsonObject(output: string): unknown {
     if (character === '"') quoted = true;
     else if (character === "{") depth += 1;
     else if (character === "}" && --depth === 0) {
+      const tail = normalized.slice(index + 1).trim();
+      if (
+        /[{}\[\]]/.test(tail) ||
+        /^(?:"|-?\d|true\b|false\b|null\b)/.test(tail)
+      ) {
+        throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+      }
+      if (/(?:fail(?:ed|ure)?|error|denied|unauthori[sz]ed)/i.test(tail)) {
+        throw new MagicBuilderError("MIAOBI_CLI_FAILED");
+      }
       try {
-        return JSON.parse(output.slice(start, index + 1));
+        return JSON.parse(normalized.slice(0, index + 1));
       } catch {
         throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
       }
@@ -93,7 +141,7 @@ export async function runMagicBuilderJson(
     throw new MagicBuilderError("MIAOBI_CLI_FAILED");
   }
 
-  const parsed = firstJsonObject(result.stdout);
+  const parsed = parseSingleJsonObject(result.stdout);
   if (
     typeof parsed !== "object" ||
     parsed === null ||

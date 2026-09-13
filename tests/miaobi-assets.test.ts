@@ -5,6 +5,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -37,16 +39,16 @@ function fakeRunner(options: { failAt?: number } = {}): {
   return {
     uploads,
     runner: {
+      guaranteesCreateOnly: true,
       async run(args) {
         const keyIndex = args.indexOf("--key");
         const typeIndex = args.indexOf("--content-type");
-        const fileIndex = args.indexOf("--file");
+        assert.deepEqual(args.slice(0, 2), ["file", "upload"]);
         assert.notEqual(keyIndex, -1);
         assert.notEqual(typeIndex, -1);
-        assert.notEqual(fileIndex, -1);
         const key = args[keyIndex + 1];
         const contentType = args[typeIndex + 1];
-        const content = await readFile(args[fileIndex + 1]);
+        const content = await readFile(args[2]);
         uploads.push({ args, key, contentType, content });
         if (uploads.length === options.failAt) throw new Error("token=do-not-leak");
         return {
@@ -62,11 +64,148 @@ function fakeRunner(options: { failAt?: number } = {}): {
 }
 
 async function fixture(): Promise<{ root: string; directory: string }> {
-  const root = await mkdtemp(join(tmpdir(), "miaobi-assets-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "miaobi-assets-")));
   const directory = join(root, "dist", "miaobi", "client");
   await mkdir(directory, { recursive: true });
   return { root, directory };
 }
+
+test("fails closed before upload when the runner cannot prove create-only writes", async () => {
+  const { root, directory } = await fixture();
+  let calls = 0;
+  const runner: MagicBuilderRunner = {
+    async run() {
+      calls += 1;
+      return { stdout: JSON.stringify({ id: "unexpected", url: RELEASE_BASE }), stderr: "" };
+    },
+  };
+  await writeFile(join(directory, "app.js"), "app");
+  try {
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      { code: "MIAOBI_IMMUTABILITY_UNCONFIRMED" },
+    );
+    assert.equal(calls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("uses the documented magic-builder 1.3.0 file upload argument contract", async () => {
+  const { root, directory } = await fixture();
+  const calls: string[][] = [];
+  const runner: MagicBuilderRunner = {
+    guaranteesCreateOnly: true,
+    async run(args) {
+      calls.push(args);
+      const key = args[args.indexOf("--key") + 1];
+      return {
+        stdout: JSON.stringify({
+          id: `upload-${calls.length}`,
+          url: `https://assets.example.test/${key}`,
+        }),
+        stderr: "",
+      };
+    },
+  };
+  await writeFile(join(directory, "app.js"), "app");
+  try {
+    await publishAssets({ directory, releaseId: RELEASE_ID, runner });
+    assert.deepEqual(calls[0].slice(0, 3), ["file", "upload", calls[0][2]]);
+    assert.equal(calls[0][2].endsWith("release.json"), true);
+    assert.deepEqual(calls[0].slice(3), [
+      "--key",
+      `magic-resume/releases/${RELEASE_ID}/release.json`,
+      "--content-type",
+      "application/json; charset=utf-8",
+      "--format",
+      "json",
+      "--quiet",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a symlinked local state directory before upload", async () => {
+  const { root, directory } = await fixture();
+  const outside = join(root, "outside-state");
+  const { runner, uploads } = fakeRunner();
+  await mkdir(outside);
+  await symlink(outside, join(root, ".miaobi"));
+  await writeFile(join(directory, "app.js"), "app");
+  try {
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      { code: "MIAOBI_INVALID_PATH" },
+    );
+    assert.equal(uploads.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reserves a release ID locally so a retry cannot upload again", async () => {
+  const { root, directory } = await fixture();
+  const { runner, uploads } = fakeRunner();
+  await writeFile(join(directory, "app.js"), "app");
+  try {
+    await publishAssets({ directory, releaseId: RELEASE_ID, runner });
+    const uploadCount = uploads.length;
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      { code: "MIAOBI_RELEASE_RESERVED" },
+    );
+    assert.equal(uploads.length, uploadCount);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("atomically rejects a concurrent publication with the same release ID", async () => {
+  const { root, directory } = await fixture();
+  await writeFile(join(directory, "app.js"), "app");
+  let releaseFirstUpload!: () => void;
+  let markFirstUploadStarted!: () => void;
+  const firstUploadStarted = new Promise<void>((resolve) => {
+    markFirstUploadStarted = resolve;
+  });
+  const firstUploadGate = new Promise<void>((resolve) => {
+    releaseFirstUpload = resolve;
+  });
+  let calls = 0;
+  const runner: MagicBuilderRunner = {
+    guaranteesCreateOnly: true,
+    async run(args) {
+      calls += 1;
+      if (calls === 1) {
+        markFirstUploadStarted();
+        await firstUploadGate;
+      }
+      const key = args[args.indexOf("--key") + 1];
+      return {
+        stdout: JSON.stringify({
+          id: `upload-${calls}`,
+          url: `https://assets.example.test/${key}`,
+        }),
+        stderr: "",
+      };
+    },
+  };
+
+  const first = publishAssets({ directory, releaseId: RELEASE_ID, runner });
+  try {
+    await firstUploadStarted;
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      { code: "MIAOBI_RELEASE_RESERVED" },
+    );
+  } finally {
+    releaseFirstUpload();
+    await first;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("builds a release ID from 12 hexadecimal commit characters and UTC time", () => {
   assert.equal(
@@ -106,6 +245,31 @@ test("rejects a symlink whose target is outside the publication root", async () 
   try {
     await assert.rejects(
       publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      (error: unknown) =>
+        (error as { code?: string }).code === "MIAOBI_INVALID_PATH",
+    );
+    assert.equal(uploads.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a symlink in an ancestor of the publication root", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "miaobi-ancestor-")));
+  const actualParent = join(root, "actual-project");
+  const linkedParent = join(root, "linked-project");
+  const directory = join(actualParent, "dist", "miaobi", "client");
+  const { runner, uploads } = fakeRunner();
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "app.js"), "safe");
+  await symlink(actualParent, linkedParent);
+  try {
+    await assert.rejects(
+      publishAssets({
+        directory: join(linkedParent, "dist", "miaobi", "client"),
+        releaseId: RELEASE_ID,
+        runner,
+      }),
       (error: unknown) =>
         (error as { code?: string }).code === "MIAOBI_INVALID_PATH",
     );
@@ -164,6 +328,54 @@ test("does not let a symlink expose an excluded dotfile", async () => {
         (error as { code?: string }).code === "MIAOBI_INVALID_PATH",
     );
     assert.equal(uploads.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("uses a trusted pre-upload snapshot when a directory is replaced during marker upload", async () => {
+  const { root, directory } = await fixture();
+  const assetDirectory = join(directory, "assets");
+  const replacementDirectory = join(root, "replacement-assets");
+  const movedDirectory = join(root, "moved-assets");
+  const uploads: Upload[] = [];
+  await mkdir(assetDirectory);
+  await mkdir(replacementDirectory);
+  await writeFile(join(assetDirectory, "app.js"), "public-bytes");
+  await writeFile(join(replacementDirectory, "app.js"), "root-secret");
+  const runner: MagicBuilderRunner = {
+    guaranteesCreateOnly: true,
+    async run(args) {
+      const key = args[args.indexOf("--key") + 1];
+      const contentType = args[args.indexOf("--content-type") + 1];
+      const content = await readFile(args[2]);
+      uploads.push({ args, key, contentType, content });
+      if (uploads.length === 1) {
+        await rename(assetDirectory, movedDirectory);
+        await rename(replacementDirectory, assetDirectory);
+      }
+      return {
+        stdout: JSON.stringify({
+          id: `upload-${uploads.length}`,
+          url: `https://assets.example.test/${key}`,
+        }),
+        stderr: "",
+      };
+    },
+  };
+
+  try {
+    const manifest = await publishAssets({ directory, releaseId: RELEASE_ID, runner });
+    assert.equal(uploads.length, 2, "marker and snapshotted asset reach the runner");
+    const assetUpload = uploads.find((upload) => upload.key.endsWith("/assets/app.js"));
+    assert.ok(assetUpload);
+    assert.equal(assetUpload.content.toString("utf8"), "public-bytes");
+    assert.equal(manifest.files["assets/app.js"].contentHash,
+      createHash("sha256").update("public-bytes").digest("hex"));
+    assert.equal(
+      uploads.some((upload) => upload.content.includes(Buffer.from("root-secret"))),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -263,10 +475,82 @@ test("does not create a manifest when an asset upload fails", async () => {
   }
 });
 
+test("rejects marker URLs that are not the exact clean requested key", async () => {
+  const invalidUrls = [
+    `https://assets.example.test/extra/magic-resume/releases/${RELEASE_ID}/release.json`,
+    `https://assets.example.test/magic-resume/releases/${RELEASE_ID}/release.json?token=secret`,
+    `https://assets.example.test/magic-resume/releases/${RELEASE_ID}/release.json#fragment`,
+    `https://user:password@assets.example.test/magic-resume/releases/${RELEASE_ID}/release.json`,
+  ];
+
+  for (const markerUrl of invalidUrls) {
+    const { root, directory } = await fixture();
+    const runner: MagicBuilderRunner = {
+      guaranteesCreateOnly: true,
+      async run() {
+        return {
+          stdout: JSON.stringify({ id: "marker", url: markerUrl }),
+          stderr: "",
+        };
+      },
+    };
+    try {
+      await assert.rejects(
+        publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+        { code: "MIAOBI_INVALID_RESPONSE" },
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("rejects asset URLs outside the exact marker origin and requested key", async () => {
+  const invalidAssetUrls = [
+    `https://other.example.test/magic-resume/releases/${RELEASE_ID}/app.js`,
+    `https://assets.example.test/extra/magic-resume/releases/${RELEASE_ID}/app.js`,
+    `https://assets.example.test/magic-resume/releases/${RELEASE_ID}/other.js`,
+    `https://user:password@assets.example.test/magic-resume/releases/${RELEASE_ID}/app.js`,
+    `https://assets.example.test/magic-resume/releases/${RELEASE_ID}/app.js?token=secret`,
+    `https://assets.example.test/magic-resume/releases/${RELEASE_ID}/app.js#fragment`,
+  ];
+
+  for (const assetUrl of invalidAssetUrls) {
+    const { root, directory } = await fixture();
+    let calls = 0;
+    const runner: MagicBuilderRunner = {
+      guaranteesCreateOnly: true,
+      async run(args) {
+        calls += 1;
+        const key = args[args.indexOf("--key") + 1];
+        return {
+          stdout: JSON.stringify({
+            id: `upload-${calls}`,
+            url: calls === 1
+              ? `https://assets.example.test/${key}`
+              : assetUrl,
+          }),
+          stderr: "",
+        };
+      },
+    };
+    await writeFile(join(directory, "app.js"), "app");
+    try {
+      await assert.rejects(
+        publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+        { code: "MIAOBI_INVALID_RESPONSE" },
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("rejects a non-HTTPS asset URL instead of persisting it", async () => {
   const { root, directory } = await fixture();
   let calls = 0;
   const runner: MagicBuilderRunner = {
+    guaranteesCreateOnly: true,
     async run(args) {
       calls += 1;
       const key = args[args.indexOf("--key") + 1];
