@@ -194,7 +194,7 @@ const isGlobalSettings = (value: unknown): boolean => {
   );
 };
 
-const isResumeData = (value: unknown): value is ResumeData =>
+export const isResumeData = (value: unknown): value is ResumeData =>
   isRecord(value) &&
   hasOnlyKeys(value, [
     "id", "title", "createdAt", "updatedAt", "templateId", "basic", "education",
@@ -222,7 +222,7 @@ const isResumeData = (value: unknown): value is ResumeData =>
   isArrayOf(value.menuSections, isMenuSection) &&
   isGlobalSettings(value.globalSettings);
 
-const canonicalizeValue = (value: unknown): unknown => {
+export const canonicalizeValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalizeValue);
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
@@ -232,6 +232,23 @@ const canonicalizeValue = (value: unknown): unknown => {
     );
   }
   return value;
+};
+
+export function assertResumeData(value: unknown): asserts value is ResumeData {
+  if (!isResumeData(value)) {
+    throw new SnapshotValidationError("SNAPSHOT_RESUME");
+  }
+}
+
+export const stableStringify = (value: unknown): string =>
+  JSON.stringify(canonicalizeValue(value));
+
+export const sha256 = async (value: string): Promise<string> => {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
 };
 
 export const normalizeSyncData = (data: ResumeSyncData): ResumeSyncData => {
@@ -245,17 +262,11 @@ export const normalizeSyncData = (data: ResumeSyncData): ResumeSyncData => {
 };
 
 export const canonicalizeSyncData = (data: ResumeSyncData): string =>
-  JSON.stringify(canonicalizeValue(normalizeSyncData(data)));
+  stableStringify(normalizeSyncData(data));
 
 export const calculateContentHash = async (
   data: ResumeSyncData,
-): Promise<string> => {
-  const bytes = new TextEncoder().encode(canonicalizeSyncData(data));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-};
+): Promise<string> => sha256(canonicalizeSyncData(data));
 
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
