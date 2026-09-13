@@ -173,6 +173,14 @@ export const createWebDavStore = (
           storage ??
           createJSONStorage<PersistedWebDavState>(() => localStorage),
         partialize: selectPersistedWebDavState,
+        merge: (persistedState, currentState) => {
+          const persisted = persistedState as Partial<PersistedWebDavState>;
+          return {
+            ...currentState,
+            settings: persisted.settings ?? currentState.settings,
+            deviceId: persisted.deviceId ?? currentState.deviceId,
+          };
+        },
       },
     ),
   );

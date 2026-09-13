@@ -409,6 +409,7 @@ export const useResumeStore = create(
         const resumes = Object.fromEntries(
           normalized.resumes.map((resume) => [resume.id, resume])
         );
+        let didSetGuard = false;
         try {
           set((state) => {
             const currentToken = canonicalizeSyncData({
@@ -418,6 +419,7 @@ export const useResumeStore = create(
             if (currentToken !== expectedLocalToken) {
               throw LOCAL_TOKEN_MISMATCH;
             }
+            didSetGuard = !state._isApplyingSyncSnapshot;
             clearAllHistoryGroups([
               ...Object.keys(state.resumes),
               ...Object.keys(resumes),
@@ -438,7 +440,7 @@ export const useResumeStore = create(
           if (error === LOCAL_TOKEN_MISMATCH) return false;
           throw error;
         } finally {
-          if (get()._isApplyingSyncSnapshot) {
+          if (didSetGuard) {
             set({ _isApplyingSyncSnapshot: false });
           }
         }

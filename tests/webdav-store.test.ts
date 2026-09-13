@@ -103,6 +103,44 @@ test("credentials, settings, and device ID are persisted and rehydrated without 
   assert.deepEqual(selectPersistedWebDavState(restored.getState()), stored?.state);
 });
 
+test("legacy aggregate baseline is discarded while settings and device ID rehydrate", async () => {
+  useResumeStore.setState({ webDavBaseline: null });
+  const resumeStateBefore = useResumeStore.getState();
+  const legacy = memoryStorage({
+    state: {
+      settings: {
+        baseUrl: "https://legacy.example.test",
+        username: "dongxing.123",
+        password: "legacy-secret",
+        remoteDirectory: "/legacy/",
+        autoSyncEnabled: true,
+      },
+      deviceId: "legacy-device",
+      baseline: {
+        revision: "aggregate-revision",
+        contentHash: "f".repeat(64),
+        syncedAt: "2026-09-12T12:00:00.000Z",
+      },
+    } as PersistedWebDavState,
+    version: 0,
+  });
+  const store = createWebDavStore(legacy.storage);
+
+  await store.persist.rehydrate();
+
+  assert.deepEqual(store.getState().settings, {
+    baseUrl: "https://legacy.example.test",
+    username: "dongxing.123",
+    password: "legacy-secret",
+    remoteDirectory: "/legacy/",
+    autoSyncEnabled: true,
+  });
+  assert.equal(store.getState().deviceId, "legacy-device");
+  assert.equal("baseline" in store.getState(), false);
+  assert.equal(useResumeStore.getState(), resumeStateBefore);
+  assert.equal(useResumeStore.getState().getWebDavBaseline(), null);
+});
+
 test("persisted WebDAV state excludes all runtime state", () => {
   const partial = selectPersistedWebDavState({
     ...createDefaultWebDavState("device-1"),

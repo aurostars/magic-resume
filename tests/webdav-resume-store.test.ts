@@ -321,6 +321,7 @@ test("commitWebDavSync token mismatch returns false with zero mutation", () => {
     history: { local: [structuredClone(local)] },
     future: { local: [structuredClone(local)] },
     webDavBaseline: oldBaseline,
+    _isApplyingSyncSnapshot: true,
   });
   const before = useResumeStore.getState();
   const originalOptions = useResumeStore.persist.getOptions();
@@ -346,6 +347,7 @@ test("commitWebDavSync token mismatch returns false with zero mutation", () => {
     assert.equal(committed, false);
     assert.equal(after, before);
     assert.equal(after.webDavBaseline, oldBaseline);
+    assert.equal(after._isApplyingSyncSnapshot, true);
     assert.equal(notifications, 0);
     assert.equal(persistedWrites, 0);
     assert.equal(shouldPushHistoryEntry("local", "title"), true);
