@@ -9,6 +9,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -523,6 +524,34 @@ test("does not commit the manifest when final state preparation fails", async ()
     );
     await assert.rejects(access(manifestPath), (error: unknown) =>
       (error as NodeJS.ErrnoException).code === "ENOENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("leaves state staged when the final manifest rename fails", async () => {
+  const { root, directory } = await fixture();
+  const { runner } = fakeRunner();
+  await writeFile(join(directory, "app.js"), "app");
+  const manifestPath = join(dirname(directory), "asset-manifest.json");
+  const oldContentPath = join(manifestPath, "old-manifest.json");
+  await mkdir(manifestPath);
+  await writeFile(oldContentPath, "old-manifest");
+
+  try {
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      (error: unknown) =>
+        ["EISDIR", "ENOTDIR", "ENOTEMPTY"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        ),
+    );
+    assert.equal((await stat(manifestPath)).isDirectory(), true);
+    assert.equal(await readFile(oldContentPath, "utf8"), "old-manifest");
+    const state = JSON.parse(
+      await readFile(join(root, ".miaobi", "state.json"), "utf8"),
+    ) as { releases: Record<string, { status: string }> };
+    assert.equal(state.releases[RELEASE_ID].status, "manifest-staged");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -257,7 +257,7 @@ function codedError(code: string): Error & { code: string } {
 async function updateReleaseState(
   stateDirectory: string,
   releaseId: string,
-  status: "reserved" | "manifest-ready",
+  status: "reserved" | "manifest-staged" | "manifest-ready",
 ): Promise<void> {
   const lockPath = join(stateDirectory, "state.lock");
   try {
@@ -273,7 +273,9 @@ async function updateReleaseState(
     const statePath = join(stateDirectory, "state.json");
     let state: {
       schemaVersion: 1;
-      releases: Record<string, { status: "reserved" | "manifest-ready" }>;
+      releases: Record<string, {
+        status: "reserved" | "manifest-staged" | "manifest-ready";
+      }>;
     } = { schemaVersion: 1, releases: {} };
     try {
       state = JSON.parse(await readFile(statePath, "utf8")) as typeof state;
@@ -433,12 +435,16 @@ export async function publishAssets(input: {
     };
     const stagedManifestPath = await stageJson(manifestPath, manifest);
     try {
-      await updateReleaseState(stateDirectory, input.releaseId, "manifest-ready");
+      await updateReleaseState(stateDirectory, input.releaseId, "manifest-staged");
       await rename(stagedManifestPath, manifestPath);
     } catch (error) {
       await rm(stagedManifestPath, { force: true }).catch(() => undefined);
       throw error;
     }
+    // The manifest rename is authoritative. State is only a recovery hint, so a
+    // failed best-effort promotion must not turn a committed release into failure.
+    await updateReleaseState(stateDirectory, input.releaseId, "manifest-ready")
+      .catch(() => undefined);
     return manifest;
   } finally {
     await rm(workingDirectory, { recursive: true, force: true }).catch(() => undefined);
