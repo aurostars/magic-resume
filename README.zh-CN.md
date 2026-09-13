@@ -69,11 +69,23 @@ pnpm dev
 
 打开**设置 → WebDAV 同步**，填写 WebDAV 服务器 URL、用户名和密码。远程目录可配置，默认为 `/magic-resume/`。选择**立即同步**可手动同步，也可启用可选的自动同步，在本地内容变更后以及应用回到前台时进行同步。
 
+每份简历分别存储在配置的远程根目录下：
+
+```text
+<remote-root>/
+├── manifest.json
+├── objects/<full-resume-id>/<content-hash>.json
+├── resumes/<safe-title>--<short-id>.json
+└── trash/<safe-title>--<short-id>.json
+```
+
+`resumes/` 和 `trash/` 中的文件与手动导出格式一致，可以逐个导入。`objects/` 是不可变的事实来源，易读的简历与回收站文件则是镜像。
+
 如果本地副本和云端副本自上次成功同步后都发生了变化，应用会报告冲突，并让你明确选择**使用本地版本**（上传本地副本）或**使用云端版本**（替换本地数据）。Magic Resume 不会自动合并单份简历。
 
-浏览器会直接连接 WebDAV 服务器；简历数据和凭据不会经过 Magic Resume 应用服务器。因此，WebDAV 服务器必须通过 CORS 允许来自 Magic Resume 来源的浏览器请求，包括应用使用的 WebDAV 方法和请求头。当应用通过 HTTPS 提供服务时，请使用 HTTPS WebDAV 端点；只有在 localhost 本地开发期间才支持纯 HTTP。
+浏览器会直接连接 WebDAV 服务器；简历数据和凭据不会经过 Magic Resume 应用服务器。远程文件是明文 JSON，传输过程由 HTTPS 保护，Magic Resume 不提供静态加密。因此，WebDAV 服务器必须通过 CORS 允许来自 Magic Resume 来源的浏览器请求，包括应用使用的 WebDAV 方法和请求头。当应用通过 HTTPS 提供服务时，请使用 HTTPS WebDAV 端点；只有在 localhost 本地开发期间才支持纯 HTTP。
 
-WebDAV 设置和凭据会存储在此浏览器的本地存储中。同一浏览器配置中的其他脚本、扩展程序或用户可能读取这些信息。建议使用仅限所配置目录、遵循最小权限原则的专用 WebDAV 账号，并避免在共享或不受信任的设备上启用同步。
+WebDAV 设置和凭据会存储在此浏览器的本地存储中。同一浏览器配置中的其他脚本、扩展程序或用户可能读取这些信息。建议使用仅限所配置目录、遵循最小权限原则的专用 WebDAV 账号，并避免在共享或不受信任的设备上启用同步。清除已保存的凭据只会断开此浏览器的连接，不会删除任何远程文件。
 
 ## 📦 构建打包
 
