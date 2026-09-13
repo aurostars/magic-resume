@@ -55,7 +55,6 @@ export function createMagicBuilderRunner(
 ): MagicBuilderRunner {
   const command = options.command ?? "magic-builder";
   return {
-    guaranteesCreateOnly: false,
     run(args) {
       return new Promise((resolve, reject) => {
         const child = spawn(command, args, {
@@ -116,7 +115,8 @@ function parseSingleJsonObject(output: string): unknown {
       ) {
         throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
       }
-      if (/(?:fail(?:ed|ure)?|error|denied|unauthori[sz]ed)/i.test(tail)) {
+      const failureStatus = tail.replace(/\b0\s+errors?\b/gi, "");
+      if (/(?:fail(?:ed|ure)?|error|denied|unauthori[sz]ed)/i.test(failureStatus)) {
         throw new MagicBuilderError("MIAOBI_CLI_FAILED");
       }
       try {

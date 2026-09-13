@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -73,6 +73,20 @@ test("rejects a failure status after an otherwise valid JSON object", async () =
     ),
     { code: "MIAOBI_CLI_FAILED" },
   );
+});
+
+test("accepts a successful zero-errors status tail", async () => {
+  const result = await runMagicBuilderJson(
+    {
+      run: async () => ({
+        stdout: `${JSON.stringify(expectedResult)}\nCompleted with 0 errors`,
+        stderr: "",
+      }),
+    },
+    ["file", "upload"],
+  );
+
+  assert.deepEqual(result, expectedResult);
 });
 
 test("parses JSON before a human-readable status line", async () => {
@@ -176,27 +190,68 @@ test("discards token-like fields from malformed response errors", async () => {
   );
 });
 
-test("passes only minimal runtime variables plus explicitly injected auth env", async () => {
+test("preserves HOME and explicit auth without passing ambient secrets", async () => {
   const directory = await mkdtemp(join(tmpdir(), "magic-builder-env-"));
   const command = join(directory, "fake-magic-builder");
-  const previous = process.env.SECRET_SHOULD_NOT_LEAK;
-  process.env.SECRET_SHOULD_NOT_LEAK = "host-secret";
+  const previous = {
+    HOME: process.env.HOME,
+    AIME_USER_CLOUD_JWT: process.env.AIME_USER_CLOUD_JWT,
+    SECRET_SHOULD_NOT_LEAK: process.env.SECRET_SHOULD_NOT_LEAK,
+  };
+  process.env.HOME = directory;
+  process.env.AIME_USER_CLOUD_JWT = "ambient-aime-value";
+  process.env.SECRET_SHOULD_NOT_LEAK = "ambient-other-value";
   await writeFile(
     command,
-    "#!/bin/sh\nprintf '{\"id\":\"%s:%s\",\"url\":\"https://assets.example.test/file\"}' \"${MAGIC_TOKEN-unset}\" \"${SECRET_SHOULD_NOT_LEAK-unset}\"\n",
+    "#!/bin/sh\nprintf '{\"id\":\"%s|%s|%s|%s|%s\",\"url\":\"https://assets.example.test/file\"}' \"${MAGIC_TOKEN-unset}\" \"${MAGIC_BASE_URL-unset}\" \"${HOME-unset}\" \"${AIME_USER_CLOUD_JWT-unset}\" \"${SECRET_SHOULD_NOT_LEAK-unset}\"\n",
   );
   await chmod(command, 0o700);
 
   try {
     const runner = createMagicBuilderRunner({
       command,
-      authEnv: { MAGIC_TOKEN: "injected-token" },
+      authEnv: {
+        MAGIC_TOKEN: "explicit-token",
+        MAGIC_BASE_URL: "https://magic.example.test",
+      },
     });
     const response = await runMagicBuilderJson(runner, []);
-    assert.equal(response.id, "injected-token:unset");
+    assert.equal(
+      response.id,
+      `explicit-token|https://magic.example.test|${directory}|unset|unset`,
+    );
   } finally {
-    if (previous === undefined) delete process.env.SECRET_SHOULD_NOT_LEAK;
-    else process.env.SECRET_SHOULD_NOT_LEAK = previous;
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("lets an authenticated local CLI read its token file through HOME", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-builder-home-auth-"));
+  const command = join(directory, "fake-magic-builder");
+  const configDirectory = join(directory, ".magic-builder");
+  const previousHome = process.env.HOME;
+  process.env.HOME = directory;
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(join(configDirectory, "magic-token"), "test-local-token");
+  await writeFile(
+    command,
+    "#!/bin/sh\ntoken=$(command cat \"$HOME/.magic-builder/magic-token\")\nprintf '{\"id\":\"%s\",\"url\":\"https://assets.example.test/file\"}' \"$token\"\n",
+  );
+  await chmod(command, 0o700);
+
+  try {
+    const response = await runMagicBuilderJson(
+      createMagicBuilderRunner({ command }),
+      [],
+    );
+    assert.equal(response.id, "test-local-token");
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await rm(directory, { recursive: true, force: true });
   }
 });

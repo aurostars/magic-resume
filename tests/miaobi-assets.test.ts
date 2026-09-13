@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -14,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
+import { createMagicBuilderRunner } from "../scripts/miaobi/magic-builder";
 import {
   createReleaseId,
   publishAssets,
@@ -39,7 +41,6 @@ function fakeRunner(options: { failAt?: number } = {}): {
   return {
     uploads,
     runner: {
-      guaranteesCreateOnly: true,
       async run(args) {
         const keyIndex = args.indexOf("--key");
         const typeIndex = args.indexOf("--content-type");
@@ -70,22 +71,45 @@ async function fixture(): Promise<{ root: string; directory: string }> {
   return { root, directory };
 }
 
-test("fails closed before upload when the runner cannot prove create-only writes", async () => {
+test("publishes through the built-in subprocess runner", async () => {
   const { root, directory } = await fixture();
-  let calls = 0;
-  const runner: MagicBuilderRunner = {
-    async run() {
-      calls += 1;
-      return { stdout: JSON.stringify({ id: "unexpected", url: RELEASE_BASE }), stderr: "" };
-    },
-  };
+  const command = join(root, "fake-magic-builder");
+  const callLog = join(root, "calls.log");
+  await writeFile(
+    command,
+    `#!/bin/sh
+key=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--key' ]; then key="$2"; shift 2; else shift; fi
+done
+printf '%s\\n' "$key" >> '${callLog}'
+printf '{"id":"upload","url":"https://assets.example.test/%s"}' "$key"
+`,
+  );
+  await chmod(command, 0o700);
   await writeFile(join(directory, "app.js"), "app");
+
   try {
+    const manifest = await publishAssets({
+      directory,
+      releaseId: RELEASE_ID,
+      runner: createMagicBuilderRunner({ command }),
+    });
+    assert.deepEqual((await readFile(callLog, "utf8")).trim().split("\n"), [
+      `magic-resume/releases/${RELEASE_ID}/release.json`,
+      `magic-resume/releases/${RELEASE_ID}/app.js`,
+    ]);
+    assert.equal(manifest.files["app.js"].url,
+      `https://assets.example.test/magic-resume/releases/${RELEASE_ID}/app.js`);
     await assert.rejects(
-      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
-      { code: "MIAOBI_IMMUTABILITY_UNCONFIRMED" },
+      publishAssets({
+        directory,
+        releaseId: RELEASE_ID,
+        runner: createMagicBuilderRunner({ command }),
+      }),
+      { code: "MIAOBI_RELEASE_RESERVED" },
     );
-    assert.equal(calls, 0);
+    assert.equal((await readFile(callLog, "utf8")).trim().split("\n").length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -95,7 +119,6 @@ test("uses the documented magic-builder 1.3.0 file upload argument contract", as
   const { root, directory } = await fixture();
   const calls: string[][] = [];
   const runner: MagicBuilderRunner = {
-    guaranteesCreateOnly: true,
     async run(args) {
       calls.push(args);
       const key = args[args.indexOf("--key") + 1];
@@ -175,7 +198,6 @@ test("atomically rejects a concurrent publication with the same release ID", asy
   });
   let calls = 0;
   const runner: MagicBuilderRunner = {
-    guaranteesCreateOnly: true,
     async run(args) {
       calls += 1;
       if (calls === 1) {
@@ -344,7 +366,6 @@ test("uses a trusted pre-upload snapshot when a directory is replaced during mar
   await writeFile(join(assetDirectory, "app.js"), "public-bytes");
   await writeFile(join(replacementDirectory, "app.js"), "root-secret");
   const runner: MagicBuilderRunner = {
-    guaranteesCreateOnly: true,
     async run(args) {
       const key = args[args.indexOf("--key") + 1];
       const contentType = args[args.indexOf("--content-type") + 1];
@@ -475,6 +496,38 @@ test("does not create a manifest when an asset upload fails", async () => {
   }
 });
 
+test("does not commit the manifest when final state preparation fails", async () => {
+  const { root, directory } = await fixture();
+  const statePath = join(root, ".miaobi", "state.json");
+  let calls = 0;
+  const runner: MagicBuilderRunner = {
+    async run(args) {
+      calls += 1;
+      const key = args[args.indexOf("--key") + 1];
+      if (calls === 2) await writeFile(statePath, "not-json");
+      return {
+        stdout: JSON.stringify({
+          id: `upload-${calls}`,
+          url: `https://assets.example.test/${key}`,
+        }),
+        stderr: "",
+      };
+    },
+  };
+  await writeFile(join(directory, "app.js"), "app");
+  const manifestPath = join(dirname(directory), "asset-manifest.json");
+  try {
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner }),
+      { code: "MIAOBI_STATE_FAILED" },
+    );
+    await assert.rejects(access(manifestPath), (error: unknown) =>
+      (error as NodeJS.ErrnoException).code === "ENOENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects marker URLs that are not the exact clean requested key", async () => {
   const invalidUrls = [
     `https://assets.example.test/extra/magic-resume/releases/${RELEASE_ID}/release.json`,
@@ -486,7 +539,6 @@ test("rejects marker URLs that are not the exact clean requested key", async () 
   for (const markerUrl of invalidUrls) {
     const { root, directory } = await fixture();
     const runner: MagicBuilderRunner = {
-      guaranteesCreateOnly: true,
       async run() {
         return {
           stdout: JSON.stringify({ id: "marker", url: markerUrl }),
@@ -519,7 +571,6 @@ test("rejects asset URLs outside the exact marker origin and requested key", asy
     const { root, directory } = await fixture();
     let calls = 0;
     const runner: MagicBuilderRunner = {
-      guaranteesCreateOnly: true,
       async run(args) {
         calls += 1;
         const key = args[args.indexOf("--key") + 1];
@@ -550,7 +601,6 @@ test("rejects a non-HTTPS asset URL instead of persisting it", async () => {
   const { root, directory } = await fixture();
   let calls = 0;
   const runner: MagicBuilderRunner = {
-    guaranteesCreateOnly: true,
     async run(args) {
       calls += 1;
       const key = args[args.indexOf("--key") + 1];

@@ -257,7 +257,7 @@ function codedError(code: string): Error & { code: string } {
 async function updateReleaseState(
   stateDirectory: string,
   releaseId: string,
-  status: "reserved" | "published",
+  status: "reserved" | "manifest-ready",
 ): Promise<void> {
   const lockPath = join(stateDirectory, "state.lock");
   try {
@@ -273,7 +273,7 @@ async function updateReleaseState(
     const statePath = join(stateDirectory, "state.json");
     let state: {
       schemaVersion: 1;
-      releases: Record<string, { status: "reserved" | "published" }>;
+      releases: Record<string, { status: "reserved" | "manifest-ready" }>;
     } = { schemaVersion: 1, releases: {} };
     try {
       state = JSON.parse(await readFile(statePath, "utf8")) as typeof state;
@@ -282,6 +282,9 @@ async function updateReleaseState(
     }
     state.releases[releaseId] = { status };
     await writeJsonAtomically(statePath, state);
+  } catch (error) {
+    if ((error as { code?: string }).code?.startsWith("MIAOBI_")) throw error;
+    throw codedError("MIAOBI_STATE_FAILED");
   } finally {
     await rm(lockPath, { recursive: true, force: true });
   }
@@ -325,14 +328,19 @@ async function reserveRelease(trustedRoot: string, releaseId: string): Promise<s
   return stateDirectory;
 }
 
-async function writeJsonAtomically(path: string, value: unknown): Promise<void> {
+async function stageJson(path: string, value: unknown): Promise<string> {
   await mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.tmp-${randomUUID()}`;
+  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return temporaryPath;
+}
+
+async function writeJsonAtomically(path: string, value: unknown): Promise<void> {
+  const temporaryPath = await stageJson(path, value);
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
     await rename(temporaryPath, path);
   } finally {
     await rm(temporaryPath, { force: true });
@@ -344,13 +352,6 @@ export async function publishAssets(input: {
   releaseId: string;
   runner: MagicBuilderRunner;
 }): Promise<MiaobiAssetManifest> {
-  if (input.runner.guaranteesCreateOnly !== true) {
-    const error = new Error("MIAOBI_IMMUTABILITY_UNCONFIRMED") as Error & {
-      code: string;
-    };
-    error.code = "MIAOBI_IMMUTABILITY_UNCONFIRMED";
-    throw error;
-  }
   if (!RELEASE_ID_PATTERN.test(input.releaseId)) throw new InvalidPathError();
 
   const snapshot = await snapshotAssets(input.directory);
@@ -430,10 +431,16 @@ export async function publishAssets(input: {
       baseUrl,
       files: records,
     };
-    await writeJsonAtomically(manifestPath, manifest);
-    await updateReleaseState(stateDirectory, input.releaseId, "published");
+    const stagedManifestPath = await stageJson(manifestPath, manifest);
+    try {
+      await updateReleaseState(stateDirectory, input.releaseId, "manifest-ready");
+      await rename(stagedManifestPath, manifestPath);
+    } catch (error) {
+      await rm(stagedManifestPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
     return manifest;
   } finally {
-    await rm(workingDirectory, { recursive: true, force: true });
+    await rm(workingDirectory, { recursive: true, force: true }).catch(() => undefined);
   }
 }

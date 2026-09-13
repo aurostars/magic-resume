@@ -1,5 +1,4 @@
 export interface MagicBuilderRunner {
-  readonly guaranteesCreateOnly?: boolean;
   run(args: string[]): Promise<{ stdout: string; stderr: string }>;
 }
 
