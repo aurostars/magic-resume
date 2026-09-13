@@ -4,6 +4,7 @@ import type {
   WebDavClientApi,
 } from "./client";
 import { WebDavError } from "./errors";
+import { parseResumeJson } from "./resume-codec";
 
 const DEFAULT_ROOT = "/magic-resume/";
 const MANIFEST_FILE = "manifest.json";
@@ -112,6 +113,7 @@ export class WebDavResumeRepository {
     expectedEtag?: string | null,
   ): Promise<void> {
     assertResumePath(path);
+    parseResumeJson(text);
     await this.writeAtomic(path, text, preconditionFor(expectedEtag));
   }
 

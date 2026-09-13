@@ -379,6 +379,28 @@ test("rejects dot-segment paths before they can escape the configured base path"
   assert.deepEqual(calls, []);
 });
 
+test("rejects raw and encoded dot segments at every client path boundary before requests", async () => {
+  const { calls, fetchImpl } = recordingFetch();
+  const client = clientWith(fetchImpl, { baseUrl: "https://dav.example.test/root/base/" });
+  const operations = [
+    () => client.options("/safe/%2e%2e/escape"),
+    () => client.propfind("/safe/%2E/file"),
+    () => client.listCollection("/safe/%2e%2e/"),
+    () => client.ensureDirectory("/safe/../escape/"),
+    () => client.getText("/safe/%2E%2E/file"),
+    () => client.putText("/safe/%2e/file", "{}"),
+    () => client.move("/safe/../source", "/safe/destination"),
+    () => client.move("/safe/source", "/safe/%2e%2e/destination"),
+    () => client.delete("/safe/%2E/file"),
+  ];
+
+  for (const operation of operations) {
+    await expectWebDavError(operation(), "UNKNOWN", null);
+  }
+
+  assert.deepEqual(calls, []);
+});
+
 test("rejects base URL userinfo without sending or exposing it", async () => {
   const { calls, fetchImpl } = recordingFetch();
   const userinfo = "embedded-user:embedded-password";
@@ -419,6 +441,46 @@ test("PROPFIND Depth one lists decoded direct child files with ETags", async () 
   ]);
   assert.equal(calls[0].init.method, "PROPFIND");
   assert.equal(new Headers(calls[0].init.headers).get("Depth"), "1");
+});
+
+test("PROPFIND structurally parses namespace variants, entities, and CDATA", async () => {
+  const xml = `<?xml version="1.0"?>
+    <multistatus xmlns="DAV:">
+      <response>
+        <href><![CDATA[/root/magic-resume/resumes/CV%20one.json]]></href>
+        <propstat><prop><getetag>&quot;r&amp;1&quot;</getetag><resourcetype /></prop></propstat>
+      </response>
+      <x:response xmlns:x="DAV:">
+        <x:href>/root/magic-resume/resumes/%E5%8F%A6&#x4E00;&#x4EFD;.json</x:href>
+        <x:propstat><x:prop><x:getetag>W/&quot;r2&quot;</x:getetag><x:resourcetype /></x:prop></x:propstat>
+      </x:response>
+    </multistatus>`;
+  const { fetchImpl } = recordingFetch(() => new Response(xml, { status: 207 }));
+
+  assert.deepEqual(
+    await clientWith(fetchImpl).listCollection("/magic-resume/resumes/"),
+    [
+      { path: "CV one.json", etag: '"r&1"' },
+      { path: "另一份.json", etag: 'W/"r2"' },
+    ],
+  );
+});
+
+test("PROPFIND ignores nested decoy hrefs and rejects the direct malicious href", async () => {
+  const xml = `<d:multistatus xmlns:d="DAV:" xmlns:x="urn:decoy">
+    <d:response>
+      <x:wrapper><d:href>/root/magic-resume/resumes/decoy.json</d:href></x:wrapper>
+      <d:href>/root/private/secret.json</d:href>
+      <d:propstat><d:prop><d:getetag>&quot;x&quot;</d:getetag></d:prop></d:propstat>
+    </d:response>
+  </d:multistatus>`;
+  const { fetchImpl } = recordingFetch(() => new Response(xml, { status: 207 }));
+
+  await expectWebDavError(
+    clientWith(fetchImpl).listCollection("/magic-resume/resumes/"),
+    "UNKNOWN",
+    null,
+  );
 });
 
 test("PROPFIND rejects a multistatus href outside the requested collection", async () => {

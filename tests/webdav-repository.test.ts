@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { initialResumeState } from "../src/config/initialResumeData";
 import type {
   RemoteCollectionFile,
   RemotePrecondition,
@@ -72,6 +73,15 @@ const repositoryWith = (client: FakeClient, operationIds = ["op-1", "op-2"]) =>
     createOperationId: () => operationIds.shift() ?? "fallback-op",
   });
 
+const validResumeText = JSON.stringify({
+  ...structuredClone(initialResumeState),
+  id: "resume-id",
+  title: "Resume",
+  createdAt: "2026-09-13T00:00:00.000Z",
+  updatedAt: "2026-09-13T00:00:00.000Z",
+  templateId: null,
+});
+
 test("ensureLayout creates the root, resumes, and trash collections in order", async () => {
   const client = new FakeClient();
 
@@ -106,17 +116,34 @@ test("writeResumeAtomic PUTs unique temporary siblings before conditional MOVEs 
   const client = new FakeClient();
   const repository = repositoryWith(client);
 
-  await repository.writeResumeAtomic("resumes/CV.json", "first", null);
-  await repository.writeResumeAtomic("resumes/CV.json", "second", '"r1"');
+  await repository.writeResumeAtomic("resumes/CV.json", validResumeText, null);
+  await repository.writeResumeAtomic("resumes/CV.json", validResumeText, '"r1"');
 
   assert.deepEqual(client.calls, [
-    ["putText", "/magic-resume/resumes/CV.json.tmp-device-1-op-1", "first", { kind: "missing" }],
+    ["putText", "/magic-resume/resumes/CV.json.tmp-device-1-op-1", validResumeText, { kind: "missing" }],
     ["move", "/magic-resume/resumes/CV.json.tmp-device-1-op-1", "/magic-resume/resumes/CV.json", { kind: "missing" }],
     ["delete", "/magic-resume/resumes/CV.json.tmp-device-1-op-1"],
-    ["putText", "/magic-resume/resumes/CV.json.tmp-device-1-op-2", "second", { kind: "missing" }],
+    ["putText", "/magic-resume/resumes/CV.json.tmp-device-1-op-2", validResumeText, { kind: "missing" }],
     ["move", "/magic-resume/resumes/CV.json.tmp-device-1-op-2", "/magic-resume/resumes/CV.json", { kind: "match", etag: '"r1"' }],
     ["delete", "/magic-resume/resumes/CV.json.tmp-device-1-op-2"],
   ]);
+});
+
+test("writeResumeAtomic rejects envelopes and malformed JSON before any PUT", async () => {
+  const client = new FakeClient();
+  const repository = repositoryWith(client);
+  const envelope = JSON.stringify({ schemaVersion: 2, data: JSON.parse(validResumeText) });
+
+  await assert.rejects(
+    repository.writeResumeAtomic("resumes/CV.json", envelope, null),
+    /SNAPSHOT_RESUME/,
+  );
+  await assert.rejects(
+    repository.writeResumeAtomic("trash/CV.json", "{broken", null),
+    SyntaxError,
+  );
+
+  assert.deepEqual(client.calls, []);
 });
 
 test("a failed atomic MOVE cleans up without hiding the primary safe error", async () => {
@@ -126,7 +153,7 @@ test("a failed atomic MOVE cleans up without hiding the primary safe error", asy
   client.deleteError = new Error("private cleanup failure");
 
   await assert.rejects(
-    repositoryWith(client).writeResumeAtomic("resumes/CV.json", "resume", '"old"'),
+    repositoryWith(client).writeResumeAtomic("resumes/CV.json", validResumeText, '"old"'),
     (error: unknown) => error === primary,
   );
   assert.deepEqual(client.calls.map((call) => call[0]), ["putText", "move", "delete"]);
