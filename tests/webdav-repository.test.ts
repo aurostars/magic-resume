@@ -332,16 +332,3 @@ test("atomic object PUT and MOVE receive the caller AbortSignal", async () => {
   assert.equal(client.signals[0], signal);
   assert.equal(client.signals[1], signal);
 });
-
-
-test("deleteResumeAtomic removes only the source whose ETag still matches", async () => {
-  const client = new FakeClient();
-  const signal = new AbortController().signal;
-
-  await repositoryWith(client).deleteResumeAtomic("resumes/Stale.json", '"stale"', signal);
-
-  assert.deepEqual(client.calls, [[
-    "delete", "/magic-resume/resumes/Stale.json", { kind: "match", etag: '"stale"' },
-  ]]);
-  assert.equal(client.signals[0], signal);
-});

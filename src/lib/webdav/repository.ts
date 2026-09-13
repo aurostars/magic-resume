@@ -147,19 +147,6 @@ export class WebDavResumeRepository {
     );
   }
 
-  async deleteResumeAtomic(
-    path: string,
-    sourceEtag: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    assertResumePath(path);
-    await this.client.delete(
-      `${this.root}${path}`,
-      { kind: "match", etag: sourceEtag },
-      signal,
-    );
-  }
-
   async ensureManifestPublishSupported(signal?: AbortSignal): Promise<void> {
     const capabilities = await this.client.options(this.root, signal);
     if (!capabilities.conditionalMove) throw new WebDavError("MOVE_UNSUPPORTED");

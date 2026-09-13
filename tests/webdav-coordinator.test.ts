@@ -85,11 +85,6 @@ class MemoryRepository {
     const value = this.files.get(from);
     if (value) { this.files.delete(from); this.files.set(to, value); }
   }
-  async deleteResumeAtomic(path: string, sourceEtag: string | null) {
-    this.calls.push(`delete-resume:${path}:${sourceEtag}`);
-    const current = this.files.get(path);
-    if (current && current.etag === sourceEtag) this.files.delete(path);
-  }
   async ensureManifestPublishSupported() {}
   async prepareManifestPublish(text: string, expectedEtag: string | null): Promise<ManifestPublishOperation> {
     this.calls.push(`prepare:${expectedEtag}`);
@@ -441,7 +436,25 @@ test("real controller and coordinator accumulate two conflict choices into one p
   controller.dispose();
 });
 
-test("a failed post-publication rename is recognized as a stale system mirror and repaired next sync", async () => {
+test("a user-restored historical export is retained and surfaced as a conflict", async () => {
+  const current = resume("same", "Current");
+  const historical = resume("same", "Historical export");
+  const remote = await makeManifest([current]);
+  const state = await setup({ local: data(current), remote });
+  await seedRemoteFiles(state.repository, [current, historical]);
+  const historicalPath = `resumes/Historical export--same.json`;
+
+  const inspection = await state.coordinator.inspect();
+
+  assert.equal(inspection.decision, "conflict");
+  assert.deepEqual(inspection.conflicts.map(({ resumeId, kind }) => [resumeId, kind]), [
+    ["same", "both-modified"],
+  ]);
+  assert.equal(inspection.plan.manualImports?.[0]?.mirrorPath, historicalPath);
+  assert.equal(state.repository.files.has(historicalPath), true);
+});
+
+test("a failed post-publication rename retains and surfaces the ambiguous old mirror", async () => {
   const old = resume("same", "Old title");
   const remote = await makeManifest([old]);
   const changed = resume("same", "New title");
@@ -453,14 +466,15 @@ test("a failed post-publication rename is recognized as a stale system mirror an
   const oldPath = remote.entries.same.mirrorPath;
   assert.equal(state.repository.files.has(oldPath), true);
 
-  const second = await state.coordinator.execute();
-  assert.deepEqual(second, { status: "unchanged", warning: null, syncedCount: 0 });
-  assert.equal(state.repository.files.has(oldPath), false);
-  assert.equal(state.repository.calls.some((call) => call.startsWith(`delete-resume:${oldPath}:`)), true);
+  const inspection = await state.coordinator.inspect();
+  assert.equal(inspection.discoveredRemoteFiles, true);
+  assert.deepEqual(inspection.plan.downloads.map(({ resumeId }) => resumeId), ["same"]);
+  assert.equal(inspection.plan.manualImports?.[0]?.mirrorPath, oldPath);
+  assert.equal(state.repository.files.has(oldPath), true);
 });
 
 
-test("a failed post-publication delete does not re-import the stale live mirror and cleans it safely", async () => {
+test("a failed post-publication delete retains and deterministically dedupes the equal-hash live mirror", async () => {
   const removed = resume("removed", "Removed");
   const remote = await makeManifest([removed]);
   const state = await setup({ local: data(), remote, baseline: baselineFor(remote) });
@@ -471,9 +485,11 @@ test("a failed post-publication delete does not re-import the stale live mirror 
   const oldPath = remote.entries.removed.mirrorPath;
   assert.equal(state.repository.files.has(oldPath), true);
 
-  const second = await state.coordinator.execute();
-  assert.deepEqual(second, { status: "unchanged", warning: null, syncedCount: 0 });
-  assert.equal(state.repository.files.has(oldPath), false);
+  const inspection = await state.coordinator.inspect();
+  assert.equal(inspection.discoveredRemoteFiles, false);
+  assert.equal(inspection.plan.downloads.length, 0);
+  assert.equal(inspection.plan.manualImports?.length, 0);
+  assert.equal(state.repository.files.has(oldPath), true);
   const published = await parseManifest(state.repository.manifest!.text);
   assert.equal(published.entries.removed.deleted, true);
   assert.equal(state.local().resumes.length, 0);

@@ -12,7 +12,7 @@ export type ExecutePlanResult =
 
 type RepositoryApi = Pick<WebDavResumeRepository,
   "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "writeResumeAtomic" |
-  "moveResumeAtomic" | "deleteResumeAtomic" | "ensureManifestPublishSupported" | "prepareManifestPublish" |
+  "moveResumeAtomic" | "ensureManifestPublishSupported" | "prepareManifestPublish" |
   "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
 
 export interface ExecuteSyncPlanInput {

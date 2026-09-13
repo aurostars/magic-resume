@@ -85,11 +85,6 @@ class FakeRepository {
     const file = this.files.get(from);
     if (file) { this.files.set(to, file); this.files.delete(from); }
   }
-  async deleteResumeAtomic(path: string, sourceEtag: string, signal?: AbortSignal) {
-    this.calls.push(`delete-resume:${path}:${sourceEtag}`); this.seenSignals.push(signal);
-    const file = this.files.get(path);
-    if (file?.etag === sourceEtag) this.files.delete(path);
-  }
   async ensureManifestPublishSupported(signal?: AbortSignal) {
     this.calls.push("preflight"); this.seenSignals.push(signal);
     await this.onCapabilityCheck?.(signal);

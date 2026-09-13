@@ -28,7 +28,7 @@ export type ConflictDecision = {
 export interface CoordinatorDependencies {
   repository: Pick<WebDavResumeRepository,
     "ensureLayout" | "ensureObjectDirectory" | "readManifest" | "readResume" | "listResumeCandidates" |
-    "writeResumeAtomic" | "moveResumeAtomic" | "deleteResumeAtomic" | "ensureManifestPublishSupported" |
+    "writeResumeAtomic" | "moveResumeAtomic" | "ensureManifestPublishSupported" |
     "prepareManifestPublish" | "commitManifestPublish" | "cancelManifestPublish" | "deleteManifest">;
   getLocalData: () => ResumeSyncData;
   subscribeLocalData: (listener: () => void) => () => void;
@@ -127,41 +127,6 @@ export class WebDavSyncCoordinator {
         try {
           const resume = parseResumeJson(file.text);
           const contentHash = await calculateResumeHash(resume);
-          const currentEntry = entries[resume.id];
-          if (
-            currentEntry &&
-            candidate.path === getResumeRelativePath(resume) &&
-            (currentEntry.deleted || contentHash !== currentEntry.contentHash)
-          ) {
-            const historicalObject = await this.dependencies.repository.readResume(
-              `objects/${resume.id}/${contentHash}.json`,
-              signal,
-            );
-            if (historicalObject) {
-              try {
-                const historicalResume = parseResumeJson(historicalObject.text);
-                if (
-                  historicalResume.id === resume.id &&
-                  await calculateResumeHash(historicalResume) === contentHash
-                ) {
-                  if (candidate.etag) {
-                    try {
-                      await this.dependencies.repository.deleteResumeAtomic(
-                        candidate.path,
-                        candidate.etag,
-                        signal,
-                      );
-                    } catch (error) {
-                      if (signal?.aborted) throw signal.reason;
-                    }
-                  }
-                  continue;
-                }
-              } catch {
-                // An unverified historical object cannot authorize cleanup.
-              }
-            }
-          }
           const values = discovered.get(resume.id) ?? [];
           values.push({ resume, mirrorPath: candidate.path, contentHash });
           discovered.set(resume.id, values);
