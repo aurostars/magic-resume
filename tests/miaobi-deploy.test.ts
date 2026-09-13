@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,8 @@ import { deployMiaobi, type MiaobiDeploymentState } from "../scripts/miaobi/depl
 import type { MagicBuilderRunner } from "../scripts/miaobi/types";
 
 const COMMIT = "59a06b5c2c127d287d01016e5be4d781e310fe2e";
+const BUILD_NONCE = "0123456789abcdef0123456789abcdef";
+const BUILD_MARKER = `${COMMIT}.${BUILD_NONCE}`;
 const NOW = new Date("2026-09-13T16:46:00.000Z");
 const RELEASE_ID = "59a06b5c2c12-20260913164600";
 
@@ -25,7 +27,8 @@ async function fixture() {
   await writeFile(join(root, "dist/miaobi/api-faas.cjs"), apiBundle);
   await writeFile(join(root, "dist/miaobi/api-faas.meta.json"), JSON.stringify({
     schemaVersion: 1,
-    buildMarker: COMMIT,
+    gitCommit: COMMIT,
+    buildMarker: BUILD_MARKER,
     bundleSha256: createHash("sha256").update(apiBundle).digest("hex"),
   }));
   return root;
@@ -60,6 +63,7 @@ function fakeRunner(events: string[], failAt?: Stage, platformOrigin?: string): 
 function validPriorState(): MiaobiDeploymentState {
   return {
     schemaVersion: 1,
+    apiBuildMarker: BUILD_MARKER,
     releaseId: "59a06b5c2c12-20260912000000",
     apiFaasId: "api-old",
     apiFaasUrl: "https://magic.solutionsuite.cn/api/faas/api-old",
@@ -75,7 +79,7 @@ function healthyResponse(
   apiId = "api-new",
   releaseId = RELEASE_ID,
   platformOrigin = "https://magic.solutionsuite.cn",
-  buildMarker = COMMIT,
+  buildMarker = BUILD_MARKER,
 ): Response {
   const url = String(input);
   if (url.includes(`/api/faas/${apiId}?`)) {
@@ -126,6 +130,7 @@ test("publishes assets, API, Web, checks both URLs, then switches the page and a
     assert.deepEqual(events, ["asset", "asset", "api", "web", "health-api", "health-web", "page"]);
     assert.deepEqual(state, {
       schemaVersion: 1,
+      apiBuildMarker: BUILD_MARKER,
       releaseId: RELEASE_ID,
       apiFaasId: "api-new",
       apiFaasUrl: "https://magic.solutionsuite.cn/api/faas/api-new",
@@ -254,7 +259,7 @@ test("health checks reject stale API/Web identity and runtime release markers", 
               { code: "notFound" },
               { status: 404, headers: {
         "X-Magic-Resume-Faas": "magic-resume-api",
-        "X-Magic-Resume-Build": COMMIT,
+        "X-Magic-Resume-Build": BUILD_MARKER,
       } },
             );
           }
@@ -391,6 +396,7 @@ test("a page update failure leaves the prior deployment state byte-for-byte inta
   await inFixture(async (root) => {
     const priorState: MiaobiDeploymentState = {
       schemaVersion: 1,
+      apiBuildMarker: BUILD_MARKER,
       releaseId: "59a06b5c2c12-20260912000000",
       apiFaasId: "api-old",
       apiFaasUrl: "https://magic.solutionsuite.cn/api/faas/api-old",
@@ -513,7 +519,7 @@ test("detects a state-directory swap before rename and never commits attacker by
     );
     await assert.rejects(readFile(join(root, ".miaobi/deployment.json"), "utf8"));
     const recovery = JSON.parse(await readFile(
-      join(root, ".miaobi-original/deployment.pending.json"),
+      join(root, ".miaobi-recovery/deployment.pending.json"),
       "utf8",
     ));
     assert.equal(recovery.status, "pending-page-commit");
@@ -523,11 +529,14 @@ test("detects a state-directory swap before rename and never commits attacker by
 
 test("holds an exclusive deployment lock before any publication", { concurrency: false }, async () => {
   await inFixture(async (root) => {
-    await mkdir(join(root, ".miaobi/deployment.lock"), { recursive: true, mode: 0o700 });
-    await writeFile(join(root, ".miaobi/deployment.lock/owner.json"), JSON.stringify({
+    await mkdir(join(root, ".miaobi-recovery"), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, ".miaobi-recovery/deployment.lock"), JSON.stringify({
+      schemaVersion: 1,
       pid: process.pid,
-      token: "another-live-deploy",
-    }));
+      token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      startedAt: new Date().toISOString(),
+      processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    }), { mode: 0o600 });
     let calls = 0;
     await assert.rejects(
       deployMiaobi({
@@ -545,6 +554,7 @@ test("a rerun updates existing FaaS resources with --id", { concurrency: false }
   await inFixture(async (root) => {
     const prior: MiaobiDeploymentState = {
       schemaVersion: 1,
+      apiBuildMarker: BUILD_MARKER,
       releaseId: "59a06b5c2c12-20260912000000",
       apiFaasId: "api-old",
       apiFaasUrl: "https://magic.solutionsuite.cn/api/faas/api-old",
@@ -641,7 +651,7 @@ test("keeps a durable pending page transaction when final state commit fails and
       deployMiaobi({ runner: firstRunner, gitCommit: COMMIT, now: NOW }),
       (error: unknown) => (error as Error).message === "MIAOBI_STATE_FAILED",
     );
-    const pendingPath = join(root, ".miaobi/deployment.pending.json");
+    const pendingPath = join(root, ".miaobi-recovery/deployment.pending.json");
     const pending = JSON.parse(await readFile(pendingPath, "utf8"));
     assert.equal(pending.status, "pending-page-commit");
     assert.equal(pending.page.id, "vv6BtLE8MTR");
@@ -674,7 +684,7 @@ test("keeps a durable pending page transaction when final state commit fails and
   });
 });
 
-test("keeps pending on uncertain page output and fails closed if its artifact changes", { concurrency: false }, async () => {
+test("keeps pending on uncertain page output and ignores a mutable artifact during reconcile", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const events: string[] = [];
     const base = fakeRunner(events);
@@ -689,32 +699,176 @@ test("keeps pending on uncertain page output and fails closed if its artifact ch
     };
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({ runner: uncertain, gitCommit: COMMIT, now: NOW }));
-    const pendingPath = join(root, ".miaobi/deployment.pending.json");
+    const pendingPath = join(root, ".miaobi-recovery/deployment.pending.json");
     const pending = JSON.parse(await readFile(pendingPath, "utf8"));
     await writeFile(join(root, pending.page.artifactPath), "tampered page");
 
-    let calls = 0;
-    await assert.rejects(
-      deployMiaobi({
-        runner: { async run() { calls += 1; throw new Error("must not run"); } },
-        gitCommit: COMMIT,
-        now: NOW,
-      }),
-      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_INVALID",
-    );
-    assert.equal(calls, 0);
-    assert.equal((await readFile(pendingPath, "utf8")).length > 0, true);
+    const publishedPages: string[] = [];
+    const recovered = await deployMiaobi({
+      runner: {
+        async run(args) {
+          assert.equal(args[0], "page");
+          publishedPages.push(await readFile(args[2], "utf8"));
+          return {
+            stdout: JSON.stringify({
+              id: "vv6BtLE8MTR",
+              html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR",
+            }),
+            stderr: "",
+          };
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+    });
+    assert.equal(recovered.webFaasId, "web-new");
+    assert.match(publishedPages[0], /magic\.solutionsuite\.cn\/api\/faas\/web-new/);
+    assert.doesNotMatch(publishedPages[0], /tampered/);
+    await assert.rejects(readFile(pendingPath, "utf8"));
   });
 });
 
-test("rejects an old API bundle marker before page publication", { concurrency: false }, async () => {
+test("rejects API metadata built for a different commit before publication", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const metadataPath = join(root, "dist/miaobi/api-faas.meta.json");
+    const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+    metadata.gitCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    metadata.buildMarker = `${metadata.gitCommit}.${BUILD_NONCE}`;
+    await writeFile(metadataPath, JSON.stringify(metadata));
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({ runner: { async run() { calls += 1; throw new Error(); } }, gitCommit: COMMIT, now: NOW }),
+      (error: unknown) => (error as Error).message === "MIAOBI_BUILD_METADATA_INVALID",
+    );
+    assert.equal(calls, 0);
+  });
+});
+
+test("rejects an older bundle nonce from the same commit before page publication", { concurrency: false }, async () => {
   await inFixture(async () => {
     const events: string[] = [];
-    globalThis.fetch = async (input) => healthyResponse(input, "api-new", RELEASE_ID, undefined, "old-build");
+    const oldMarker = `${COMMIT}.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
+    globalThis.fetch = async (input) => healthyResponse(input, "api-new", RELEASE_ID, undefined, oldMarker);
     await assert.rejects(
       deployMiaobi({ runner: fakeRunner(events), gitCommit: COMMIT, now: NOW }),
       (error: unknown) => (error as Error).message === "MIAOBI_HEALTH_FAILED",
     );
     assert.equal(events.includes("page"), false);
+  });
+});
+
+test("reconciles the recovery anchor after the .miaobi directory is replaced", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const firstEvents: string[] = [];
+    const base = fakeRunner(firstEvents);
+    const firstRunner: MagicBuilderRunner = {
+      async run(args) {
+        const result = await base.run(args);
+        if (args[0] === "page") {
+          await rename(join(root, ".miaobi"), join(root, ".miaobi-replaced"));
+        }
+        return result;
+      },
+    };
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(
+      deployMiaobi({ runner: firstRunner, gitCommit: COMMIT, now: NOW }),
+      (error: unknown) => (error as Error).message === "MIAOBI_STATE_FAILED",
+    );
+
+    const recoveryPath = join(root, ".miaobi-recovery/deployment.pending.json");
+    const pending = JSON.parse(await readFile(recoveryPath, "utf8"));
+    assert.equal((await stat(join(root, ".miaobi-recovery"))).mode & 0o777, 0o700);
+    assert.equal((await stat(recoveryPath)).mode & 0o777, 0o600);
+    assert.equal(pending.apiBuildMarker, BUILD_MARKER);
+
+    const calls: string[][] = [];
+    const recovered = await deployMiaobi({
+      runner: {
+        async run(args) {
+          calls.push(args);
+          return {
+            stdout: JSON.stringify({
+              id: "vv6BtLE8MTR",
+              html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR",
+            }),
+            stderr: "",
+          };
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+    });
+    assert.deepEqual(recovered, pending.deployment);
+    assert.equal(calls.length, 1);
+    await assert.rejects(readFile(recoveryPath, "utf8"));
+  });
+});
+
+test("rejects a pending artifact and matching attacker hash instead of switching it", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const events: string[] = [];
+    const base = fakeRunner(events);
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(deployMiaobi({
+      runner: {
+        async run(args) {
+          if (args[0] === "page") return { stdout: "uncertain", stderr: "" };
+          return base.run(args);
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+    }));
+
+    const recoveryPath = join(root, ".miaobi-recovery/deployment.pending.json");
+    const pending = JSON.parse(await readFile(recoveryPath, "utf8"));
+    const attackerPage = "<!doctype html><script>location='https://attacker.example'</script>";
+    await writeFile(join(root, pending.page.artifactPath), attackerPage);
+    pending.page.sha256 = createHash("sha256").update(attackerPage).digest("hex");
+    await writeFile(recoveryPath, JSON.stringify(pending));
+
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({ runner: { async run() { calls += 1; throw new Error(); } }, gitCommit: COMMIT, now: NOW }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_INVALID",
+    );
+    assert.equal(calls, 0);
+  });
+});
+
+test("reclaims stale empty and malformed single-file locks", { concurrency: false }, async (context) => {
+  for (const body of ["", "not-json"]) {
+    await context.test(body || "empty", { concurrency: false }, async () => {
+      await inFixture(async (root) => {
+        await mkdir(join(root, ".miaobi-recovery"), { mode: 0o700 });
+        const lockPath = join(root, ".miaobi-recovery/deployment.lock");
+        await writeFile(lockPath, body, { mode: 0o600 });
+        const stale = new Date(Date.now() - 120_000);
+        await utimes(lockPath, stale, stale);
+        globalThis.fetch = async (input) => healthyResponse(input);
+        const state = await deployMiaobi({ runner: fakeRunner([]), gitCommit: COMMIT, now: NOW });
+        assert.equal(state.pageId, "vv6BtLE8MTR");
+      });
+    });
+  }
+});
+
+test("a recent live single-file lock remains exclusive", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    await mkdir(join(root, ".miaobi-recovery"), { mode: 0o700 });
+    await writeFile(join(root, ".miaobi-recovery/deployment.lock"), JSON.stringify({
+      schemaVersion: 1,
+      pid: process.pid,
+      token: "0123456789abcdef0123456789abcdef",
+      startedAt: new Date().toISOString(),
+      processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    }), { mode: 0o600 });
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({ runner: { async run() { calls += 1; throw new Error(); } }, gitCommit: COMMIT, now: NOW }),
+      (error: unknown) => (error as Error).message === "MIAOBI_STATE_LOCKED",
+    );
+    assert.equal(calls, 0);
   });
 });

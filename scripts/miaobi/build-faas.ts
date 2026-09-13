@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,11 +11,13 @@ export interface FaaSBuildResult {
 }
 
 export interface ApiFaasBuildOptions {
-  buildMarker?: string;
+  gitCommit?: string;
+  nonce?: string;
 }
 
 export interface ApiFaasMetadata {
   schemaVersion: 1;
+  gitCommit: string;
   buildMarker: string;
   bundleSha256: string;
 }
@@ -27,14 +29,17 @@ function isDisallowedBareImport(path: string) {
     !URL.canParse(path);
 }
 
-function validatedBuildMarker(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
-    throw new Error("MIAOBI_BUILD_MARKER_INVALID");
-  }
+function validatedGitCommit(value: string): string {
+  if (!/^[0-9a-f]{40}$/.test(value)) throw new Error("MIAOBI_GIT_COMMIT_INVALID");
   return value;
 }
 
-async function defaultBuildMarker(): Promise<string> {
+function validatedNonce(value: string): string {
+  if (!/^[0-9a-f]{32,128}$/.test(value)) throw new Error("MIAOBI_BUILD_NONCE_INVALID");
+  return value;
+}
+
+async function defaultGitCommit(): Promise<string> {
   if (process.env.MIAOBI_GIT_COMMIT) return process.env.MIAOBI_GIT_COMMIT;
   const { stdout } = await promisify(execFile)("git", ["rev-parse", "HEAD"], {
     encoding: "utf8",
@@ -46,9 +51,9 @@ export async function buildApiFaas(
   outputDirectory: string,
   options: ApiFaasBuildOptions = {},
 ): Promise<string> {
-  const buildMarker = validatedBuildMarker(
-    options.buildMarker ?? await defaultBuildMarker(),
-  );
+  const gitCommit = validatedGitCommit(options.gitCommit ?? await defaultGitCommit());
+  const nonce = validatedNonce(options.nonce ?? randomBytes(32).toString("hex"));
+  const buildMarker = `${gitCommit}.${nonce}`;
   await mkdir(outputDirectory, { recursive: true });
   const apiBundlePath = join(outputDirectory, "api-faas.cjs");
   const result = await build({
@@ -77,6 +82,7 @@ export async function buildApiFaas(
 
   const metadata: ApiFaasMetadata = {
     schemaVersion: 1,
+    gitCommit,
     buildMarker,
     bundleSha256: createHash("sha256").update(await readFile(apiBundlePath)).digest("hex"),
   };

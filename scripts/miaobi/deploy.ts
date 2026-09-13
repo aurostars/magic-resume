@@ -24,6 +24,7 @@ export interface MiaobiDeployConfig {
 
 export interface MiaobiDeploymentState {
   schemaVersion: 1;
+  apiBuildMarker: string;
   releaseId: string;
   apiFaasId: string;
   apiFaasUrl: string;
@@ -37,21 +38,29 @@ type PendingDeployment = {
   schemaVersion: 1;
   status: "pending-page-commit";
   platformOrigin: string;
+  apiBuildMarker: string;
   deployment: MiaobiDeploymentState;
   page: { id: string; artifactPath: "dist/miaobi/page.html"; sha256: string };
 };
 
-type TrustedState = {
+type TrustedStorage = {
   directory: string;
-  path: string;
-  pendingPath: string;
-  lockPath: string;
   device: number;
   inode: number;
 };
 
+type TrustedState = TrustedStorage & {
+  path: string;
+};
+
+type TrustedRecovery = TrustedStorage & {
+  pendingPath: string;
+  lockPath: string;
+};
+
 type ApiBuildMetadata = {
   schemaVersion: 1;
+  gitCommit: string;
   buildMarker: string;
   bundleSha256: string;
 };
@@ -59,12 +68,15 @@ type ApiBuildMetadata = {
 const deployConfig = config as MiaobiDeployConfig;
 const RESOURCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
-const BUILD_MARKER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const BUILD_MARKER_PATTERN = /^([0-9a-f]{40})\.([0-9a-f]{32,128})$/;
+const LOCK_GRACE_MS = 30_000;
+const LOCK_MAX_LIVE_MS = 60 * 60 * 1000;
 
 function deploymentPaths() {
   return {
     outputDirectory: resolve("dist/miaobi"),
     statePath: resolve(".miaobi/deployment.json"),
+    recoveryPath: resolve(".miaobi-recovery/deployment.pending.json"),
   };
 }
 
@@ -109,24 +121,36 @@ async function rejectSymlinkAncestors(path: string): Promise<void> {
   }
 }
 
-async function trustedState(statePath: string): Promise<TrustedState> {
-  const directory = dirname(statePath);
+// Node has no portable dirfd-relative open/rename. These 0700 directories and
+// identity checks fail closed for replacement, but do not claim to defeat a
+// malicious same-UID process racing between syscalls.
+async function trustedStorage(directory: string): Promise<TrustedStorage> {
   await rejectSymlinkAncestors(directory);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const metadata = await lstat(directory);
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw codedError("MIAOBI_STATE_FAILED");
   await chmod(directory, 0o700);
+  return { directory, device: metadata.dev, inode: metadata.ino };
+}
+
+async function trustedState(statePath: string): Promise<TrustedState> {
+  const storage = await trustedStorage(dirname(statePath));
   return {
-    directory,
+    ...storage,
     path: statePath,
-    pendingPath: join(directory, "deployment.pending.json"),
-    lockPath: join(directory, "deployment.lock"),
-    device: metadata.dev,
-    inode: metadata.ino,
   };
 }
 
-async function assertStateIdentity(state: TrustedState): Promise<void> {
+async function trustedRecovery(recoveryPath: string): Promise<TrustedRecovery> {
+  const storage = await trustedStorage(dirname(recoveryPath));
+  return {
+    ...storage,
+    pendingPath: recoveryPath,
+    lockPath: join(storage.directory, "deployment.lock"),
+  };
+}
+
+async function assertStorageIdentity(state: TrustedStorage): Promise<void> {
   try {
     const metadata = await lstat(state.directory);
     if (
@@ -138,43 +162,90 @@ async function assertStateIdentity(state: TrustedState): Promise<void> {
   }
 }
 
-async function acquireStateLock(state: TrustedState): Promise<() => Promise<void>> {
-  await assertStateIdentity(state);
-  const ownerPath = join(state.lockPath, "owner.json");
-  const token = randomUUID();
+async function acquireStateLock(state: TrustedRecovery): Promise<() => Promise<void>> {
+  await assertStorageIdentity(state);
+  const token = randomUUID().replaceAll("-", "");
+  const processStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
+  const owner = {
+    schemaVersion: 1,
+    pid: process.pid,
+    token,
+    startedAt: new Date().toISOString(),
+    processStartedAt,
+  };
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    let handle;
     try {
-      await mkdir(state.lockPath, { mode: 0o700 });
-      await writeFile(ownerPath, JSON.stringify({ pid: process.pid, token }), { mode: 0o600, flag: "wx" });
-      await assertStateIdentity(state);
+      handle = await open(
+        state.lockPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      await handle.writeFile(JSON.stringify(owner), "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await assertStorageIdentity(state);
       return async () => {
         try {
-          await assertStateIdentity(state);
-          const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { token?: unknown };
-          if (owner.token === token) await rm(state.lockPath, { recursive: true, force: true });
+          await assertStorageIdentity(state);
+          const current = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
+          if (current?.token === token) await rm(state.lockPath, { force: true });
         } catch {
-          // Identity/ownership changed: do not remove another process' lock.
+          // Never remove a lock whose directory identity or ownership changed.
         }
       };
     } catch (error) {
+      await handle?.close().catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) {
         throw codedError("MIAOBI_STATE_LOCKED");
       }
+      let metadata;
       try {
-        const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { pid?: unknown };
-        if (typeof owner.pid !== "number" || owner.pid <= 0) throw new Error();
-        try {
-          process.kill(owner.pid, 0);
-          throw codedError("MIAOBI_STATE_LOCKED");
-        } catch (probe) {
-          if ((probe as NodeJS.ErrnoException).code !== "ESRCH") throw probe;
-        }
-        await assertStateIdentity(state);
-        await rm(state.lockPath, { recursive: true });
-      } catch (staleError) {
-        if ((staleError as { code?: string }).code === "MIAOBI_STATE_LOCKED") throw staleError;
+        metadata = await lstat(state.lockPath);
+        if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error();
+      } catch {
         throw codedError("MIAOBI_STATE_LOCKED");
       }
+      const ageMs = Date.now() - metadata.mtimeMs;
+      if (ageMs < LOCK_GRACE_MS) throw codedError("MIAOBI_STATE_LOCKED");
+      let stale = false;
+      try {
+        const existing = await readJsonFile(state.lockPath) as {
+          schemaVersion?: unknown; pid?: unknown; token?: unknown; startedAt?: unknown; processStartedAt?: unknown;
+        };
+        if (
+          existing?.schemaVersion !== 1 || typeof existing.pid !== "number" || existing.pid <= 0 ||
+          typeof existing.token !== "string" || !/^[0-9a-f]{32}$/.test(existing.token) ||
+          typeof existing.startedAt !== "string" || typeof existing.processStartedAt !== "string"
+        ) throw new Error();
+        const startedAt = Date.parse(existing.startedAt);
+        const recordedProcessStart = Date.parse(existing.processStartedAt);
+        const ownerAge = Date.now() - startedAt;
+        if (
+          !Number.isFinite(startedAt) || !Number.isFinite(recordedProcessStart) ||
+          recordedProcessStart > startedAt || ownerAge > LOCK_MAX_LIVE_MS
+        ) stale = true;
+        if (!stale && existing.pid === process.pid) {
+          const actualProcessStart = Date.now() - process.uptime() * 1000;
+          if (Math.abs(recordedProcessStart - actualProcessStart) > 5_000) stale = true;
+        }
+        if (!stale) {
+          try { process.kill(existing.pid, 0); } catch (probe) {
+            if ((probe as NodeJS.ErrnoException).code === "ESRCH") stale = true;
+            else throw probe;
+          }
+        }
+      } catch {
+        stale = true;
+      }
+      if (!stale) throw codedError("MIAOBI_STATE_LOCKED");
+      await assertStorageIdentity(state);
+      const beforeRemove = await lstat(state.lockPath);
+      if (beforeRemove.dev !== metadata.dev || beforeRemove.ino !== metadata.ino) {
+        throw codedError("MIAOBI_STATE_LOCKED");
+      }
+      await rm(state.lockPath);
     }
   }
   throw codedError("MIAOBI_STATE_LOCKED");
@@ -183,13 +254,14 @@ async function acquireStateLock(state: TrustedState): Promise<() => Promise<void
 function parseDeploymentState(value: unknown, platformOrigin: string): MiaobiDeploymentState {
   const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
   const expectedKeys = [
-    "apiFaasId", "apiFaasUrl", "deployedAt", "pageId", "releaseId",
+    "apiBuildMarker", "apiFaasId", "apiFaasUrl", "deployedAt", "pageId", "releaseId",
     "schemaVersion", "webFaasId", "webFaasUrl",
   ].sort();
   if (
     typeof value !== "object" || value === null ||
     JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
     (value as { schemaVersion?: unknown }).schemaVersion !== 1 ||
+    !BUILD_MARKER_PATTERN.test((value as { apiBuildMarker?: string }).apiBuildMarker ?? "") ||
     (value as { pageId?: unknown }).pageId !== deployConfig.pageId ||
     typeof (value as { releaseId?: unknown }).releaseId !== "string" ||
     !/^[0-9a-f]{12}-\d{14}$/.test((value as { releaseId: string }).releaseId) ||
@@ -233,7 +305,7 @@ async function readJsonFile(path: string): Promise<unknown | undefined> {
 }
 
 async function priorState(state: TrustedState, platformOrigin: string) {
-  await assertStateIdentity(state);
+  await assertStorageIdentity(state);
   const value = await readJsonFile(state.path);
   return value === undefined ? undefined : parseDeploymentState(value, platformOrigin);
 }
@@ -247,10 +319,12 @@ function parsePending(value: unknown, platformOrigin: string): PendingDeployment
       : [];
     if (
       !pending || typeof pending !== "object" ||
-      JSON.stringify(keys) !== JSON.stringify(["deployment", "page", "platformOrigin", "schemaVersion", "status"].sort()) ||
+      JSON.stringify(keys) !== JSON.stringify(["apiBuildMarker", "deployment", "page", "platformOrigin", "schemaVersion", "status"].sort()) ||
       JSON.stringify(pageKeys) !== JSON.stringify(["artifactPath", "id", "sha256"].sort()) ||
       pending.schemaVersion !== 1 ||
       pending.status !== "pending-page-commit" || pending.platformOrigin !== platformOrigin ||
+      !BUILD_MARKER_PATTERN.test(pending.apiBuildMarker) ||
+      pending.apiBuildMarker !== pending.deployment?.apiBuildMarker ||
       !pending.page || pending.page.id !== deployConfig.pageId ||
       pending.page.artifactPath !== "dist/miaobi/page.html" ||
       !HASH_PATTERN.test(pending.page.sha256)
@@ -262,9 +336,9 @@ function parsePending(value: unknown, platformOrigin: string): PendingDeployment
   }
 }
 
-async function pendingState(state: TrustedState, platformOrigin: string) {
-  await assertStateIdentity(state);
-  const value = await readJsonFile(state.pendingPath);
+async function pendingState(recovery: TrustedRecovery, platformOrigin: string) {
+  await assertStorageIdentity(recovery);
+  const value = await readJsonFile(recovery.pendingPath);
   return value === undefined ? undefined : parsePending(value, platformOrigin);
 }
 
@@ -381,8 +455,8 @@ function pageHtml(webFaasUrl: string, webFaasId: string, platformOrigin: string)
   return `<!doctype html><meta charset="utf-8"><script>location.replace(${scriptUrl})</script><a href="${linkUrl}">打开魔方简历</a>`;
 }
 
-async function stageJson(state: TrustedState, targetPath: string, value: unknown): Promise<string> {
-  await assertStateIdentity(state);
+async function stageJson(state: TrustedStorage, targetPath: string, value: unknown): Promise<string> {
+  await assertStorageIdentity(state);
   const temporaryPath = `${targetPath}.tmp-${randomUUID()}`;
   let handle;
   try {
@@ -401,40 +475,41 @@ async function stageJson(state: TrustedState, targetPath: string, value: unknown
   }
 }
 
-async function commitStaged(temporaryPath: string, targetPath: string, state: TrustedState): Promise<void> {
+async function commitStaged(temporaryPath: string, targetPath: string, state: TrustedStorage): Promise<void> {
   try {
-    await assertStateIdentity(state);
+    await assertStorageIdentity(state);
     const metadata = await lstat(temporaryPath);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.dev !== state.device) throw new Error();
     await rename(temporaryPath, targetPath);
-    await assertStateIdentity(state);
+    await assertStorageIdentity(state);
   } catch {
     throw codedError("MIAOBI_STATE_FAILED");
   }
 }
 
-async function safeRemoveStaged(state: TrustedState, path: string): Promise<void> {
+async function safeRemoveStaged(state: TrustedStorage, path: string): Promise<void> {
   try {
-    await assertStateIdentity(state);
+    await assertStorageIdentity(state);
     await rm(path, { force: true });
   } catch {
     // A changed directory identity is a fail-closed condition; never follow the replacement path.
   }
 }
 
-async function writeAtomicJson(state: TrustedState, targetPath: string, value: unknown): Promise<void> {
+async function writeAtomicJson(state: TrustedStorage, targetPath: string, value: unknown): Promise<void> {
   const staged = await stageJson(state, targetPath, value);
   try { await commitStaged(staged, targetPath, state); } finally {
     await safeRemoveStaged(state, staged);
   }
 }
 
-async function readApiBuildMetadata(outputDirectory: string): Promise<ApiBuildMetadata> {
+async function readApiBuildMetadata(outputDirectory: string, gitCommit: string): Promise<ApiBuildMetadata> {
   try {
     const bundle = await readFile(resolve(outputDirectory, "api-faas.cjs"));
     const value = JSON.parse(await readFile(resolve(outputDirectory, "api-faas.meta.json"), "utf8")) as ApiBuildMetadata;
     if (
-      value.schemaVersion !== 1 || !BUILD_MARKER_PATTERN.test(value.buildMarker) ||
+      value.schemaVersion !== 1 || value.gitCommit !== gitCommit ||
+      BUILD_MARKER_PATTERN.exec(value.buildMarker)?.[1] !== gitCommit ||
       !HASH_PATTERN.test(value.bundleSha256) ||
       value.bundleSha256 !== createHash("sha256").update(bundle).digest("hex")
     ) throw new Error();
@@ -457,22 +532,39 @@ async function publishPage(runner: MagicBuilderRunner, pagePath: string, platfor
 async function reconcilePending(
   pending: PendingDeployment,
   state: TrustedState,
+  recovery: TrustedRecovery,
   runner: MagicBuilderRunner,
   platformOrigin: string,
 ): Promise<MiaobiDeploymentState> {
-  const artifactPath = resolve(pending.page.artifactPath);
-  if (artifactPath !== resolve("dist/miaobi/page.html")) throw codedError("MIAOBI_PENDING_INVALID");
-  let hash: string;
-  try { hash = createHash("sha256").update(await readFile(artifactPath)).digest("hex"); } catch {
-    throw codedError("MIAOBI_PENDING_INVALID");
+  const canonicalPage = pageHtml(
+    pending.deployment.webFaasUrl,
+    pending.deployment.webFaasId,
+    pending.platformOrigin,
+  );
+  const canonicalHash = createHash("sha256").update(canonicalPage).digest("hex");
+  if (canonicalHash !== pending.page.sha256) throw codedError("MIAOBI_PENDING_INVALID");
+  await assertStorageIdentity(recovery);
+  const temporaryPage = join(recovery.directory, `page-${randomUUID()}.html`);
+  let handle;
+  try {
+    handle = await open(
+      temporaryPage,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(canonicalPage, "utf8");
+    await handle.close();
+    handle = undefined;
+    await assertStorageIdentity(recovery);
+    await publishPage(runner, temporaryPage, platformOrigin);
+    await writeAtomicJson(state, state.path, pending.deployment);
+    await assertStorageIdentity(recovery);
+    await rm(recovery.pendingPath, { force: true });
+    return pending.deployment;
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await safeRemoveStaged(recovery, temporaryPage);
   }
-  if (hash !== pending.page.sha256) throw codedError("MIAOBI_PENDING_INVALID");
-  await assertStateIdentity(state);
-  await publishPage(runner, artifactPath, platformOrigin);
-  await writeAtomicJson(state, state.path, pending.deployment);
-  await assertStateIdentity(state);
-  await rm(state.pendingPath, { force: true });
-  return pending.deployment;
 }
 
 export async function deployMiaobi(options: {
@@ -485,15 +577,21 @@ export async function deployMiaobi(options: {
   let releaseLock: (() => Promise<void>) | undefined;
   try {
     const platformOrigin = resolveMagicPlatformOrigin(options.runner.platformOrigin);
-    const { outputDirectory, statePath } = deploymentPaths();
+    const { outputDirectory, statePath, recoveryPath } = deploymentPaths();
     const stateStorage = await trustedState(statePath);
-    releaseLock = await acquireStateLock(stateStorage);
+    const recoveryStorage = await trustedRecovery(recoveryPath);
+    releaseLock = await acquireStateLock(recoveryStorage);
 
-    const pending = await pendingState(stateStorage, platformOrigin);
-    if (pending) return await reconcilePending(pending, stateStorage, options.runner, platformOrigin);
+    const pending = await pendingState(recoveryStorage, platformOrigin);
+    if (pending) {
+      if (BUILD_MARKER_PATTERN.exec(pending.apiBuildMarker)?.[1] !== options.gitCommit) {
+        throw codedError("MIAOBI_PENDING_INVALID");
+      }
+      return await reconcilePending(pending, stateStorage, recoveryStorage, options.runner, platformOrigin);
+    }
 
     const previous = await priorState(stateStorage, platformOrigin);
-    const apiMetadata = await readApiBuildMetadata(outputDirectory);
+    const apiMetadata = await readApiBuildMetadata(outputDirectory, options.gitCommit);
     const releaseId = createReleaseId(options.gitCommit, options.now);
     const manifest = await publishAssets({
       directory: resolve(outputDirectory, "client/assets"),
@@ -536,6 +634,7 @@ export async function deployMiaobi(options: {
     await writeFile(pagePath, pageHtml(web.url, web.id, platformOrigin), { encoding: "utf8", mode: 0o600 });
     const deployment: MiaobiDeploymentState = {
       schemaVersion: 1,
+      apiBuildMarker: apiMetadata.buildMarker,
       releaseId,
       apiFaasId: api.id,
       apiFaasUrl: api.url,
@@ -548,6 +647,7 @@ export async function deployMiaobi(options: {
       schemaVersion: 1,
       status: "pending-page-commit",
       platformOrigin,
+      apiBuildMarker: apiMetadata.buildMarker,
       deployment,
       page: {
         id: deployConfig.pageId,
@@ -556,11 +656,12 @@ export async function deployMiaobi(options: {
       },
     };
     const stagedStatePath = await stageJson(stateStorage, stateStorage.path, deployment);
-    await writeAtomicJson(stateStorage, stateStorage.pendingPath, pendingDeployment);
+    await writeAtomicJson(recoveryStorage, recoveryStorage.pendingPath, pendingDeployment);
     try {
       await publishPage(options.runner, pagePath, platformOrigin);
       await commitStaged(stagedStatePath, stateStorage.path, stateStorage);
-      await rm(stateStorage.pendingPath, { force: true });
+      await assertStorageIdentity(recoveryStorage);
+      await rm(recoveryStorage.pendingPath, { force: true });
     } finally {
       await safeRemoveStaged(stateStorage, stagedStatePath);
     }
