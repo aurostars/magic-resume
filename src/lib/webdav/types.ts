@@ -42,6 +42,45 @@ export interface ManifestV2 extends ManifestV2Body {
   manifestHash: string;
 }
 
+export interface MultiFileBaselineEntry {
+  contentHash: string;
+  deleted: boolean;
+  path: string;
+}
+
+export interface MultiFileBaseline {
+  manifestRevision: number;
+  manifestHash: string;
+  activeResumeId: string | null;
+  entries: Record<string, MultiFileBaselineEntry>;
+}
+
+export type ResumeConflictKind = "both-modified" | "delete-vs-modify";
+
+export interface ResumeSyncConflict {
+  resumeId: string;
+  title: string;
+  kind: ResumeConflictKind;
+  local: ResumeData | null;
+  remoteEntry: ResumeManifestEntry;
+}
+
+export interface SyncPlan {
+  uploads: Array<{ resume: ResumeData; path: string; previousPath: string | null }>;
+  downloads: Array<{ resumeId: string; path: string; contentHash: string }>;
+  trashMoves: Array<{ resumeId: string; from: string; to: string }>;
+  remoteDeletions: string[];
+  conflicts: ResumeSyncConflict[];
+  nextActiveResumeId: string | null;
+}
+
+export interface PlanSyncInput {
+  local: ResumeSyncData;
+  localHashes: Record<string, string>;
+  remote: ManifestV2 | null;
+  baseline: MultiFileBaseline | null;
+}
+
 export type ManifestValidationCode =
   | "MANIFEST_JSON"
   | "MANIFEST_VERSION"
