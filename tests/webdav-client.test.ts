@@ -52,16 +52,39 @@ async function expectWebDavError(
   return caught;
 }
 
-test("rejects insecure remote HTTP URLs but permits localhost loopback URLs", async () => {
-  const { fetchImpl } = recordingFetch();
+test("rejects every non-HTTPS WebDAV base URL at the real client boundary", async () => {
+  const { calls, fetchImpl } = recordingFetch();
 
-  await expectWebDavError(
-    () => clientWith(fetchImpl, { baseUrl: "http://dav.example.test/root" }),
-    "HTTPS_REQUIRED",
-    null,
-  );
-  await clientWith(fetchImpl, { baseUrl: "http://localhost:8080/root" }).options("/");
-  await clientWith(fetchImpl, { baseUrl: "http://127.0.0.1:8080/root" }).options("/");
+  for (const baseUrl of [
+    "http://dav.example.test/root",
+    "http://localhost:8080/root",
+    "http://127.0.0.1:8080/root",
+  ]) {
+    await expectWebDavError(
+      () => clientWith(fetchImpl, { baseUrl }),
+      "HTTPS_REQUIRED",
+      null,
+    );
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("rejects workers.dev and credential-bearing WebDAV base URLs before fetch", async () => {
+  const { calls, fetchImpl } = recordingFetch();
+
+  for (const baseUrl of [
+    "https://workers.dev/root",
+    "https://tenant.workers.dev/root",
+    "https://tenant.workers.dev./root",
+    "https://alice:secret@dav.example.test/root",
+  ]) {
+    await expectWebDavError(
+      () => clientWith(fetchImpl, { baseUrl }),
+      "UNKNOWN",
+      null,
+    );
+  }
+  assert.equal(calls.length, 0);
 });
 
 test("OPTIONS strips base query and hash, encodes each path segment, and uses UTF-8 Basic auth", async () => {

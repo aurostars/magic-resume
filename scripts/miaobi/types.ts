@@ -1,4 +1,5 @@
 export interface MagicBuilderRunner {
+  readonly platformOrigin?: string;
   run(args: string[]): Promise<{ stdout: string; stderr: string }>;
 }
 

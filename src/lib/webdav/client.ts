@@ -66,10 +66,13 @@ function safeBaseUrl(value: string): URL {
     throw new WebDavError("UNKNOWN");
   }
 
-  const isLoopbackHttp =
-    url.protocol === "http:" &&
-    (url.hostname === "localhost" || url.hostname === "127.0.0.1");
-  if (url.protocol !== "https:" && !isLoopbackHttp) {
+  const forbiddenWorkerSuffix = ["workers", "dev"].join(".");
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (hostname === forbiddenWorkerSuffix || hostname.endsWith(`.${forbiddenWorkerSuffix}`)) {
+    throw new WebDavError("UNKNOWN");
+  }
+
+  if (url.protocol !== "https:") {
     throw new WebDavError("HTTPS_REQUIRED");
   }
 

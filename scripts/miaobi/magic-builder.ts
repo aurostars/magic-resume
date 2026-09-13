@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { isIP } from "node:net";
 import type { MagicBuilderRunner } from "./types";
 
 export type MagicBuilderErrorCode =
@@ -50,15 +51,57 @@ function minimalSpawnEnv(
   return env;
 }
 
+const DEFAULT_MAGIC_PLATFORM_ORIGIN = "https://magic.solutionsuite.cn";
+
+function isPrivateAddress(hostname: string): boolean {
+  const unwrapped = hostname.replace(/^\[|\]$/g, "");
+  if (isIP(unwrapped) === 6) {
+    const normalized = unwrapped.toLowerCase();
+    return normalized === "::" || normalized === "::1" ||
+      normalized.startsWith("fc") || normalized.startsWith("fd") ||
+      /^fe[89ab]/.test(normalized);
+  }
+  const parts = unwrapped.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  return parts[0] === 0 || parts[0] === 10 || parts[0] === 127 || parts[0] >= 224 ||
+    (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) ||
+    (parts[0] === 169 && parts[1] === 254) ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168);
+}
+
+export function resolveMagicPlatformOrigin(value?: string): string {
+  try {
+    const url = new URL(value ?? DEFAULT_MAGIC_PLATFORM_ORIGIN);
+    const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (
+      url.protocol !== "https:" || url.username || url.password ||
+      url.pathname !== "/" || url.search || url.hash || url.port ||
+      hostname === "localhost" || isPrivateAddress(hostname) ||
+      hostname === "workers.dev" || hostname.endsWith(".workers.dev")
+    ) throw new Error();
+    return url.origin;
+  } catch {
+    const error = new Error("MIAOBI_PLATFORM_ORIGIN_INVALID") as Error & { code: string };
+    error.code = "MIAOBI_PLATFORM_ORIGIN_INVALID";
+    throw error;
+  }
+}
+
 export function createMagicBuilderRunner(
   options: MagicBuilderRunnerOptions = {},
 ): MagicBuilderRunner {
   const command = options.command ?? "magic-builder";
+  const platformOrigin = resolveMagicPlatformOrigin(options.authEnv?.MAGIC_BASE_URL);
   return {
+    platformOrigin,
     run(args) {
       return new Promise((resolve, reject) => {
         const child = spawn(command, args, {
-          env: minimalSpawnEnv(options.authEnv),
+          env: minimalSpawnEnv({
+            ...options.authEnv,
+            MAGIC_BASE_URL: platformOrigin,
+          }),
           shell: false,
           stdio: ["ignore", "pipe", "pipe"],
         });

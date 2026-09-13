@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   createMagicBuilderRunner,
+  resolveMagicPlatformOrigin,
   runMagicBuilderJson,
 } from "../scripts/miaobi/magic-builder";
 
@@ -277,5 +278,40 @@ test("passes metacharacters as literal arguments without a shell", async () => {
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("strictly validates and exposes the same non-secret Magic platform origin", () => {
+  assert.equal(resolveMagicPlatformOrigin(undefined), "https://magic.solutionsuite.cn");
+  assert.equal(
+    resolveMagicPlatformOrigin("https://magic.staging.example/"),
+    "https://magic.staging.example",
+  );
+  assert.equal(
+    createMagicBuilderRunner({ authEnv: { MAGIC_BASE_URL: "https://magic.staging.example" } }).platformOrigin,
+    "https://magic.staging.example",
+  );
+
+  for (const value of [
+    "http://magic.example",
+    "https://workers.dev",
+    "https://tenant.workers.dev",
+    "https://tenant.workers.dev.",
+    "https://localhost",
+    "https://127.0.0.1",
+    "https://[::1]",
+    "https://[fc00::1]",
+    "https://10.0.0.1",
+    "https://user:pass@magic.example",
+    "https://magic.example/path",
+    "https://magic.example?query=1",
+    "https://magic.example/#fragment",
+  ]) {
+    assert.throws(
+      () => resolveMagicPlatformOrigin(value),
+      (error: unknown) => (error as Error).message === "MIAOBI_PLATFORM_ORIGIN_INVALID",
+      value,
+    );
   }
 });
