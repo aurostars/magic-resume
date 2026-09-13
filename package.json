@@ -10,6 +10,7 @@
     "test:webdav": "tsx --test tests/webdav-*.test.ts",
     "test:resume-import": "tsx --test tests/resume-import.test.ts",
     "build": "vite build",
+    "build:miaobi:spa": "tsx scripts/miaobi/build-spa.ts",
     "start": "node server.mjs",
     "preview": "vite preview",
     "release": "bumpp",

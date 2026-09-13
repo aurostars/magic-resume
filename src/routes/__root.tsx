@@ -69,11 +69,6 @@ function RootComponent() {
     select: (location) => location.pathname
   });
   const locale = getPreferredLocale(pathname);
-  const messages = locale === "en" ? enMessages : zhMessages;
-
-  useEffect(() => {
-    document.cookie = `NEXT_LOCALE=${locale}; path=/; max-age=31536000`;
-  }, [locale]);
 
   return (
     <html lang={locale} suppressHydrationWarning>
@@ -83,20 +78,32 @@ function RootComponent() {
         <link rel="icon" href="/icon.png" />
       </head>
       <body>
-        <NextIntlClientProvider
-          locale={locale}
-          messages={messages}
-          timeZone="Asia/Shanghai"
-        >
-          <Providers>
-            <ReactGrab />
-            <Outlet />
-            <Toaster position="top-center" richColors />
-          </Providers>
-        </NextIntlClientProvider>
+        <AppBody locale={locale} />
         <Scripts />
       </body>
     </html>
+  );
+}
+
+export function AppBody({ locale }: { locale: "en" | "zh" }) {
+  const messages = locale === "en" ? enMessages : zhMessages;
+
+  useEffect(() => {
+    document.cookie = `NEXT_LOCALE=${locale}; path=/; max-age=31536000`;
+  }, [locale]);
+
+  return (
+    <NextIntlClientProvider
+      locale={locale}
+      messages={messages}
+      timeZone="Asia/Shanghai"
+    >
+      <Providers>
+        <ReactGrab />
+        <Outlet />
+        <Toaster position="top-center" richColors />
+      </Providers>
+    </NextIntlClientProvider>
   );
 }
 
