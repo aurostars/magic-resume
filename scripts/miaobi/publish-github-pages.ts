@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { materializeGitHubPagesRelease } from "./github-pages-assets";
@@ -65,11 +66,13 @@ function parseGitHubRepository(remoteUrl: string): { owner: string; repo: string
 async function validateFork(repositoryDirectory: string, runner: GitCommandRunner): Promise<void> {
   let output: { stdout: string };
   try {
-    output = await runner.run(["remote", "get-url", "--push", "fork"], { cwd: repositoryDirectory });
+    output = await runner.run(["remote", "get-url", "--push", "--all", "fork"], { cwd: repositoryDirectory });
   } catch {
     invalidFork();
   }
-  const repository = parseGitHubRepository(output.stdout);
+  const destinations = output.stdout.split(/\r?\n/).filter((destination) => destination.length > 0);
+  if (destinations.length !== 1) invalidFork();
+  const repository = parseGitHubRepository(destinations[0]);
   if (repository?.owner !== OWNER || repository.repo !== REPOSITORY) invalidFork();
 }
 
@@ -84,8 +87,8 @@ function isMissingRemoteBranch(error: unknown): boolean {
 }
 
 function isPushConflict(error: unknown): boolean {
-  return (error as CommandError)?.kind === "non-fast-forward" ||
-    /non-fast-forward|fetch first|failed to push some refs|stale info/i.test(errorText(error));
+  return (error as CommandError & { cleanupIncomplete?: boolean })?.cleanupIncomplete !== true &&
+    (error as CommandError)?.kind === "non-fast-forward";
 }
 
 async function rejectSymlinkIfPresent(path: string): Promise<void> {
@@ -131,12 +134,42 @@ async function removeWorktree(
   repositoryDirectory: string,
   worktreeDirectory: string,
   runner: GitCommandRunner,
+  createdBranchRef?: string,
 ): Promise<void> {
-  await runner.run(["worktree", "remove", worktreeDirectory], {
-    cwd: repositoryDirectory,
-  }).catch(() => undefined);
-  await rm(worktreeDirectory, { recursive: true, force: true }).catch(() => undefined);
-  await runner.run(["worktree", "prune"], { cwd: repositoryDirectory }).catch(() => undefined);
+  let incomplete = false;
+  try {
+    await runner.run(["worktree", "remove", worktreeDirectory], { cwd: repositoryDirectory });
+  } catch {
+    incomplete = true;
+  }
+  try {
+    await rm(worktreeDirectory, { recursive: true, force: true });
+  } catch {
+    incomplete = true;
+  }
+  if (createdBranchRef) {
+    try {
+      await runner.run(["update-ref", "-d", createdBranchRef], { cwd: repositoryDirectory });
+    } catch {
+      incomplete = true;
+    }
+  }
+  try {
+    await runner.run(["worktree", "prune"], { cwd: repositoryDirectory });
+  } catch {
+    incomplete = true;
+  }
+  if (incomplete) throw new Error("MIAOBI_WORKTREE_CLEANUP_FAILED");
+}
+
+function markCleanupIncomplete(error: unknown): void {
+  if ((typeof error === "object" && error !== null) || typeof error === "function") {
+    try {
+      Object.defineProperty(error, "cleanupIncomplete", { value: true, enumerable: false });
+    } catch {
+      // Preserve the original failure even when it is not extensible.
+    }
+  }
 }
 
 async function createPublicationAttempt(input: {
@@ -145,22 +178,30 @@ async function createPublicationAttempt(input: {
   sourceCommit: string;
   releaseId: string;
   runner: GitCommandRunner;
+  signal?: AbortSignal;
 }): Promise<{ manifest: GitHubPagesManifest; pagesCommit: string }> {
   const branchExists = await fetchPages(input.repositoryDirectory, input.runner);
   const parent = await prepareTemporaryParent(input.repositoryDirectory);
   const worktreeDirectory = await mkdtemp(join(parent, "publish-"));
+  const orphanBranch = branchExists ? undefined : `miaobi-pages-${randomUUID()}`;
+  let originalError: unknown;
   try {
     if (branchExists) {
       await input.runner.run(["worktree", "add", "--detach", worktreeDirectory, "fork/gh-pages"], {
         cwd: input.repositoryDirectory,
+        signal: input.signal,
       });
     } else {
       await input.runner.run(["worktree", "add", "--detach", worktreeDirectory, "HEAD"], {
         cwd: input.repositoryDirectory,
+        signal: input.signal,
       });
     }
     if (!branchExists) {
-      await input.runner.run(["switch", "--orphan", "gh-pages"], { cwd: worktreeDirectory });
+      await input.runner.run(["switch", "--orphan", orphanBranch!], {
+        cwd: worktreeDirectory,
+        signal: input.signal,
+      });
     }
     await writeFile(join(worktreeDirectory, ".nojekyll"), "", { flag: "a", mode: 0o644 });
 
@@ -174,36 +215,62 @@ async function createPublicationAttempt(input: {
     });
     await input.runner.run(["add", "--", ".nojekyll", "objects", "releases"], {
       cwd: worktreeDirectory,
+      signal: input.signal,
     });
     const status = await input.runner.run([
       "status", "--porcelain", "--untracked-files=normal", "--", ".nojekyll", "objects", "releases",
-    ], { cwd: worktreeDirectory });
+    ], { cwd: worktreeDirectory, signal: input.signal });
     if (status.stdout.trim()) {
       await input.runner.run(["commit", "-m", `deploy pages: ${input.releaseId}`], {
         cwd: worktreeDirectory,
+        signal: input.signal,
       });
     }
     const pagesCommit = (await input.runner.run(["rev-parse", "HEAD"], {
       cwd: worktreeDirectory,
+      signal: input.signal,
     })).stdout.trim();
-    await input.runner.run(["push", "fork", "HEAD:gh-pages"], { cwd: worktreeDirectory });
+    await input.runner.run(["push", "fork", "HEAD:gh-pages"], {
+      cwd: worktreeDirectory,
+      signal: input.signal,
+    });
     return { manifest: materialized.manifest, pagesCommit };
+  } catch (error) {
+    originalError = error;
+    throw error;
   } finally {
-    await removeWorktree(input.repositoryDirectory, worktreeDirectory, input.runner);
+    try {
+      await removeWorktree(
+        input.repositoryDirectory,
+        worktreeDirectory,
+        input.runner,
+        orphanBranch ? `refs/heads/${orphanBranch}` : undefined,
+      );
+    } catch (cleanupError) {
+      if (originalError !== undefined) markCleanupIncomplete(originalError);
+      else throw cleanupError;
+    }
   }
 }
 
-function pagesResponse(stdout: string): { source: { branch: string; path: string } } {
+type PagesConfiguration = {
+  buildType: "legacy" | "workflow";
+  source?: { branch: string; path: string };
+};
+
+function pagesResponse(stdout: string): PagesConfiguration {
   try {
     const parsed = JSON.parse(stdout) as unknown;
-    if (
-      typeof parsed !== "object" || parsed === null ||
-      typeof (parsed as { source?: unknown }).source !== "object" ||
-      (parsed as { source?: unknown }).source === null
-    ) throw new Error("invalid");
-    const source = (parsed as { source: { branch?: unknown; path?: unknown } }).source;
+    if (typeof parsed !== "object" || parsed === null) throw new Error("invalid");
+    const candidate = parsed as { build_type?: unknown; source?: unknown };
+    if (candidate.build_type !== "legacy" && candidate.build_type !== "workflow") {
+      throw new Error("invalid");
+    }
+    if (candidate.build_type === "workflow") return { buildType: "workflow" };
+    if (typeof candidate.source !== "object" || candidate.source === null) throw new Error("invalid");
+    const source = candidate.source as { branch?: unknown; path?: unknown };
     if (typeof source.branch !== "string" || typeof source.path !== "string") throw new Error("invalid");
-    return { source: { branch: source.branch, path: source.path } };
+    return { buildType: "legacy", source: { branch: source.branch, path: source.path } };
   } catch {
     throw new Error("MIAOBI_INVALID_PAGES_RESPONSE");
   }
@@ -213,7 +280,7 @@ export function createGitHubPagesAdmin(runner: GitCommandRunner = createGitHubCl
   return {
     async ensureBranchSource(input) {
       const endpoint = `repos/${input.owner}/${input.repo}/pages`;
-      let current: { source: { branch: string; path: string } } | undefined;
+      let current: PagesConfiguration | undefined;
       try {
         const response = await runner.run(["api", "-X", "GET", endpoint]);
         current = pagesResponse(response.stdout);
@@ -222,11 +289,15 @@ export function createGitHubPagesAdmin(runner: GitCommandRunner = createGitHubCl
           (error as Error)?.message === "MIAOBI_GITHUB_PAGES_NOT_FOUND";
         if (!notFound) throw error;
       }
-      if (current?.source.branch === input.branch && current.source.path === input.path) return;
+      if (
+        current?.buildType === "legacy" && current.source?.branch === input.branch &&
+        current.source.path === input.path
+      ) return;
       await runner.run([
         "api",
         "-X", current ? "PUT" : "POST",
         endpoint,
+        "-f", "build_type=legacy",
         "-f", `source[branch]=${input.branch}`,
         "-f", `source[path]=${input.path}`,
       ]);
@@ -242,6 +313,7 @@ export async function publishGitHubPages(input: {
   runner: GitCommandRunner;
   admin?: GitHubPagesAdmin;
   maxPushAttempts?: number;
+  signal?: AbortSignal;
 }): Promise<GitHubPagesPublication> {
   if (
     !SOURCE_COMMIT_PATTERN.test(input.sourceCommit) ||
@@ -281,3 +353,30 @@ export async function publishGitHubPages(input: {
 }
 
 export { type GitCommandRunner } from "./git-runner";
+
+
+type PublisherInput = Parameters<typeof publishGitHubPages>[0];
+
+export async function runGitHubPagesPublisherWithSignals(
+  input: PublisherInput,
+): Promise<GitHubPagesPublication> {
+  const controller = new AbortController();
+  let interrupted = false;
+  const interrupt = (): void => {
+    interrupted = true;
+    controller.abort();
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  try {
+    const result = await publishGitHubPages({ ...input, signal: controller.signal });
+    if (interrupted) throw new Error("MIAOBI_PUBLISH_INTERRUPTED");
+    return result;
+  } catch (error) {
+    if (interrupted) throw new Error("MIAOBI_PUBLISH_INTERRUPTED");
+    throw error;
+  } finally {
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", interrupt);
+  }
+}

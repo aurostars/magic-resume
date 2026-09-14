@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
 export interface GitCommandRunner {
-  run(args: string[], options?: { cwd?: string }): Promise<{
+  run(args: string[], options?: { cwd?: string; signal?: AbortSignal }): Promise<{
     stdout: string;
     stderr: string;
   }>;
@@ -29,7 +29,7 @@ export class RedactedCommandError extends Error {
 }
 
 function classifyFailure(stderr: string): CommandFailureKind {
-  if (/non-fast-forward|fetch first|failed to push some refs|stale info/i.test(stderr)) {
+  if (/\[rejected\].*\((?:non-fast-forward|fetch first|stale info)\)|non-fast-forward|fetch first|stale info/i.test(stderr)) {
     return "non-fast-forward";
   }
   if (/HTTP 404|status code 404|not found|couldn't find remote ref|no such ref/i.test(stderr)) {
@@ -47,6 +47,7 @@ function createCommandRunner(command: "git" | "gh"): GitCommandRunner {
       return await new Promise((resolve, reject) => {
         const child = spawn(command, args, {
           cwd: options.cwd,
+          signal: options.signal,
           shell: false,
           stdio: ["ignore", "pipe", "pipe"],
         });

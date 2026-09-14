@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { createGitCommandRunner, type GitCommandRunner } from "../scripts/miaobi/git-runner";
 import {
@@ -57,7 +58,14 @@ class RecordingLocalForkRunner implements GitCommandRunner {
     if (args[0] === "remote" && args[1] === "get-url" && args.at(-1) === "fork") {
       return { stdout: `${EXPECTED_FORK}\n`, stderr: "" };
     }
-    return command("git", args, options?.cwd);
+    try {
+      return await command("git", args, options?.cwd);
+    } catch (error) {
+      if (args[0] === "push" && /non-fast-forward|fetch first|stale info/i.test((error as { stderr?: string }).stderr ?? "")) {
+        Object.assign(error as object, { kind: "non-fast-forward" });
+      }
+      throw error;
+    }
   }
 }
 
@@ -277,8 +285,8 @@ test("exhausts only non-fast-forward retries and cleans every temporary worktree
   }
 });
 
-test("worktree-add, materialization, commit, push, and interrupted-command failures clean up without touching existing Pages", async () => {
-  const cases = ["worktree", "materialize", "commit", "push", "signal"] as const;
+test("worktree-add, materialization, commit, and push failures clean up without touching existing Pages", async () => {
+  const cases = ["worktree", "materialize", "commit", "push"] as const;
   for (const failureCase of cases) {
     const value = await fixture();
     try {
@@ -294,7 +302,6 @@ test("worktree-add, materialization, commit, push, and interrupted-command failu
       } else value.runner.fail = (args) => {
         if (failureCase === "commit" && args[0] === "commit") return new Error("commit failed");
         if (failureCase === "push" && args[0] === "push") return new Error("authentication failed");
-        if (failureCase === "signal" && args[0] === "commit") return Object.assign(new Error("interrupted"), { signal: "SIGINT" });
         return undefined;
       };
       await assert.rejects(publish(value));
@@ -327,8 +334,8 @@ test("the production git runner treats metacharacters as literal arguments and r
 test("Pages admin GETs configuration and POSTs or PUTs only when required using argument arrays", async () => {
   const scenarios = [
     { get: new Error("MIAOBI_GITHUB_PAGES_NOT_FOUND"), mutation: "POST" },
-    { get: { stdout: JSON.stringify({ source: { branch: "main", path: "/docs" } }), stderr: "" }, mutation: "PUT" },
-    { get: { stdout: JSON.stringify({ source: { branch: "gh-pages", path: "/" } }), stderr: "" }, mutation: undefined },
+    { get: { stdout: JSON.stringify({ build_type: "legacy", source: { branch: "main", path: "/docs" } }), stderr: "" }, mutation: "PUT" },
+    { get: { stdout: JSON.stringify({ build_type: "legacy", source: { branch: "gh-pages", path: "/" } }), stderr: "" }, mutation: undefined },
   ];
   for (const scenario of scenarios) {
     const calls: string[][] = [];
@@ -403,6 +410,301 @@ test("rejects a symlinked temporary parent before creating directories outside t
     await assert.rejects(publish(value), { message: "MIAOBI_INVALID_WORKTREE_PARENT" });
     assert.equal(await exists(join(outside, "pages-worktrees")), false);
     assert.deepEqual(value.admin.calls, []);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+
+test("rejects multiple configured fork push destinations before fetch or worktree writes", async () => {
+  const value = await fixture();
+  try {
+    await command("git", ["remote", "set-url", "fork", EXPECTED_FORK], value.repository);
+    await command("git", ["remote", "set-url", "--add", "--push", "fork", EXPECTED_FORK], value.repository);
+    await command("git", ["remote", "set-url", "--add", "--push", "fork", join(value.root, "attacker.git")], value.repository);
+    const base = createGitCommandRunner();
+    const calls: string[][] = [];
+    const validationRunner: GitCommandRunner = {
+      async run(args, options) {
+        calls.push([...args]);
+        if (args[0] !== "remote") throw new Error("MIAOBI_UNEXPECTED_WRITE_AFTER_FORK_VALIDATION");
+        return base.run(args, options);
+      },
+    };
+    await assert.rejects(publishGitHubPages({
+      ...publicationInput(value),
+      runner: validationRunner,
+    }), { message: "MIAOBI_INVALID_FORK" });
+    assert.deepEqual(calls, [["remote", "get-url", "--push", "--all", "fork"]]);
+    assert.equal(await exists(join(value.remote, "refs", "heads", "gh-pages")), false);
+    assert.deepEqual(await worktreePaths(value.repository), [value.repository]);
+    await assert.rejects(command("git", ["show-ref", "--verify", "refs/remotes/fork/gh-pages"], value.repository));
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("a failed first orphan push leaves no local branch and the next publication succeeds", async () => {
+  const value = await fixture();
+  try {
+    let failed = false;
+    value.runner.fail = (args) => {
+      if (args[0] === "push" && !failed) {
+        failed = true;
+        return Object.assign(new Error("GIT_COMMAND_FAILED"), { kind: "other" });
+      }
+      return undefined;
+    };
+    await assert.rejects(publish(value), { message: "GIT_COMMAND_FAILED" });
+    await assert.rejects(command("git", ["show-ref", "--verify", "refs/heads/gh-pages"], value.repository));
+    assert.equal((await command("git", ["for-each-ref", "--format=%(refname)", "refs/heads/miaobi-pages-"], value.repository)).stdout, "");
+    value.runner.fail = undefined;
+    const result = await publish(value);
+    assert.match(result.pagesCommit, /^[0-9a-f]{40}$/);
+    assert.equal(JSON.parse(await remoteFile(value.remote, `releases/${SOURCE_COMMIT}/manifest.json`)).releaseId, RELEASE_ID);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("a real rejected push is classified as other and protected-branch text is never retried", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "miaobi-rejected-push-")));
+  const remote = join(root, "remote.git");
+  const repository = join(root, "repository");
+  try {
+    await command("git", ["init", "--bare", remote]);
+    await command("git", ["init", repository]);
+    await command("git", ["config", "user.name", "Hook Test"], repository);
+    await command("git", ["config", "user.email", "hook@example.test"], repository);
+    await writeFile(join(repository, "file.txt"), "content\n");
+    await command("git", ["add", "file.txt"], repository);
+    await command("git", ["commit", "-m", "content"], repository);
+    await command("git", ["config", "core.hooksPath", "hooks"], remote);
+    const hook = join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nprintf '%s\\n' 'protected branch KNOWN_TEST_SECRET' >&2\nexit 1\n");
+    await chmod(hook, 0o755);
+    const runner = createGitCommandRunner();
+    await assert.rejects(runner.run(["push", remote, "HEAD:gh-pages"], { cwd: repository }), (error: unknown) => {
+      assert.equal((error as { kind?: string }).kind, "other");
+      assert.equal((error as Error).message, "GIT_COMMAND_FAILED");
+      assert.equal((error as Error).message.includes("KNOWN_TEST_SECRET"), false);
+      return true;
+    });
+
+    const value = await fixture();
+    try {
+      let pushes = 0;
+      value.runner.fail = (args) => {
+        if (args[0] !== "push") return undefined;
+        pushes += 1;
+        return Object.assign(new Error("GIT_COMMAND_FAILED"), {
+          stderr: "remote: protected branch\nerror: failed to push some refs\n",
+          kind: "other",
+        });
+      };
+      await assert.rejects(publish(value), { message: "GIT_COMMAND_FAILED" });
+      assert.equal(pushes, 1);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pages admin converts workflow and source-less configurations to explicit legacy branch source", async () => {
+  for (const body of [
+    { build_type: "workflow", source: { branch: "gh-pages", path: "/" } },
+    { build_type: "workflow" },
+  ]) {
+    const calls: string[][] = [];
+    const runner: GitCommandRunner = {
+      async run(args) {
+        calls.push([...args]);
+        return args.includes("GET")
+          ? { stdout: JSON.stringify(body), stderr: "" }
+          : { stdout: "{}", stderr: "" };
+      },
+    };
+    await createGitHubPagesAdmin(runner).ensureBranchSource({
+      owner: "aurostars", repo: "magic-resume", branch: "gh-pages", path: "/",
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].includes("PUT"), true);
+    assert.equal(calls[1].includes("build_type=legacy"), true);
+    assert.equal(calls[1].includes("source[branch]=gh-pages"), true);
+    assert.equal(calls[1].includes("source[path]=/"), true);
+  }
+});
+
+test("Pages admin rejects legacy responses without a complete source", async () => {
+  const calls: string[][] = [];
+  const runner: GitCommandRunner = {
+    async run(args) {
+      calls.push([...args]);
+      return { stdout: JSON.stringify({ build_type: "legacy" }), stderr: "" };
+    },
+  };
+  await assert.rejects(
+    createGitHubPagesAdmin(runner).ensureBranchSource({
+      owner: "aurostars", repo: "magic-resume", branch: "gh-pages", path: "/",
+    }),
+    { message: "MIAOBI_INVALID_PAGES_RESPONSE" },
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("cleanup attempts remove, filesystem removal, and prune then reports a sanitized failure", async () => {
+  const value = await fixture();
+  const parent = join(value.repository, ".miaobi", "pages-worktrees");
+  try {
+    const original = value.runner.run.bind(value.runner);
+    value.runner.run = async (args, options) => {
+      if (args[0] === "worktree" && args[1] === "remove") {
+        value.runner.calls.push({ args: [...args], cwd: options?.cwd });
+        await chmod(parent, 0o500);
+        throw new Error("remove KNOWN_TEST_SECRET");
+      }
+      if (args[0] === "worktree" && args[1] === "prune") {
+        value.runner.calls.push({ args: [...args], cwd: options?.cwd });
+        throw new Error("prune KNOWN_TEST_SECRET");
+      }
+      return original(args, options);
+    };
+    await assert.rejects(publish(value), (error: unknown) => {
+      assert.equal((error as Error).message, "MIAOBI_WORKTREE_CLEANUP_FAILED");
+      assert.equal((error as Error).message.includes("KNOWN_TEST_SECRET"), false);
+      return true;
+    });
+    assert.equal(value.runner.calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), true);
+    assert.equal(value.runner.calls.some(({ args }) => args[0] === "worktree" && args[1] === "prune"), true);
+    assert.ok((await readdir(parent)).some((name) => name.startsWith("publish-")), "filesystem rm must have been attempted and failed");
+  } finally {
+    await chmod(parent, 0o700).catch(() => undefined);
+    await command("git", ["worktree", "prune"], value.repository).catch(() => undefined);
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("an original publication error is preserved and safely marked when cleanup is incomplete", async () => {
+  const value = await fixture();
+  const originalFailure = new Error("MIAOBI_COMMIT_FAILED");
+  try {
+    value.runner.fail = (args) => {
+      if (args[0] === "commit") return originalFailure;
+      if (args[0] === "worktree" && ["remove", "prune"].includes(args[1])) {
+        return new Error("cleanup KNOWN_TEST_SECRET");
+      }
+      return undefined;
+    };
+    await assert.rejects(publish(value), (error: unknown) => {
+      assert.equal(error, originalFailure);
+      assert.equal((error as { cleanupIncomplete?: boolean }).cleanupIncomplete, true);
+      assert.equal((error as Error).message.includes("KNOWN_TEST_SECRET"), false);
+      return true;
+    });
+    assert.equal(value.runner.calls.some(({ args }) => args[0] === "worktree" && args[1] === "prune"), true);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("SIGTERM to a real publisher process waits for worktree cleanup before exit", async () => {
+  const value = await fixture();
+  const ready = join(value.root, "ready");
+  const moduleUrl = pathToFileURL(join(process.cwd(), "scripts", "miaobi", "publish-github-pages.ts")).href;
+  const runnerUrl = pathToFileURL(join(process.cwd(), "scripts", "miaobi", "git-runner.ts")).href;
+  const childScript = `
+    import { writeFile } from "node:fs/promises";
+    import { runGitHubPagesPublisherWithSignals } from ${JSON.stringify(moduleUrl)};
+    import { createGitCommandRunner } from ${JSON.stringify(runnerUrl)};
+    const [repositoryDirectory, clientDirectory, ready] = process.argv.slice(1);
+    const base = createGitCommandRunner();
+    const runner = {
+      async run(args, options) {
+        if (args[0] === "remote" && args[1] === "get-url") {
+          return { stdout: "https://github.com/aurostars/magic-resume.git\\n", stderr: "" };
+        }
+        if (args[0] === "commit") {
+          const result = await base.run(args, options);
+          const keepAlive = setInterval(() => undefined, 1_000);
+          const interrupted = new Promise((_, reject) =>
+            options.signal.addEventListener("abort", () => reject(new Error("blocked command interrupted")), { once: true }));
+          await writeFile(ready, "ready");
+          try {
+            await interrupted;
+          } finally {
+            clearInterval(keepAlive);
+          }
+          return result;
+        }
+        return base.run(args, options);
+      }
+    };
+    try {
+      await runGitHubPagesPublisherWithSignals({
+        repositoryDirectory,
+        clientDirectory,
+        sourceCommit: ${JSON.stringify(SOURCE_COMMIT)},
+        releaseId: ${JSON.stringify(RELEASE_ID)},
+        runner,
+        admin: { async ensureBranchSource() {} },
+      });
+      process.exitCode = 2;
+    } catch (error) {
+      process.exitCode = error?.message === "MIAOBI_PUBLISH_INTERRUPTED" ? 143 : 3;
+    }
+  `;
+  const child = spawn(process.execPath, [
+    "--import", "tsx", "--input-type=module", "--eval", childScript,
+    value.repository, value.client, ready,
+  ], { cwd: process.cwd(), shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const output: Buffer[] = [];
+  child.stderr.on("data", (chunk) => output.push(chunk));
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, rejectExit) => {
+    child.once("error", rejectExit);
+    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+  });
+  try {
+    const deadline = Date.now() + 30_000;
+    while (!await exists(ready)) {
+      if (Date.now() > deadline) throw new Error(`publisher did not become ready: ${Buffer.concat(output).toString("utf8")}`);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    child.kill("SIGTERM");
+    const outcome = await exit;
+    assert.deepEqual(outcome, { code: 143, signal: null }, Buffer.concat(output).toString("utf8"));
+    assert.deepEqual(await worktreePaths(value.repository), [value.repository]);
+    await assert.rejects(command("git", ["show-ref", "--verify", "refs/heads/gh-pages"], value.repository));
+  } finally {
+    child.kill("SIGKILL");
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+
+test("does not retry a non-fast-forward when that attempt's cleanup is incomplete", async () => {
+  const value = await fixture();
+  const conflict = Object.assign(new Error("GIT_COMMAND_FAILED"), { kind: "non-fast-forward" });
+  let pushes = 0;
+  try {
+    await seedPages(value.remote, value.root);
+    value.runner.fail = (args) => {
+      if (args[0] === "push") {
+        pushes += 1;
+        return conflict;
+      }
+      if (args[0] === "worktree" && ["remove", "prune"].includes(args[1])) {
+        return new Error("cleanup failed");
+      }
+      return undefined;
+    };
+    await assert.rejects(publish(value), (error: unknown) => {
+      assert.equal(error, conflict);
+      assert.equal((error as { cleanupIncomplete?: boolean }).cleanupIncomplete, true);
+      return true;
+    });
+    assert.equal(pushes, 1);
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

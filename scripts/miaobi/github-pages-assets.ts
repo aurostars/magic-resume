@@ -234,6 +234,7 @@ async function readTrustedAsset(asset: SourceAsset): Promise<Buffer> {
   } finally {
     await handle?.close();
   }
+  return invalidPath();
 }
 
 async function snapshotAssets(clientDirectory: string): Promise<SnapshotAsset[]> {
