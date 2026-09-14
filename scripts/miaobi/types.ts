@@ -18,3 +18,14 @@ export interface MiaobiAssetManifest {
   baseUrl: string;
   files: Record<string, MiaobiAssetRecord>;
 }
+
+export interface GitHubPagesAssetRecord extends MiaobiAssetRecord {
+  objectPath: `objects/${string}/${string}`;
+  size: number;
+}
+
+export interface GitHubPagesManifest extends MiaobiAssetManifest {
+  provider: "github-pages";
+  sourceCommit: string;
+  files: Record<string, GitHubPagesAssetRecord>;
+}
