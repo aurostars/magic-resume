@@ -506,3 +506,120 @@ test("rejects replacement of an object ancestor even when replacement bytes matc
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("binds every object again after manifest staging and fails closed before metadata commit", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  for (let index = 0; index < 1500; index += 1) {
+    await writeFile(join(clientDirectory, `${String(index).padStart(4, "0")}.js`), `asset-${index}`);
+  }
+  const releaseDirectory = join(pagesDirectory, "releases", SOURCE_COMMIT);
+  const attacker = (async () => {
+    for (;;) {
+      try {
+        const staged = (await readdir(releaseDirectory)).some((name) =>
+          name.startsWith(".") && name.endsWith(".tmp")
+        );
+        if (staged) {
+          const [graphName] = await readdir(join(pagesDirectory, "objects"));
+          const target = join(pagesDirectory, "objects", graphName, "0000.js");
+          await rename(target, `${target}.verified`);
+          await writeFile(target, "post-validation-conflict");
+          return;
+        }
+      } catch {
+        // Manifest staging has not started yet.
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  })();
+  try {
+    await assert.rejects(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)), {
+      code: "MIAOBI_OBJECT_CONFLICT",
+    });
+    await attacker;
+    assert.equal(await exists(join(releaseDirectory, "manifest.json")), false);
+    assert.equal(await exists(join(pagesDirectory, "releases", "index.json")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("takes over a crashed stale lock with a dead owner and completes publication", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  const lockDirectory = join(pagesDirectory, ".github-pages-assets.lock");
+  await mkdir(lockDirectory, { recursive: true });
+  await writeFile(join(lockDirectory, "owner.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    ownerToken: "00000000000000000000000000000001",
+    pid: 2_147_483_647,
+    heartbeatAt: "2000-01-01T00:00:00.000Z",
+  })}\n`);
+  await writeFile(join(clientDirectory, "app.js"), "safe");
+  try {
+    const result = await materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
+    assert.equal(result.manifest.sourceCommit, SOURCE_COMMIT);
+    assert.equal(await exists(lockDirectory), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("does not take over a live owner while concurrent publication is active", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  for (let index = 0; index < 300; index += 1) {
+    await writeFile(join(clientDirectory, `${String(index).padStart(3, "0")}.js`), String(index));
+  }
+  const lockDirectory = join(pagesDirectory, ".github-pages-assets.lock");
+  const first = materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
+  try {
+    while (!await exists(lockDirectory)) await new Promise((resolve) => setImmediate(resolve));
+    const before = await stat(lockDirectory);
+    const second = materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const during = await stat(lockDirectory);
+    assert.equal(during.dev, before.dev);
+    assert.equal(during.ino, before.ino);
+    await Promise.all([first, second]);
+  } finally {
+    await first.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an old owner never removes a successor lock it does not own", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  for (let index = 0; index < 300; index += 1) {
+    await writeFile(join(clientDirectory, `${String(index).padStart(3, "0")}.js`), String(index));
+  }
+  const lockDirectory = join(pagesDirectory, ".github-pages-assets.lock");
+  const displacedDirectory = join(pagesDirectory, ".displaced-lock");
+  const publication = materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
+  const publicationFinished = publication.catch(() => undefined);
+  try {
+    for (;;) {
+      try {
+        const [graphName] = await readdir(join(pagesDirectory, "objects"));
+        if (graphName && (await readdir(join(pagesDirectory, "objects", graphName))).length > 0) break;
+      } catch {
+        // The owner has not entered object publication yet.
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await rename(lockDirectory, displacedDirectory);
+    await mkdir(lockDirectory);
+    await writeFile(join(lockDirectory, "owner.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      ownerToken: "ffffffffffffffffffffffffffffffff",
+      pid: process.pid,
+      heartbeatAt: new Date().toISOString(),
+    })}\n`);
+    await publicationFinished;
+    assert.equal(await exists(lockDirectory), true);
+    const successor = JSON.parse(await readFile(join(lockDirectory, "owner.json"), "utf8"));
+    assert.equal(successor.ownerToken, "ffffffffffffffffffffffffffffffff");
+  } finally {
+    await publicationFinished;
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,5 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import {
   link,
   lstat,
@@ -45,6 +56,9 @@ const FORBIDDEN_ASSET_HOSTS = [
   "pages.dev",
   "cloudflareworkers.com",
 ];
+
+const LOCK_LEASE_MS = 60_000;
+const LOCK_RETRY_MS = 10;
 
 class MaterializationError extends Error {
   readonly code: string;
@@ -417,23 +431,292 @@ async function assertImmutableObject(
   }
 }
 
-async function acquireWriterLock(pagesDirectory: string): Promise<() => Promise<void>> {
-  await ensureDirectory(pagesDirectory);
-  const lockPath = join(pagesDirectory, ".github-pages-assets.lock");
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    try {
-      await mkdir(lockPath, { mode: 0o700 });
-      return async () => rm(lockPath, { recursive: true, force: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() >= deadline) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
-      await new Promise((resolve) => setTimeout(resolve, 10));
+function assertImmutableObjectSync(
+  pagesDirectory: string,
+  objectPath: string,
+  content: Buffer,
+): void {
+  const targetPath = join(pagesDirectory, objectPath);
+  const ancestors: DirectoryIdentity[] = [];
+  let current = pagesDirectory;
+  for (const component of relative(pagesDirectory, dirname(targetPath)).split(sep).filter(Boolean)) {
+    const metadata = lstatSync(current);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
     }
+    ancestors.push({ path: current, device: metadata.dev, inode: metadata.ino });
+    current = join(current, component);
+  }
+  const finalDirectory = lstatSync(current);
+  ancestors.push({ path: current, device: finalDirectory.dev, inode: finalDirectory.ino });
+
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(targetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = fstatSync(descriptor);
+    const pathBefore = lstatSync(targetPath);
+    const actual = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    const pathAfter = lstatSync(targetPath);
+    if (
+      !before.isFile() || pathBefore.isSymbolicLink() || before.nlink < 1 ||
+      before.dev !== pathBefore.dev || before.ino !== pathBefore.ino ||
+      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs ||
+      after.dev !== pathAfter.dev || after.ino !== pathAfter.ino || !actual.equals(content)
+    ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    for (const ancestor of ancestors) {
+      const metadata = lstatSync(ancestor.path);
+      if (
+        !metadata.isDirectory() || metadata.isSymbolicLink() ||
+        metadata.dev !== ancestor.device || metadata.ino !== ancestor.inode
+      ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    }
+  } catch (error) {
+    if (error instanceof MaterializationError) throw error;
+    throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
-async function writeJsonImmutable(path: string, value: unknown): Promise<void> {
+function assertAllImmutableObjectsAtCommit(
+  pagesDirectory: string,
+  assets: FinalAsset[],
+  records: Record<string, GitHubPagesAssetRecord>,
+): void {
+  for (const asset of assets) {
+    assertImmutableObjectSync(
+      pagesDirectory,
+      records[asset.relativePath].objectPath,
+      asset.content,
+    );
+  }
+}
+
+type WriterLockOwner = {
+  schemaVersion: 1;
+  ownerToken: string;
+  pid: number;
+  heartbeatAt: string;
+};
+
+type WriterLock = {
+  assertOwned(): Promise<void>;
+  assertOwnedSync(): void;
+  release(): Promise<void>;
+};
+
+async function readLockOwner(lockPath: string): Promise<WriterLockOwner | null> {
+  let handle;
+  try {
+    handle = await open(join(lockPath, "owner.json"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const parsed = JSON.parse(await handle.readFile("utf8")) as Partial<WriterLockOwner>;
+    if (
+      parsed.schemaVersion !== 1 || typeof parsed.ownerToken !== "string" ||
+      !/^[0-9a-f]{32}$/.test(parsed.ownerToken) || !Number.isSafeInteger(parsed.pid) ||
+      typeof parsed.heartbeatAt !== "string" ||
+      Number.isNaN(new Date(parsed.heartbeatAt).getTime())
+    ) return null;
+    return parsed as WriterLockOwner;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function readLockOwnerSync(lockPath: string): WriterLockOwner | null {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      join(lockPath, "owner.json"),
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const parsed = JSON.parse(readFileSync(descriptor, "utf8")) as Partial<WriterLockOwner>;
+    if (
+      parsed.schemaVersion !== 1 || typeof parsed.ownerToken !== "string" ||
+      !/^[0-9a-f]{32}$/.test(parsed.ownerToken) || !Number.isSafeInteger(parsed.pid) ||
+      typeof parsed.heartbeatAt !== "string" ||
+      Number.isNaN(new Date(parsed.heartbeatAt).getTime())
+    ) return null;
+    return parsed as WriterLockOwner;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function ownerLeaseExpired(owner: WriterLockOwner | null, lockMtimeMs: number): boolean {
+  const heartbeatMs = owner ? new Date(owner.heartbeatAt).getTime() : lockMtimeMs;
+  return Date.now() - heartbeatMs > LOCK_LEASE_MS;
+}
+
+async function acquireWriterLock(pagesDirectory: string): Promise<WriterLock> {
+  await ensureDirectory(pagesDirectory);
+  const lockPath = join(pagesDirectory, ".github-pages-assets.lock");
+  const ownerPath = join(lockPath, "owner.json");
+  const ownerToken = randomUUID().split("-").join("");
+  let lockIdentity: DirectoryIdentity | undefined;
+  let staleQuarantine: string | undefined;
+
+  for (;;) {
+    try {
+      mkdirSync(lockPath, { mode: 0o700 });
+      const metadata = lstatSync(lockPath);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) invalidPath();
+      lockIdentity = { path: lockPath, device: metadata.dev, inode: metadata.ino };
+      writeFileSync(ownerPath, `${JSON.stringify({
+        schemaVersion: 1,
+        ownerToken,
+        pid: process.pid,
+        heartbeatAt: new Date().toISOString(),
+      } satisfies WriterLockOwner)}\n`, { flag: "wx", mode: 0o600 });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let observedMetadata;
+      try {
+        observedMetadata = await lstat(lockPath);
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw statError;
+      }
+      if (!observedMetadata.isDirectory() || observedMetadata.isSymbolicLink()) invalidPath();
+      const observedOwner = await readLockOwner(lockPath);
+      if (!ownerLeaseExpired(observedOwner, observedMetadata.mtimeMs)) {
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+        continue;
+      }
+
+      const quarantinePath = join(
+        pagesDirectory,
+        `.github-pages-assets.stale-${randomUUID()}`,
+      );
+      try {
+        await rename(lockPath, quarantinePath);
+      } catch (renameError) {
+        if ((renameError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw renameError;
+      }
+      const movedMetadata = await lstat(quarantinePath);
+      const movedOwner = await readLockOwner(quarantinePath);
+      if (
+        movedMetadata.dev !== observedMetadata.dev || movedMetadata.ino !== observedMetadata.ino ||
+        movedOwner?.ownerToken !== observedOwner?.ownerToken ||
+        !ownerLeaseExpired(movedOwner, movedMetadata.mtimeMs)
+      ) {
+        try {
+          await rename(quarantinePath, lockPath);
+        } catch {
+          // A concurrent contender owns the canonical lock path; preserve quarantine fail closed.
+        }
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+        continue;
+      }
+      staleQuarantine = quarantinePath;
+    }
+  }
+
+  let heartbeatFailure: unknown;
+  const assertOwnedSync = (): void => {
+    if (heartbeatFailure || !lockIdentity) {
+      throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    }
+    try {
+      const metadata = lstatSync(lockPath);
+      const current = readLockOwnerSync(lockPath);
+      if (
+        metadata.dev !== lockIdentity.device || metadata.ino !== lockIdentity.inode ||
+        current?.ownerToken !== ownerToken
+      ) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    } catch (error) {
+      if (error instanceof MaterializationError) throw error;
+      throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    }
+  };
+
+  const writeHeartbeat = async (): Promise<void> => {
+    await writeJsonAtomically(ownerPath, {
+      schemaVersion: 1,
+      ownerToken,
+      pid: process.pid,
+      heartbeatAt: new Date().toISOString(),
+    } satisfies WriterLockOwner, assertOwnedSync, false);
+  };
+  await writeHeartbeat();
+  if (staleQuarantine) await rm(staleQuarantine, { recursive: true, force: true });
+
+  const heartbeat = setInterval(() => {
+    void writeHeartbeat().catch((error) => {
+      heartbeatFailure = error;
+    });
+  }, Math.floor(LOCK_LEASE_MS / 3));
+  heartbeat.unref();
+
+  const assertOwned = async (): Promise<void> => {
+    if (heartbeatFailure) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    if (!lockIdentity) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    const [metadata, current] = await Promise.all([
+      lstat(lockPath),
+      readLockOwner(lockPath),
+    ]);
+    if (
+      metadata.dev !== lockIdentity.device || metadata.ino !== lockIdentity.inode ||
+      current?.ownerToken !== ownerToken
+    ) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+  };
+
+  return {
+    assertOwned,
+    assertOwnedSync,
+    async release() {
+      clearInterval(heartbeat);
+      const cleanupPath = join(pagesDirectory, `.github-pages-assets.release-${ownerToken}`);
+      try {
+        assertOwnedSync();
+        renameSync(lockPath, cleanupPath);
+        const moved = lstatSync(cleanupPath);
+        const movedOwner = readLockOwnerSync(cleanupPath);
+        if (
+          moved.dev === lockIdentity?.device && moved.ino === lockIdentity?.inode &&
+          movedOwner?.ownerToken === ownerToken
+        ) {
+          await rm(cleanupPath, { recursive: true, force: true });
+        }
+      } catch {
+        // Ownership changed or cleanup raced; never remove a path not proven to be ours.
+      }
+    },
+  };
+}
+
+function sameBytesSync(path: string, expected: Buffer): boolean {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = fstatSync(descriptor);
+    const pathMetadata = lstatSync(path);
+    const content = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    return before.isFile() && !pathMetadata.isSymbolicLink() &&
+      before.dev === pathMetadata.dev && before.ino === pathMetadata.ino &&
+      before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+      before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs &&
+      content.equals(expected);
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+async function writeJsonImmutable(
+  path: string,
+  value: unknown,
+  beforeCommit?: () => void,
+): Promise<void> {
   await ensureDirectory(dirname(path));
   const content = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
   const temporaryPath = join(dirname(path), `.${randomUUID()}.tmp`);
@@ -448,10 +731,11 @@ async function writeJsonImmutable(path: string, value: unknown): Promise<void> {
     await handle.sync();
     await handle.close();
     handle = undefined;
+    beforeCommit?.();
     try {
-      await link(temporaryPath, path);
+      linkSync(temporaryPath, path);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !await sameBytes(path, content)) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !sameBytesSync(path, content)) {
         throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
       }
     }
@@ -461,8 +745,13 @@ async function writeJsonImmutable(path: string, value: unknown): Promise<void> {
   }
 }
 
-async function writeJsonAtomically(path: string, value: unknown): Promise<void> {
-  await ensureDirectory(dirname(path));
+async function writeJsonAtomically(
+  path: string,
+  value: unknown,
+  beforeCommit?: () => void,
+  createParent = true,
+): Promise<void> {
+  if (createParent) await ensureDirectory(dirname(path));
   const temporaryPath = join(dirname(path), `.${randomUUID()}.tmp`);
   let handle;
   try {
@@ -475,7 +764,8 @@ async function writeJsonAtomically(path: string, value: unknown): Promise<void> 
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temporaryPath, path);
+    beforeCommit?.();
+    renameSync(temporaryPath, path);
   } finally {
     await handle?.close().catch(() => undefined);
     await rm(temporaryPath, { force: true }).catch(() => undefined);
@@ -616,10 +906,16 @@ export async function materializeGitHubPagesRelease(input: {
       Object.entries(releases).sort(([left], [right]) => compareNames(left, right)),
     );
 
-    await writeJsonImmutable(manifestPath, manifest);
+    await releaseWriter.assertOwned();
+    await writeJsonImmutable(manifestPath, manifest, () => {
+      releaseWriter.assertOwnedSync();
+      assertAllImmutableObjectsAtCommit(pagesDirectory, assets, records);
+      releaseWriter.assertOwnedSync();
+    });
+    await releaseWriter.assertOwned();
     await writeJsonAtomically(indexPath, { schemaVersion: 1, releases: sortedReleases });
     return { manifest, releaseDirectory, createdObjectPaths };
   } finally {
-    await releaseWriter();
+    await releaseWriter.release();
   }
 }
