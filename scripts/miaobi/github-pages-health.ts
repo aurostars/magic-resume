@@ -215,10 +215,13 @@ function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole,
   }
   for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
     const relations = (attribute(tag, "rel") ?? "").toLowerCase().split(/\s+/);
-    if (relations.includes("stylesheet") || relations.includes("modulepreload")) {
+    const isStylesheet = relations.includes("stylesheet");
+    const isModulePreload = relations.includes("modulepreload");
+    if (isStylesheet && isModulePreload) healthFailed();
+    if (isStylesheet || isModulePreload) {
       const href = attribute(tag, "href");
       if (!href) healthFailed();
-      add(href, relations.includes("stylesheet") ? "stylesheet" : "script");
+      add(href, isStylesheet ? "stylesheet" : "script");
     }
   }
   return [...assets].sort(([left], [right]) => left.localeCompare(right))

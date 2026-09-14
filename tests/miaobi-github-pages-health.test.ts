@@ -422,3 +422,20 @@ test("many body chunks use bounded abort listeners and remove them after success
   assert.ok(maximum <= 1, `abort listeners grew to ${maximum}`);
   assert.equal(active, 0);
 });
+
+
+test("rejects one link element that claims conflicting stylesheet and modulepreload roles", async () => {
+  const fixture = releaseFixture();
+  const html = new TextEncoder().encode(
+    `<!doctype html><link rel="stylesheet modulepreload" href="${OBJECT_BASE}assets/app.css"><script type="module" src="${OBJECT_BASE}assets/app.js"></script>`,
+  );
+  const index = record("index.html", html, "text/html; charset=utf-8");
+  fixture.publication.manifest.files["index.html"] = index;
+  fixture.bodies.set(index.url, html);
+  refreshManifestBody(fixture);
+
+  await assert.rejects(verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl: fetchUsingManifestMimes(fixture),
+  }), /MIAOBI_PAGES_HEALTH_FAILED/);
+});
