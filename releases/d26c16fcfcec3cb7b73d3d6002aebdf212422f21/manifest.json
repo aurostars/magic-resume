@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "provider": "github-pages",
+  "sourceCommit": "d26c16fcfcec3cb7b73d3d6002aebdf212422f21",
+  "releaseId": "d26c16fcfcec-20260914142200",
+  "baseUrl": "https://aurostars.github.io/magic-resume/",
+  "files": {
+    "app.js": {
+      "relativePath": "app.js",
+      "contentHash": "95e5224f3b1af528ff72edfa9817e517bed0e28e61e77bfaf01ad194b0b44eab",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/4c3e614166ea11adf29cb51067aa4171bcc243a054a4587c1960129c99d4369f/app.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/4c3e614166ea11adf29cb51067aa4171bcc243a054a4587c1960129c99d4369f/app.js",
+      "objectPath": "objects/4c3e614166ea11adf29cb51067aa4171bcc243a054a4587c1960129c99d4369f/app.js",
+      "size": 20
+    }
+  },
+  "createdAt": "2026-09-14T14:22:00.000Z"
+}
