@@ -173,9 +173,16 @@ async function withIsolatedDirectory<T>(
 }
 
 function normalizeEscapedUrlSyntax(text: string): string {
-  return text
-    .replace(/\\(?:\/|u002f|x2f)/gi, "/")
-    .replace(/\\(?:u003a|x3a)/gi, ":");
+  return text.replace(
+    /(?<!\\)\\(?:\/|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2}))/g,
+    (escaped, unicodeHex: string | undefined, shortHex: string | undefined) => {
+      if (escaped === String.raw`\/`) return "/";
+      const codePoint = Number.parseInt(unicodeHex ?? shortHex, 16);
+      return codePoint >= 0x20 && codePoint <= 0x7e
+        ? String.fromCharCode(codePoint)
+        : escaped;
+    },
+  );
 }
 
 function extractAbsoluteHttpUrls(text: string): string[] {
@@ -233,10 +240,10 @@ function assertAllowedGeneratedUrl(value: string, tosOrigins: ReadonlySet<string
   );
 }
 
-test("escaped absolute URLs are normalized before the exact allowlist is applied", () => {
+test("one-layer lowercase JS escapes cannot hide a disallowed absolute URL", () => {
   const rejected = [
-    String.raw`https:\/\/evil.example/path`,
-    String.raw`HtTpS\X3A\U002F\X2Fevil.example/path`,
+    String.raw`\x68\u0074\x74\u0070\x73\x3a\/\u002fevil.example/path`,
+    String.raw`\u0068ttps\u003a\/\/evil.example/path`,
     String.raw`http\u003a\/\/evil.example/path`,
   ];
   for (const fixture of rejected) {
@@ -244,14 +251,32 @@ test("escaped absolute URLs are normalized before the exact allowlist is applied
     assert.equal(urls.length, 1, `escaped URL was not extracted: ${fixture}`);
     assert.throws(() => assertAllowedGeneratedUrl(urls[0], new Set()), /unexpected generated URL origin/);
   }
+});
 
+test("one-layer lowercase JS escapes preserve exact allowed origins", () => {
   for (const [fixture, expected] of [
-    [String.raw`https\u003a\x2f\/magic.solutionsuite.cn/path`, "https://magic.solutionsuite.cn/path"],
-    [String.raw`https\x3a\/\/miaobi.invalid\/__ASSET_BASE__\/chunk.js`, "https://miaobi.invalid/__ASSET_BASE__/chunk.js"],
+    [
+      String.raw`\x68\u0074\x74\u0070\x73\x3A\x2F\/magic.solutionsuite.cn/path`,
+      "https://magic.solutionsuite.cn/path",
+    ],
+    [
+      String.raw`https\x3a\/\/miaobi.invalid\/__ASSET_BASE__\/chunk.js`,
+      "https://miaobi.invalid/__ASSET_BASE__/chunk.js",
+    ],
   ] as const) {
     const urls = extractAbsoluteHttpUrls(fixture);
     assert.deepEqual(urls, [expected]);
     assert.doesNotThrow(() => assertAllowedGeneratedUrl(urls[0], new Set()));
+  }
+});
+
+test("invalid uppercase, double escapes, and ordinary source text do not become URL candidates", () => {
+  for (const fixture of [
+    String.raw`https\X3A\U002F\X2Fevil.example/path`,
+    String.raw`\\x68\\x74\\x74\\x70\\x73\\x3a\\x2f\\x2fevil.example/path`,
+    String.raw`const first = "\x68"; const second = "\u0074";`,
+  ]) {
+    assert.deepEqual(extractAbsoluteHttpUrls(fixture), [], `unexpected URL candidate: ${fixture}`);
   }
 });
 
