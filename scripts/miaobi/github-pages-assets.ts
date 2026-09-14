@@ -23,14 +23,27 @@ const PLACEHOLDER = "https://miaobi.invalid/__ASSET_BASE__/";
 const SOURCE_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const RELEASE_ID_PATTERN = /^[0-9a-f]{12}-\d{14}$/;
 const UNSAFE_TEXT = [
-  /workers\.dev/i,
-  /https?:\/\/[^\s"'`]*tos[^\s"'`]*/i,
   /\/Users\//,
   /\/workspace\//,
   /file:\/\//i,
   /sourceMappingURL/i,
   /KNOWN_TEST_SECRET/i,
   /do-not-leak/i,
+];
+const FORBIDDEN_DATA_NAMES = new Set([
+  "credentials.json",
+  "webdav-credentials.json",
+  "resume.json",
+  "local-state.json",
+  "session.json",
+]);
+const FORBIDDEN_ASSET_HOSTS = [
+  "raw.githubusercontent.com",
+  "cdn.jsdelivr.net",
+  "jsdelivr.net",
+  "workers.dev",
+  "pages.dev",
+  "cloudflareworkers.com",
 ];
 
 class MaterializationError extends Error {
@@ -54,6 +67,9 @@ type SourceAsset = {
   sourcePath: string;
   sourceDevice: number;
   sourceInode: number;
+  sourceSize: number;
+  sourceMtimeMs: number;
+  sourceCtimeMs: number;
   contentType: string;
 };
 
@@ -81,6 +97,29 @@ function shouldExclude(relativePath: string): boolean {
 
 function compareNames(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function normalizeEscapedUrls(text: string): string {
+  return text
+    .replace(/\\u002f/gi, "/")
+    .replace(/\\x2f/gi, "/")
+    .replace(/\\\//g, "/");
+}
+
+function hasForbiddenAssetUrl(text: string): boolean {
+  const normalized = normalizeEscapedUrls(text);
+  const candidates = normalized.match(/(?:https?:)?\/\/[^\s"'`<>\\]+/gi) ?? [];
+  return candidates.some((candidate) => {
+    try {
+      const parsed = new URL(candidate.startsWith("//") ? `https:${candidate}` : candidate);
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+      return FORBIDDEN_ASSET_HOSTS.some((forbidden) =>
+        hostname === forbidden || hostname.endsWith(`.${forbidden}`)
+      ) || hostname.split(".").some((label) => label === "tos" || label.startsWith("tos-"));
+    } catch {
+      return true;
+    }
+  });
 }
 
 async function rejectSymlinkPathComponents(path: string): Promise<void> {
@@ -127,6 +166,9 @@ async function collectAssets(clientDirectory: string): Promise<{
       const sourcePath = join(directory, entry.name);
       const entryMetadata = await lstat(sourcePath);
       if (entryMetadata.isSymbolicLink()) invalidPath();
+      if (entryMetadata.isFile() && FORBIDDEN_DATA_NAMES.has(entry.name.toLowerCase())) {
+        throw new MaterializationError("MIAOBI_UNSAFE_ASSET");
+      }
       if (shouldExclude(relativePath)) continue;
       if (entryMetadata.isDirectory()) {
         await visit(sourcePath, relativePath);
@@ -138,6 +180,9 @@ async function collectAssets(clientDirectory: string): Promise<{
             sourcePath,
             sourceDevice: entryMetadata.dev,
             sourceInode: entryMetadata.ino,
+            sourceSize: entryMetadata.size,
+            sourceMtimeMs: entryMetadata.mtimeMs,
+            sourceCtimeMs: entryMetadata.ctimeMs,
             contentType,
           });
         }
@@ -145,6 +190,7 @@ async function collectAssets(clientDirectory: string): Promise<{
     }
   }
   await visit(root, "");
+  assets.sort((left, right) => compareNames(left.relativePath, right.relativePath));
   return { assets, directories };
 }
 
@@ -152,12 +198,19 @@ async function readTrustedAsset(asset: SourceAsset): Promise<Buffer> {
   let handle;
   try {
     handle = await open(asset.sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const metadata = await handle.stat();
+    const before = await handle.stat();
     if (
-      !metadata.isFile() || metadata.dev !== asset.sourceDevice ||
-      metadata.ino !== asset.sourceInode
+      !before.isFile() || before.dev !== asset.sourceDevice ||
+      before.ino !== asset.sourceInode || before.size !== asset.sourceSize ||
+      before.mtimeMs !== asset.sourceMtimeMs || before.ctimeMs !== asset.sourceCtimeMs
     ) invalidPath();
-    return await handle.readFile();
+    const content = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+    ) invalidPath();
+    return content;
   } catch (error) {
     if (error instanceof MaterializationError) throw error;
     invalidPath();
@@ -211,7 +264,10 @@ function finalizeAssets(assets: SnapshotAsset[], assetRoot: string): FinalAsset[
         throw new MaterializationError("MIAOBI_UNSAFE_ASSET");
       }
       text = text.split(PLACEHOLDER).join(assetRoot);
-      if (text.includes(PLACEHOLDER) || UNSAFE_TEXT.some((pattern) => pattern.test(text))) {
+      if (
+        text.includes(PLACEHOLDER) || hasForbiddenAssetUrl(text) ||
+        UNSAFE_TEXT.some((pattern) => pattern.test(text))
+      ) {
         throw new MaterializationError("MIAOBI_UNSAFE_ASSET");
       }
       content = Buffer.from(text, "utf8");
@@ -235,9 +291,13 @@ async function sameBytes(path: string, expected: Buffer): Promise<boolean> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const metadata = await handle.stat();
-    if (!metadata.isFile()) return false;
-    return (await handle.readFile()).equals(expected);
+    const before = await handle.stat();
+    if (!before.isFile()) return false;
+    const content = await handle.readFile();
+    const after = await handle.stat();
+    return before.dev === after.dev && before.ino === after.ino &&
+      before.size === after.size && before.mtimeMs === after.mtimeMs &&
+      before.ctimeMs === after.ctimeMs && content.equals(expected);
   } catch {
     return false;
   } finally {
@@ -273,6 +333,127 @@ async function publishImmutableObject(
         throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
       }
       return false;
+    }
+  } catch (error) {
+    if (error instanceof MaterializationError) throw error;
+    throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function publishImmutableAlias(
+  pagesDirectory: string,
+  sourceObjectPath: string,
+  objectPath: string,
+  content: Buffer,
+): Promise<boolean> {
+  const targetPath = join(pagesDirectory, objectPath);
+  await ensureDirectory(dirname(targetPath));
+  try {
+    await link(join(pagesDirectory, sourceObjectPath), targetPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!await sameBytes(targetPath, content)) {
+      throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    }
+    return false;
+  }
+}
+
+async function directoryChain(root: string, targetDirectory: string): Promise<DirectoryIdentity[]> {
+  const identities: DirectoryIdentity[] = [];
+  let current = root;
+  const rootMetadata = await lstat(current);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) invalidPath();
+  identities.push({ path: current, device: rootMetadata.dev, inode: rootMetadata.ino });
+  for (const component of relative(root, targetDirectory).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    const metadata = await lstat(current);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) invalidPath();
+    identities.push({ path: current, device: metadata.dev, inode: metadata.ino });
+  }
+  return identities;
+}
+
+async function assertImmutableObject(
+  pagesDirectory: string,
+  objectPath: string,
+  content: Buffer,
+): Promise<void> {
+  const targetPath = join(pagesDirectory, objectPath);
+  const ancestors = await directoryChain(pagesDirectory, dirname(targetPath));
+  let handle;
+  try {
+    handle = await open(targetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = await handle.stat();
+    const pathBefore = await lstat(targetPath);
+    if (
+      !before.isFile() || pathBefore.isSymbolicLink() || before.nlink < 1 ||
+      before.dev !== pathBefore.dev || before.ino !== pathBefore.ino
+    ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    const actual = await handle.readFile();
+    const after = await handle.stat();
+    const pathAfter = await lstat(targetPath);
+    if (
+      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs ||
+      after.dev !== pathAfter.dev || after.ino !== pathAfter.ino || !actual.equals(content)
+    ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    for (const ancestor of ancestors) {
+      const metadata = await lstat(ancestor.path);
+      if (
+        !metadata.isDirectory() || metadata.isSymbolicLink() ||
+        metadata.dev !== ancestor.device || metadata.ino !== ancestor.inode
+      ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    }
+  } catch (error) {
+    if (error instanceof MaterializationError) throw error;
+    throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function acquireWriterLock(pagesDirectory: string): Promise<() => Promise<void>> {
+  await ensureDirectory(pagesDirectory);
+  const lockPath = join(pagesDirectory, ".github-pages-assets.lock");
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      return async () => rm(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+async function writeJsonImmutable(path: string, value: unknown): Promise<void> {
+  await ensureDirectory(dirname(path));
+  const content = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const temporaryPath = join(dirname(path), `.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await open(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o644,
+    );
+    await handle.writeFile(content);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    try {
+      await link(temporaryPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !await sameBytes(path, content)) {
+        throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+      }
     }
   } finally {
     await handle?.close().catch(() => undefined);
@@ -333,7 +514,12 @@ export async function materializeGitHubPagesRelease(input: {
   releaseDirectory: string;
   createdObjectPaths: string[];
 }> {
-  if (!SOURCE_COMMIT_PATTERN.test(input.sourceCommit) || !RELEASE_ID_PATTERN.test(input.releaseId)) {
+  if (
+    !SOURCE_COMMIT_PATTERN.test(input.sourceCommit) ||
+    !RELEASE_ID_PATTERN.test(input.releaseId) ||
+    input.pagesOrigin !== "https://aurostars.github.io" ||
+    input.pagesBasePath !== "/magic-resume/"
+  ) {
     invalidPath();
   }
   const clientDirectory = resolve(input.clientDirectory);
@@ -347,12 +533,9 @@ export async function materializeGitHubPagesRelease(input: {
   const graphHash = graphHashFor(snapshots);
   const assetRoot = `${input.pagesOrigin}${input.pagesBasePath}objects/${graphHash}/`;
   const assets = finalizeAssets(snapshots, assetRoot);
-  const canonicalByContent = new Map<string, string>();
   const records: Record<string, GitHubPagesAssetRecord> = {};
   for (const asset of assets) {
-    const canonicalPath = canonicalByContent.get(asset.contentHash) ?? asset.relativePath;
-    canonicalByContent.set(asset.contentHash, canonicalPath);
-    const objectPath = `objects/${graphHash}/${canonicalPath}` as const;
+    const objectPath = `objects/${graphHash}/${asset.relativePath}` as const;
     records[asset.relativePath] = {
       relativePath: asset.relativePath,
       contentHash: asset.contentHash,
@@ -362,16 +545,6 @@ export async function materializeGitHubPagesRelease(input: {
       objectPath,
       size: asset.content.length,
     };
-  }
-
-  const createdObjectPaths: string[] = [];
-  for (const [contentHash, canonicalPath] of Array.from(canonicalByContent.entries())) {
-    const asset = assets.find((candidate) => candidate.contentHash === contentHash);
-    if (!asset) throw new MaterializationError("MIAOBI_STATE_FAILED");
-    const objectPath = `objects/${graphHash}/${canonicalPath}`;
-    if (await publishImmutableObject(pagesDirectory, objectPath, asset.content)) {
-      createdObjectPaths.push(objectPath);
-    }
   }
 
   const releaseDirectory = join(pagesDirectory, "releases", input.sourceCommit);
@@ -384,39 +557,69 @@ export async function materializeGitHubPagesRelease(input: {
     baseUrl: `${input.pagesOrigin}${input.pagesBasePath}`,
     files: records,
   };
-  const manifest: GitHubPagesManifest = {
-    ...manifestWithoutTime,
-    createdAt: await existingCreatedAt(manifestPath, manifestWithoutTime) ??
-      createdAtForRelease(input.releaseId),
-  };
-  const indexPath = join(pagesDirectory, "releases", "index.json");
-  let releases: Record<string, { releaseId: string; manifest: string }> = {};
+  const createdObjectPaths: string[] = [];
+  const releaseWriter = await acquireWriterLock(pagesDirectory);
   try {
-    const current = JSON.parse(await readFile(indexPath, "utf8")) as {
-      schemaVersion: 1;
-      releases: typeof releases;
+    const manifest: GitHubPagesManifest = {
+      ...manifestWithoutTime,
+      createdAt: await existingCreatedAt(manifestPath, manifestWithoutTime) ??
+        createdAtForRelease(input.releaseId),
     };
-    if (current.schemaVersion !== 1 || typeof current.releases !== "object" || !current.releases) {
-      throw new Error("invalid index");
-    }
-    releases = current.releases;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
-    }
-  }
-  releases = {
-    ...releases,
-    [input.sourceCommit]: {
-      releaseId: input.releaseId,
-      manifest: `releases/${input.sourceCommit}/manifest.json`,
-    },
-  };
-  const sortedReleases = Object.fromEntries(
-    Object.entries(releases).sort(([left], [right]) => compareNames(left, right)),
-  );
 
-  await writeJsonAtomically(manifestPath, manifest);
-  await writeJsonAtomically(indexPath, { schemaVersion: 1, releases: sortedReleases });
-  return { manifest, releaseDirectory, createdObjectPaths };
+    const canonicalByContent = new Map<string, string>();
+    for (const asset of assets) {
+      const objectPath = records[asset.relativePath].objectPath;
+      const canonicalObjectPath = canonicalByContent.get(asset.contentHash);
+      const created = canonicalObjectPath === undefined
+        ? await publishImmutableObject(pagesDirectory, objectPath, asset.content)
+        : await publishImmutableAlias(
+          pagesDirectory,
+          canonicalObjectPath,
+          objectPath,
+          asset.content,
+        );
+      canonicalByContent.set(asset.contentHash, canonicalObjectPath ?? objectPath);
+      if (created) createdObjectPaths.push(objectPath);
+    }
+    for (const asset of assets) {
+      await assertImmutableObject(
+        pagesDirectory,
+        records[asset.relativePath].objectPath,
+        asset.content,
+      );
+    }
+
+    const indexPath = join(pagesDirectory, "releases", "index.json");
+    let releases: Record<string, { releaseId: string; manifest: string }> = {};
+    try {
+      const current = JSON.parse(await readFile(indexPath, "utf8")) as {
+        schemaVersion: 1;
+        releases: typeof releases;
+      };
+      if (current.schemaVersion !== 1 || typeof current.releases !== "object" || !current.releases) {
+        throw new Error("invalid index");
+      }
+      releases = current.releases;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+      }
+    }
+    releases = {
+      ...releases,
+      [input.sourceCommit]: {
+        releaseId: input.releaseId,
+        manifest: `releases/${input.sourceCommit}/manifest.json`,
+      },
+    };
+    const sortedReleases = Object.fromEntries(
+      Object.entries(releases).sort(([left], [right]) => compareNames(left, right)),
+    );
+
+    await writeJsonImmutable(manifestPath, manifest);
+    await writeJsonAtomically(indexPath, { schemaVersion: 1, releases: sortedReleases });
+    return { manifest, releaseDirectory, createdObjectPaths };
+  } finally {
+    await releaseWriter();
+  }
 }
