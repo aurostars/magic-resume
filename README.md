@@ -93,6 +93,12 @@ WebDAV settings and credentials are stored in this browser's local storage. Othe
 pnpm build
 ```
 
+### Miaobi native deployment
+
+Miaobi operators need an authenticated `magic-builder` 1.3.0+ and a reviewed commit. Run `corepack pnpm deploy:miaobi`; the script generation-fences concurrent deployers and fails closed with `MIAOBI_PAGE_RESULT_UNCERTAIN` when a remote page result cannot be proven. Never automatically retry or override that condition.
+
+Resume data and WebDAV credentials remain in the current browser profile; they are not moved to Miaobi FaaS or TOS. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. See the [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) for build artifacts, state recovery, deployment order, rollback, and verification limits.
+
 ### AI provider networking
 
 Cloudflare Workers use the platform's native `fetch` and do not need an application-level proxy. For Node.js or Docker deployments in regions that cannot directly reach OpenAI, Gemini, or Anthropic, set `AI_PROXY_URL`. `HTTPS_PROXY` and `HTTP_PROXY` are also supported as fallbacks.

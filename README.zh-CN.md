@@ -93,6 +93,12 @@ WebDAV 设置和凭据会存储在此浏览器的本地存储中。同一浏览�
 pnpm build
 ```
 
+### 妙笔原生部署
+
+运维人员需先安装并登录 `magic-builder` 1.3.0 或更高版本，并使用已评审的 commit，然后运行 `corepack pnpm deploy:miaobi`。部署采用 generation fencing 防止过期进程继续发布；远端页面结果无法确认时会以 `MIAOBI_PAGE_RESULT_UNCERTAIN` 关闭失败，绝不能自动重试或覆盖。
+
+简历与 WebDAV 凭据仍位于当前浏览器 profile，不会迁入妙笔 FaaS 或 TOS。Cloudflare 仅作为人工回滚路径保留，不参与妙笔运行时。构建产物、状态恢复、发布顺序、回滚与验证限制详见[妙笔原生部署指南（中文为主 / English summary）](docs/miaobi-deployment.md)。
+
 ### AI 厂商网络配置
 
 Cloudflare Workers 使用平台原生 `fetch`，无需配置应用层代理。Node.js 或 Docker 部署在无法直连 OpenAI、Gemini、Anthropic 的地区时，可以设置 `AI_PROXY_URL`；同时兼容 `HTTPS_PROXY` 和 `HTTP_PROXY`。
