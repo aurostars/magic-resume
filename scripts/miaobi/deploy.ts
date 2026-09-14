@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import config from "../../miaobi.config.json" with { type: "json" };
@@ -68,13 +68,35 @@ type TrustedStorage = {
 };
 
 type TrustedState = TrustedStorage & {
-  path: string;
+  legacyStatePath: string;
+  states: TrustedStorage;
 };
 
 type TrustedRecovery = TrustedStorage & {
-  pendingPath: string;
+  legacyExternalPendingPath: string;
   legacyPendingPath: string;
+  pending: TrustedStorage;
+  generations: TrustedStorage;
   lockPath: string;
+};
+
+type GenerationStateRecord = {
+  schemaVersion: 1;
+  generation: number;
+  ownerToken: string;
+  resolvedGeneration: number;
+  resolvedOwnerToken: string;
+  deployment: MiaobiDeploymentState;
+  path: string;
+};
+
+type GenerationPendingRecord = {
+  schemaVersion: 1;
+  generation: number;
+  ownerToken: string;
+  legacyAnchor: boolean;
+  pending: PendingDeployment;
+  path: string;
 };
 
 type ApiBuildMetadata = {
@@ -110,9 +132,9 @@ const systemLockClock: StateLockClock = {
 function deploymentPaths() {
   return {
     outputDirectory: resolve("dist/miaobi"),
-    statePath: resolve(".miaobi/deployment.json"),
+    legacyStatePath: resolve(".miaobi/deployment.json"),
     legacyPendingPath: resolve(".miaobi/deployment.pending.json"),
-    recoveryPath: resolve(".miaobi-recovery/deployment.pending.json"),
+    legacyExternalPendingPath: resolve(".miaobi-recovery/deployment.pending.json"),
   };
 }
 
@@ -173,18 +195,24 @@ async function trustedStorage(directory: string): Promise<TrustedStorage> {
 
 async function trustedState(statePath: string): Promise<TrustedState> {
   const storage = await trustedStorage(dirname(statePath));
+  const states = await trustedStorage(join(storage.directory, "states"));
   return {
     ...storage,
-    path: statePath,
+    legacyStatePath: statePath,
+    states,
   };
 }
 
 async function trustedRecovery(recoveryPath: string, legacyPendingPath: string): Promise<TrustedRecovery> {
   const storage = await trustedStorage(dirname(recoveryPath));
+  const pending = await trustedStorage(join(storage.directory, "pending"));
+  const generations = await trustedStorage(join(storage.directory, "generations"));
   return {
     ...storage,
-    pendingPath: recoveryPath,
+    legacyExternalPendingPath: recoveryPath,
     legacyPendingPath,
+    pending,
+    generations,
     lockPath: join(storage.directory, "deployment.lock"),
   };
 }
@@ -222,20 +250,60 @@ async function refreshLockHeartbeat(
   }
 }
 
+async function allocateGeneration(state: TrustedRecovery, committedState: TrustedState): Promise<number> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    await assertStorageIdentity(state.generations);
+    await assertStorageIdentity(state.pending);
+    await assertStorageIdentity(committedState.states);
+    const entries = await readdir(state.generations.directory, { withFileTypes: true });
+    let maximum = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[1-9]\d*$/.test(entry.name)) {
+        throw codedError("MIAOBI_STATE_FAILED");
+      }
+      const generation = Number(entry.name);
+      if (!Number.isSafeInteger(generation)) throw codedError("MIAOBI_STATE_FAILED");
+      maximum = Math.max(maximum, generation);
+    }
+    for (const storage of [state.pending, committedState.states]) {
+      for (const entry of await readdir(storage.directory, { withFileTypes: true })) {
+        if (GENERATION_TEMP_FILE_PATTERN.test(entry.name)) continue;
+        if (!entry.isFile() || entry.isSymbolicLink()) throw codedError("MIAOBI_STATE_FAILED");
+        maximum = Math.max(maximum, parseGenerationFileName(entry.name).generation);
+      }
+    }
+    const generation = maximum + 1;
+    if (!Number.isSafeInteger(generation)) throw codedError("MIAOBI_STATE_FAILED");
+    try {
+      await mkdir(join(state.generations.directory, String(generation)), { mode: 0o700 });
+      await assertStorageIdentity(state.generations);
+      return generation;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw codedError("MIAOBI_STATE_FAILED");
+    }
+  }
+  throw codedError("MIAOBI_STATE_LOCKED");
+}
+
 type StateLock = {
+  generation: number;
+  ownerToken: string;
   assertOwnership: () => Promise<void>;
   release: () => Promise<void>;
 };
 
 async function acquireStateLock(
   state: TrustedRecovery,
+  committedState: TrustedState,
   clock: StateLockClock,
 ): Promise<StateLock> {
   await assertStorageIdentity(state);
   const token = randomUUID().replaceAll("-", "");
+  const generation = await allocateGeneration(state, committedState);
   const processStartedAt = new Date(clock.now() - process.uptime() * 1000).toISOString();
   const owner = {
     schemaVersion: 1,
+    generation,
     pid: process.pid,
     token,
     startedAt: new Date(clock.now()).toISOString(),
@@ -283,6 +351,8 @@ async function acquireStateLock(
       }, LOCK_HEARTBEAT_MS);
       heartbeatTimer.unref?.();
       return {
+        generation,
+        ownerToken: token,
         assertOwnership: verifyOwnership,
         release: async () => {
           clock.clearInterval(heartbeatTimer);
@@ -460,9 +530,119 @@ async function readJsonFile(path: string): Promise<unknown | undefined> {
   }
 }
 
-async function priorState(state: TrustedState, platformOrigin: string) {
+const OWNER_TOKEN_PATTERN = /^[0-9a-f]{32}$/;
+const GENERATION_FILE_PATTERN = /^([1-9]\d*)-([0-9a-f]{32})\.json$/;
+const GENERATION_TEMP_FILE_PATTERN = /^\.[1-9]\d*-[0-9a-f]{32}\.json\.tmp-[0-9a-f]{32}-[0-9a-f-]{36}$/;
+
+function generationFileName(generation: number, ownerToken: string): string {
+  if (!Number.isSafeInteger(generation) || generation <= 0 || !OWNER_TOKEN_PATTERN.test(ownerToken)) {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+  return `${generation}-${ownerToken}.json`;
+}
+
+function parseGenerationFileName(name: string): { generation: number; ownerToken: string } {
+  const match = GENERATION_FILE_PATTERN.exec(name);
+  const generation = Number(match?.[1]);
+  if (!match || !Number.isSafeInteger(generation)) throw codedError("MIAOBI_STATE_FAILED");
+  return { generation, ownerToken: match[2] };
+}
+
+async function immutableJson(
+  storage: TrustedStorage,
+  targetPath: string,
+  ownerToken: string,
+  value: unknown,
+): Promise<void> {
+  await assertStorageIdentity(storage);
+  if (dirname(targetPath) !== storage.directory || !targetPath.endsWith(`-${ownerToken}.json`)) {
+    throw codedError("MIAOBI_STATE_FAILED");
+  }
+  const temporaryPath = join(storage.directory, `.${generationFileName(
+    parseGenerationFileName(targetPath.slice(storage.directory.length + 1)).generation,
+    ownerToken,
+  )}.tmp-${ownerToken}-${randomUUID()}`);
+  let handle;
+  try {
+    handle = await open(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.sync();
+    const staged = await handle.stat();
+    await handle.close();
+    handle = undefined;
+    await assertStorageIdentity(storage);
+    await link(temporaryPath, targetPath);
+    await assertStorageIdentity(storage);
+    const committed = await lstat(targetPath);
+    if (
+      !committed.isFile() || committed.isSymbolicLink() ||
+      committed.dev !== staged.dev || committed.ino !== staged.ino
+    ) throw new Error();
+  } catch {
+    throw codedError("MIAOBI_STATE_FAILED");
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await safeRemoveStaged(storage, temporaryPath);
+  }
+}
+
+async function generationStates(state: TrustedState, platformOrigin: string): Promise<GenerationStateRecord[]> {
+  await assertStorageIdentity(state.states);
+  const entries = await readdir(state.states.directory, { withFileTypes: true });
+  const records: GenerationStateRecord[] = [];
+  for (const entry of entries) {
+    if (GENERATION_TEMP_FILE_PATTERN.test(entry.name)) continue;
+    if (!entry.isFile() || entry.isSymbolicLink()) throw codedError("MIAOBI_STATE_FAILED");
+    const identity = parseGenerationFileName(entry.name);
+    const path = join(state.states.directory, entry.name);
+    const value = await readJsonFile(path) as Omit<GenerationStateRecord, "path"> | undefined;
+    const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
+    if (
+      !value || JSON.stringify(keys) !== JSON.stringify([
+        "deployment", "generation", "ownerToken", "resolvedGeneration", "resolvedOwnerToken", "schemaVersion",
+      ].sort()) ||
+      value.schemaVersion !== 1 || value.generation !== identity.generation ||
+      value.ownerToken !== identity.ownerToken ||
+      !Number.isSafeInteger(value.resolvedGeneration) || value.resolvedGeneration < 0 ||
+      value.resolvedGeneration > value.generation || !OWNER_TOKEN_PATTERN.test(value.resolvedOwnerToken)
+    ) throw codedError("MIAOBI_STATE_FAILED");
+    const deployment = parseDeploymentState(value.deployment, platformOrigin);
+    if (deployment.schemaVersion !== 2) throw codedError("MIAOBI_STATE_FAILED");
+    records.push({ ...value, deployment, path });
+  }
+  return records.sort((left, right) => left.generation - right.generation);
+}
+
+async function commitGenerationState(
+  state: TrustedState,
+  lock: StateLock,
+  deployment: MiaobiDeploymentState,
+  resolved: { generation: number; ownerToken: string } = lock,
+): Promise<string> {
+  const path = join(state.states.directory, generationFileName(lock.generation, lock.ownerToken));
+  await immutableJson(state.states, path, lock.ownerToken, {
+    schemaVersion: 1,
+    generation: lock.generation,
+    ownerToken: lock.ownerToken,
+    resolvedGeneration: resolved.generation,
+    resolvedOwnerToken: resolved.ownerToken,
+    deployment,
+  });
+  return path;
+}
+
+async function priorState(
+  state: TrustedState,
+  platformOrigin: string,
+): Promise<MiaobiDeploymentState | LegacyDeploymentState | undefined> {
+  const records = await generationStates(state, platformOrigin);
+  if (records.length > 0) return records.at(-1)?.deployment;
   await assertStorageIdentity(state);
-  const value = await readJsonFile(state.path);
+  const value = await readJsonFile(state.legacyStatePath);
   return value === undefined ? undefined : parseDeploymentState(value, platformOrigin);
 }
 
@@ -541,28 +721,51 @@ function migrateLegacyPending(
   }
 }
 
-type PendingRecord = {
-  pending: PendingDeployment;
-  cleanup: Array<{ path: string; storage: TrustedStorage }>;
-};
-
 function samePendingSemantics(left: PendingDeployment, right: PendingDeployment): boolean {
   return (
-    left.platformOrigin === right.platformOrigin &&
-    left.apiBuildMarker === right.apiBuildMarker &&
-    left.deployment.schemaVersion === right.deployment.schemaVersion &&
-    left.deployment.apiBuildMarker === right.deployment.apiBuildMarker &&
-    left.deployment.releaseId === right.deployment.releaseId &&
-    left.deployment.apiFaasId === right.deployment.apiFaasId &&
-    left.deployment.apiFaasUrl === right.deployment.apiFaasUrl &&
-    left.deployment.webFaasId === right.deployment.webFaasId &&
-    left.deployment.webFaasUrl === right.deployment.webFaasUrl &&
-    left.deployment.pageId === right.deployment.pageId &&
-    left.deployment.deployedAt === right.deployment.deployedAt &&
-    left.page.id === right.page.id &&
-    left.page.artifactPath === right.page.artifactPath &&
+    sameDeploymentSemantics(left.deployment, right.deployment) &&
+    left.platformOrigin === right.platformOrigin && left.apiBuildMarker === right.apiBuildMarker &&
+    left.page.id === right.page.id && left.page.artifactPath === right.page.artifactPath &&
     left.page.sha256 === right.page.sha256
   );
+}
+
+function sameDeploymentSemantics(
+  left: MiaobiDeploymentState,
+  right: MiaobiDeploymentState,
+): boolean {
+  return (
+    left.schemaVersion === right.schemaVersion && left.apiBuildMarker === right.apiBuildMarker &&
+    left.releaseId === right.releaseId && left.apiFaasId === right.apiFaasId &&
+    left.apiFaasUrl === right.apiFaasUrl && left.webFaasId === right.webFaasId &&
+    left.webFaasUrl === right.webFaasUrl && left.pageId === right.pageId &&
+    left.deployedAt === right.deployedAt
+  );
+}
+
+async function generationPendingRecords(
+  recovery: TrustedRecovery,
+  platformOrigin: string,
+): Promise<GenerationPendingRecord[]> {
+  await assertStorageIdentity(recovery.pending);
+  const entries = await readdir(recovery.pending.directory, { withFileTypes: true });
+  const records: GenerationPendingRecord[] = [];
+  for (const entry of entries) {
+    if (GENERATION_TEMP_FILE_PATTERN.test(entry.name)) continue;
+    if (!entry.isFile() || entry.isSymbolicLink()) throw codedError("MIAOBI_PENDING_INVALID");
+    const identity = parseGenerationFileName(entry.name);
+    const path = join(recovery.pending.directory, entry.name);
+    const value = await readJsonFile(path) as Omit<GenerationPendingRecord, "path"> | undefined;
+    const keys = value && typeof value === "object" ? Object.keys(value).sort() : [];
+    if (
+      !value || JSON.stringify(keys) !== JSON.stringify([
+        "generation", "legacyAnchor", "ownerToken", "pending", "schemaVersion",
+      ].sort()) || value.schemaVersion !== 1 || value.legacyAnchor !== false ||
+      value.generation !== identity.generation || value.ownerToken !== identity.ownerToken
+    ) throw codedError("MIAOBI_PENDING_INVALID");
+    records.push({ ...value, pending: parsePending(value.pending, platformOrigin), path });
+  }
+  return records.sort((left, right) => left.generation - right.generation);
 }
 
 async function pendingState(
@@ -571,65 +774,62 @@ async function pendingState(
   platformOrigin: string,
   outputDirectory: string,
   gitCommit: string,
-): Promise<PendingRecord | undefined> {
+  lock: StateLock,
+): Promise<GenerationPendingRecord | undefined> {
+  const records = await generationPendingRecords(recovery, platformOrigin);
+  const committed = await generationStates(state, platformOrigin);
+  const authoritativeGeneration = committed.at(-1)?.generation ?? 0;
+  const unresolved = records.filter((record) => (
+    record.generation > authoritativeGeneration &&
+    !committed.some((stateRecord) => (
+      stateRecord.resolvedGeneration === record.generation &&
+      stateRecord.resolvedOwnerToken === record.ownerToken
+    ))
+  ));
+  if (unresolved.length > 1) throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+
   await assertStorageIdentity(recovery);
-  const current = await readJsonFile(recovery.pendingPath);
+  const external = await readJsonFile(recovery.legacyExternalPendingPath);
   await assertStorageIdentity(state);
   const legacy = await readJsonFile(recovery.legacyPendingPath);
-  if (current === undefined && legacy === undefined) return undefined;
-
-  let metadata: ApiBuildMetadata | undefined;
-  const migrate = async (value: unknown): Promise<PendingDeployment> => {
-    metadata ??= await readApiBuildMetadata(outputDirectory, gitCommit);
-    return migrateLegacyPending(value, platformOrigin, metadata.buildMarker);
-  };
-  const parseCurrent = async (): Promise<PendingDeployment | undefined> => {
-    if (current === undefined) return undefined;
-    return (current as { schemaVersion?: unknown }).schemaVersion === 2
-      ? parsePending(current, platformOrigin)
-      : migrate(current);
-  };
-
-  if (current !== undefined && legacy !== undefined) {
-    try {
-      const currentPending = await parseCurrent();
-      const legacyPending = await migrate(legacy);
-      if (!currentPending || !samePendingSemantics(currentPending, legacyPending)) throw new Error();
-      return {
-        pending: currentPending,
-        cleanup: [
-          { path: recovery.pendingPath, storage: recovery },
-          { path: recovery.legacyPendingPath, storage: state },
-        ],
-      };
-    } catch {
-      throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
-    }
-  }
-  if (current !== undefined) {
-    if ((current as { schemaVersion?: unknown }).schemaVersion === 2) {
-      return {
-        pending: parsePending(current, platformOrigin),
-        cleanup: [{ path: recovery.pendingPath, storage: recovery }],
-      };
-    }
-    try {
-      return {
-        pending: await migrate(current),
-        cleanup: [{ path: recovery.pendingPath, storage: recovery }],
-      };
-    } catch {
-      throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
-    }
-  }
-  try {
-    return {
-      pending: await migrate(legacy),
-      cleanup: [{ path: recovery.legacyPendingPath, storage: state }],
+  if (external !== undefined || legacy !== undefined) {
+    let metadata: ApiBuildMetadata | undefined;
+    const migrate = async (value: unknown): Promise<PendingDeployment> => {
+      try {
+        metadata ??= await readApiBuildMetadata(outputDirectory, gitCommit);
+        return migrateLegacyPending(value, platformOrigin, metadata.buildMarker);
+      } catch {
+        throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+      }
     };
-  } catch {
-    throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+    const externalPending = external === undefined
+      ? undefined
+      : (external as { schemaVersion?: unknown }).schemaVersion === 2
+        ? parsePending(external, platformOrigin)
+        : await migrate(external);
+    const legacyPending = legacy === undefined ? undefined : await migrate(legacy);
+    if (externalPending && legacyPending && !samePendingSemantics(externalPending, legacyPending)) {
+      throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+    }
+    const pending = externalPending ?? legacyPending;
+    if (pending && !committed.some((record) => sameDeploymentSemantics(record.deployment, pending.deployment))) {
+      if (unresolved.length > 0) throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
+      const path = join(recovery.pending.directory, generationFileName(lock.generation, lock.ownerToken));
+      const migrated: Omit<GenerationPendingRecord, "path"> = {
+        schemaVersion: 1,
+        generation: lock.generation,
+        ownerToken: lock.ownerToken,
+        legacyAnchor: false,
+        pending,
+      };
+      await lock.assertOwnership();
+      await immutableJson(recovery.pending, path, lock.ownerToken, migrated);
+      unresolved.push({ ...migrated, path });
+    }
   }
+
+  unresolved.sort((left, right) => left.generation - right.generation);
+  return unresolved[0];
 }
 
 function parseFaasPublishResponse(value: unknown, platformOrigin: string): { id: string; url: string } {
@@ -756,51 +956,13 @@ function pageHtml(webFaasUrl: string, webFaasId: string, platformOrigin: string)
   return `<!doctype html><meta charset="utf-8"><script>location.replace(${scriptUrl})</script><a href="${linkUrl}">打开魔方简历</a>`;
 }
 
-async function stageJson(state: TrustedStorage, targetPath: string, value: unknown): Promise<string> {
-  await assertStorageIdentity(state);
-  const temporaryPath = `${targetPath}.tmp-${randomUUID()}`;
-  let handle;
-  try {
-    handle = await open(
-      temporaryPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    return temporaryPath;
-  } catch (error) {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw error;
-  } finally {
-    await handle?.close();
-  }
-}
-
-async function commitStaged(temporaryPath: string, targetPath: string, state: TrustedStorage): Promise<void> {
-  try {
-    await assertStorageIdentity(state);
-    const metadata = await lstat(temporaryPath);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.dev !== state.device) throw new Error();
-    await rename(temporaryPath, targetPath);
-    await assertStorageIdentity(state);
-  } catch {
-    throw codedError("MIAOBI_STATE_FAILED");
-  }
-}
-
 async function safeRemoveStaged(state: TrustedStorage, path: string): Promise<void> {
   try {
     await assertStorageIdentity(state);
+    if (dirname(path) !== state.directory) return;
     await rm(path, { force: true });
   } catch {
-    // A changed directory identity is a fail-closed condition; never follow the replacement path.
-  }
-}
-
-async function writeAtomicJson(state: TrustedStorage, targetPath: string, value: unknown): Promise<void> {
-  const staged = await stageJson(state, targetPath, value);
-  try { await commitStaged(staged, targetPath, state); } finally {
-    await safeRemoveStaged(state, staged);
+    // Never follow a replaced directory or remove a path outside the captured storage.
   }
 }
 
@@ -830,15 +992,32 @@ async function publishPage(runner: MagicBuilderRunner, pagePath: string, platfor
   ]), platformOrigin);
 }
 
+export type DeploymentTransactionEvent = {
+  point: "before-pending-commit" | "before-state-commit" | "before-pending-cleanup";
+  generation: number;
+  ownerToken: string;
+};
+
+type DeploymentTransactionHook = (event: DeploymentTransactionEvent) => Promise<void>;
+
+async function transactionPoint(
+  hook: DeploymentTransactionHook | undefined,
+  point: DeploymentTransactionEvent["point"],
+  lock: StateLock,
+): Promise<void> {
+  await hook?.({ point, generation: lock.generation, ownerToken: lock.ownerToken });
+}
+
 async function reconcilePending(
-  pending: PendingDeployment,
-  cleanup: Array<{ path: string; storage: TrustedStorage }>,
+  record: GenerationPendingRecord,
   state: TrustedState,
   recovery: TrustedRecovery,
   runner: MagicBuilderRunner,
   platformOrigin: string,
   lock: StateLock,
+  hook?: DeploymentTransactionHook,
 ): Promise<MiaobiDeploymentState> {
+  const pending = record.pending;
   const canonicalPage = pageHtml(
     pending.deployment.webFaasUrl,
     pending.deployment.webFaasId,
@@ -847,7 +1026,10 @@ async function reconcilePending(
   const canonicalHash = createHash("sha256").update(canonicalPage).digest("hex");
   if (canonicalHash !== pending.page.sha256) throw codedError("MIAOBI_PENDING_INVALID");
   await assertStorageIdentity(recovery);
-  const temporaryPage = join(recovery.directory, `page-${randomUUID()}.html`);
+  const temporaryPage = join(
+    recovery.directory,
+    `page-${lock.generation}-${lock.ownerToken}-${randomUUID()}.html`,
+  );
   let handle;
   try {
     handle = await open(
@@ -856,24 +1038,20 @@ async function reconcilePending(
       0o600,
     );
     await handle.writeFile(canonicalPage, "utf8");
+    await handle.sync();
     await handle.close();
     handle = undefined;
-    await assertStorageIdentity(recovery);
-    const stagedStatePath = await stageJson(state, state.path, pending.deployment);
-    try {
-      await lock.assertOwnership();
-      await publishPage(runner, temporaryPage, platformOrigin);
-      await lock.assertOwnership();
-      await commitStaged(stagedStatePath, state.path, state);
-      for (const entry of cleanup) {
-        await lock.assertOwnership();
-        await assertStorageIdentity(entry.storage);
-        await rm(entry.path, { force: true });
-      }
-      return pending.deployment;
-    } finally {
-      await safeRemoveStaged(state, stagedStatePath);
+    await lock.assertOwnership();
+    await publishPage(runner, temporaryPage, platformOrigin);
+    await lock.assertOwnership();
+    await transactionPoint(hook, "before-state-commit", lock);
+    await commitGenerationState(state, lock, pending.deployment, record);
+    await transactionPoint(hook, "before-pending-cleanup", lock);
+    await lock.assertOwnership();
+    if (!record.legacyAnchor && record.generation === lock.generation && record.ownerToken === lock.ownerToken) {
+      await safeRemoveStaged(recovery.pending, record.path);
     }
+    return pending.deployment;
   } finally {
     await handle?.close().catch(() => undefined);
     await safeRemoveStaged(recovery, temporaryPage);
@@ -887,14 +1065,15 @@ export async function deployMiaobi(options: {
   fetch?: typeof globalThis.fetch;
   healthTimeoutMs?: number;
   lockClock?: StateLockClock;
+  transactionHook?: DeploymentTransactionHook;
 }): Promise<MiaobiDeploymentState> {
   let stateLock: StateLock | undefined;
   try {
     const platformOrigin = resolveMagicPlatformOrigin(options.runner.platformOrigin);
-    const { outputDirectory, statePath, legacyPendingPath, recoveryPath } = deploymentPaths();
-    const stateStorage = await trustedState(statePath);
-    const recoveryStorage = await trustedRecovery(recoveryPath, legacyPendingPath);
-    stateLock = await acquireStateLock(recoveryStorage, options.lockClock ?? systemLockClock);
+    const { outputDirectory, legacyStatePath, legacyPendingPath, legacyExternalPendingPath } = deploymentPaths();
+    const stateStorage = await trustedState(legacyStatePath);
+    const recoveryStorage = await trustedRecovery(legacyExternalPendingPath, legacyPendingPath);
+    stateLock = await acquireStateLock(recoveryStorage, stateStorage, options.lockClock ?? systemLockClock);
     const runner = fencedRunner(options.runner, stateLock);
 
     const pendingRecord = await pendingState(
@@ -903,19 +1082,20 @@ export async function deployMiaobi(options: {
       platformOrigin,
       outputDirectory,
       options.gitCommit,
+      stateLock,
     );
     if (pendingRecord) {
       if (markerCommit(pendingRecord.pending.apiBuildMarker) !== options.gitCommit) {
         throw codedError("MIAOBI_PENDING_INVALID");
       }
       return await reconcilePending(
-        pendingRecord.pending,
-        pendingRecord.cleanup,
+        pendingRecord,
         stateStorage,
         recoveryStorage,
         runner,
         platformOrigin,
         stateLock,
+        options.transactionHook,
       );
     }
 
@@ -986,19 +1166,28 @@ export async function deployMiaobi(options: {
         sha256: createHash("sha256").update(await readFile(pagePath)).digest("hex"),
       },
     };
-    const stagedStatePath = await stageJson(stateStorage, stateStorage.path, deployment);
-    await writeAtomicJson(recoveryStorage, recoveryStorage.pendingPath, pendingDeployment);
-    try {
-      await stateLock.assertOwnership();
-      await publishPage(runner, pagePath, platformOrigin);
-      await stateLock.assertOwnership();
-      await commitStaged(stagedStatePath, stateStorage.path, stateStorage);
-      await stateLock.assertOwnership();
-      await assertStorageIdentity(recoveryStorage);
-      await rm(recoveryStorage.pendingPath, { force: true });
-    } finally {
-      await safeRemoveStaged(stateStorage, stagedStatePath);
-    }
+    const pendingPath = join(
+      recoveryStorage.pending.directory,
+      generationFileName(stateLock.generation, stateLock.ownerToken),
+    );
+    const ownerPendingRecord: Omit<GenerationPendingRecord, "path"> = {
+      schemaVersion: 1,
+      generation: stateLock.generation,
+      ownerToken: stateLock.ownerToken,
+      legacyAnchor: false,
+      pending: pendingDeployment,
+    };
+    await stateLock.assertOwnership();
+    await transactionPoint(options.transactionHook, "before-pending-commit", stateLock);
+    await immutableJson(recoveryStorage.pending, pendingPath, stateLock.ownerToken, ownerPendingRecord);
+    await stateLock.assertOwnership();
+    await publishPage(runner, pagePath, platformOrigin);
+    await stateLock.assertOwnership();
+    await transactionPoint(options.transactionHook, "before-state-commit", stateLock);
+    await commitGenerationState(stateStorage, stateLock, deployment);
+    await transactionPoint(options.transactionHook, "before-pending-cleanup", stateLock);
+    await stateLock.assertOwnership();
+    await safeRemoveStaged(recoveryStorage.pending, pendingPath);
     return deployment;
   } catch (error) {
     if ((error as { code?: string }).code?.startsWith("MIAOBI_")) throw error;
