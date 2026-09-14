@@ -32,6 +32,7 @@ const exactRuntimeOrigins = new Set([
   "https://api.github.com",
   "https://api.magicv.art",
   "https://api.openai.com",
+  "https://aurostars.github.io",
   "https://ark.cn-beijing.volces.com",
   "https://bailian.console.aliyun.com",
   "https://cdnjs.cloudflare.com",

@@ -103,7 +103,7 @@ test("accepts only canonical Pages asset bases under the fixed repository prefix
   for (const value of [
     "https://evil.example/magic-resume/",
     "https://aurostars.github.io.evil.example/magic-resume/",
-    "https://user@aurostars.github.io/magic-resume/",
+    "https://" + "user@" + "aurostars.github.io/magic-resume/",
     "https://aurostars.github.io:444/magic-resume/",
     "https://aurostars.github.io/magic-resume/?x=1",
     "https://aurostars.github.io/magic-resume/#fragment",
@@ -264,4 +264,161 @@ test("one total deadline aborts a stalled response body and cancels it", async (
     fetchImpl,
   }), /MIAOBI_PAGES_HEALTH_FAILED/);
   assert.equal(cancelled, true);
+});
+
+
+function refreshManifestBody(fixture: ReturnType<typeof releaseFixture>): void {
+  fixture.bodies.set(
+    fixture.publication.releaseManifestUrl,
+    new TextEncoder().encode(`${JSON.stringify(fixture.publication.manifest)}\n`),
+  );
+}
+
+function fetchUsingManifestMimes(fixture: ReturnType<typeof releaseFixture>): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    assert.equal(init?.redirect, "manual");
+    const url = String(input);
+    const body = fixture.bodies.get(url);
+    assert.ok(body, `unexpected URL ${url}`);
+    if (url === fixture.publication.releaseManifestUrl) {
+      return new Response(body, { headers: { "Content-Type": "application/json; charset=utf-8" } });
+    }
+    const asset = Object.values(fixture.publication.manifest.files).find((record) => record.url === url);
+    assert.ok(asset, `missing manifest record ${url}`);
+    return new Response(body, { headers: { "Content-Type": asset.contentType } });
+  }) as typeof fetch;
+}
+
+for (const role of ["index", "script", "modulepreload", "stylesheet"] as const) {
+  test(`rejects ${role} when manifest and HTTP agree on a MIME forbidden for that resource role`, async () => {
+    const fixture = releaseFixture();
+    let target: GitHubPagesAssetRecord;
+    if (role === "index") {
+      target = fixture.publication.manifest.files["index.html"];
+      target.contentType = "application/javascript; charset=utf-8";
+    } else if (role === "script") {
+      target = fixture.publication.manifest.files["assets/app.js"];
+      target.contentType = "text/css; charset=utf-8";
+    } else if (role === "stylesheet") {
+      target = fixture.publication.manifest.files["assets/app.css"];
+      target.contentType = "application/javascript; charset=utf-8";
+    } else {
+      const chunk = new TextEncoder().encode("export const chunk = true");
+      target = record("assets/chunk.js", chunk, "text/css; charset=utf-8");
+      fixture.publication.manifest.files["assets/chunk.js"] = target;
+      fixture.bodies.set(target.url, chunk);
+      const html = new TextEncoder().encode(
+        `<!doctype html><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><link rel="modulepreload" href="${target.url}"><script type="module" src="${OBJECT_BASE}assets/app.js"></script>`,
+      );
+      const index = record("index.html", html, "text/html; charset=utf-8");
+      fixture.publication.manifest.files["index.html"] = index;
+      fixture.bodies.set(index.url, html);
+    }
+    refreshManifestBody(fixture);
+
+    await assert.rejects(verifyGitHubPagesRelease({
+      publication: fixture.publication,
+      fetchImpl: fetchUsingManifestMimes(fixture),
+    }), /MIAOBI_PAGES_HEALTH_FAILED/);
+  });
+}
+
+function neverSettlingCancelResponse(init: ResponseInit): Response {
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array([1])); },
+    cancel() { return new Promise<void>(() => undefined); },
+  }), init);
+}
+
+async function rejectsPromptly(operation: Promise<unknown>): Promise<void> {
+  await Promise.race([
+    assert.rejects(operation, /MIAOBI_PAGES_HEALTH_FAILED/),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("rejection waited for cancel")), 250)),
+  ]);
+}
+
+test("never-resolving body cancellation cannot block timeout, redirect, status, or MIME rejection", async () => {
+  const scenarios: Array<(publication: GitHubPagesPublication) => Promise<void>> = [
+    async (publication) => {
+      await rejectsPromptly(verifyGitHubPagesRelease({
+        publication,
+        signalFactory: deadlineSignal,
+        fetchImpl: (async () => neverSettlingCancelResponse({
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+      }));
+    },
+    async (publication) => {
+      await rejectsPromptly(verifyGitHubPagesRelease({
+        publication,
+        fetchImpl: (async () => neverSettlingCancelResponse({
+          status: 302,
+          headers: { Location: "https://evil.example/magic-resume/manifest.json" },
+        })) as typeof fetch,
+      }));
+    },
+    async (publication) => {
+      await rejectsPromptly(verifyGitHubPagesRelease({
+        publication,
+        fetchImpl: (async () => neverSettlingCancelResponse({
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+      }));
+    },
+    async (publication) => {
+      await rejectsPromptly(verifyGitHubPagesRelease({
+        publication,
+        fetchImpl: (async () => neverSettlingCancelResponse({
+          headers: { "Content-Type": "text/plain" },
+        })) as typeof fetch,
+      }));
+    },
+  ];
+  for (const scenario of scenarios) await scenario(releaseFixture().publication);
+});
+
+test("many body chunks use bounded abort listeners and remove them after success", async () => {
+  const fixture = releaseFixture();
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+  let active = 0;
+  let maximum = 0;
+  signal.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+    if (type === "abort") {
+      active += 1;
+      maximum = Math.max(maximum, active);
+    }
+    originalAdd(type, listener, options);
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => {
+    if (type === "abort") active -= 1;
+    originalRemove(type, listener, options);
+  }) as typeof signal.removeEventListener;
+
+  const manifestBytes = fixture.bodies.get(fixture.publication.releaseManifestUrl)!;
+  let offset = 0;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url !== fixture.publication.releaseManifestUrl) return successfulFetch(fixture.bodies)(input, init);
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(streamController) {
+        if (offset === manifestBytes.byteLength) {
+          streamController.close();
+        } else {
+          streamController.enqueue(manifestBytes.slice(offset, ++offset));
+        }
+      },
+    }), { headers: { "Content-Type": "application/json; charset=utf-8" } });
+  }) as typeof fetch;
+
+  await verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl,
+    signalFactory: () => signal,
+  });
+  assert.ok(maximum <= 1, `abort listeners grew to ${maximum}`);
+  assert.equal(active, 0);
 });

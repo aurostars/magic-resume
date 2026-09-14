@@ -62,15 +62,24 @@ function assertPublication(publication: GitHubPagesPublication): void {
   assertPagesUrl(publication.releaseManifestUrl);
 }
 
-function abortPromise(signal: AbortSignal): Promise<never> {
+function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"));
-  return new Promise((_, reject) => {
-    signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup();
+      reject(signal.reason ?? new Error("aborted"));
+    };
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
   });
 }
 
-async function cancelResponse(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
+function cancelResponse(response: Response): void {
+  void response.body?.cancel().catch(() => undefined);
 }
 
 async function fetchFollowingRedirects(
@@ -81,13 +90,13 @@ async function fetchFollowingRedirects(
   let url = initialUrl;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     assertPagesUrl(url);
-    const response = await Promise.race([
+    const response = await withAbort(
       fetchImpl(url, { method: "GET", redirect: "manual", signal }),
-      abortPromise(signal),
-    ]);
+      signal,
+    );
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("Location");
-      await cancelResponse(response);
+      cancelResponse(response);
       if (!location || redirects === MAX_REDIRECTS) healthFailed();
       try {
         url = new URL(location, url).toString();
@@ -115,6 +124,23 @@ function contentTypeMatches(actual: string | null, expected: string): boolean {
   return normalized === wanted;
 }
 
+type AssetRole = "index" | "script" | "stylesheet";
+
+const ROLE_CONTENT_TYPES: Record<AssetRole, ReadonlySet<string>> = {
+  index: new Set(["text/html", "text/html; charset=utf-8"]),
+  script: new Set([
+    "application/javascript",
+    "application/javascript; charset=utf-8",
+    "text/javascript",
+    "text/javascript; charset=utf-8",
+  ]),
+  stylesheet: new Set(["text/css", "text/css; charset=utf-8"]),
+};
+
+function assertRoleContentType(contentType: string, role: AssetRole): void {
+  if (!ROLE_CONTENT_TYPES[role].has(normalizedContentType(contentType))) healthFailed();
+}
+
 async function readBounded(
   response: Response,
   limit: number,
@@ -128,7 +154,7 @@ async function readBounded(
   let size = 0;
   try {
     for (;;) {
-      const { done, value } = await Promise.race([reader.read(), abortPromise(signal)]);
+      const { done, value } = await withAbort(reader.read(), signal);
       if (done) break;
       size += value.byteLength;
       if (size > limit) healthFailed();
@@ -138,7 +164,7 @@ async function readBounded(
     const bytes = collect ? Buffer.concat(chunks, size) : undefined;
     return { bytes, hash: hash.digest("hex"), size };
   } finally {
-    await reader.cancel().catch(() => undefined);
+    void reader.cancel().catch(() => undefined);
   }
 }
 
@@ -153,7 +179,7 @@ async function fetchChecked(
   const response = await fetchFollowingRedirects(url, fetchImpl, signal);
   if (response.status < 200 || response.status >= 300 ||
     !contentTypeMatches(response.headers.get("Content-Type"), expectedContentType)) {
-    await cancelResponse(response);
+    cancelResponse(response);
     healthFailed();
   }
   return readBounded(response, limit, signal, collect);
@@ -173,13 +199,18 @@ function attribute(tag: string, name: string): string | undefined {
   return new RegExp(`\\b${name}\\s*=\\s*["']([^"']+)["']`, "i").exec(tag)?.[1];
 }
 
-function bootAssetUrls(html: string): string[] {
-  const urls = new Set<string>();
+function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole, "index"> }> {
+  const assets = new Map<string, Exclude<AssetRole, "index">>();
+  const add = (url: string, role: Exclude<AssetRole, "index">): void => {
+    const existing = assets.get(url);
+    if (existing && existing !== role) healthFailed();
+    assets.set(url, role);
+  };
   for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
     if (attribute(tag, "type")?.toLowerCase() === "module") {
       const src = attribute(tag, "src");
       if (!src) healthFailed();
-      urls.add(src);
+      add(src, "script");
     }
   }
   for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
@@ -187,10 +218,11 @@ function bootAssetUrls(html: string): string[] {
     if (relations.includes("stylesheet") || relations.includes("modulepreload")) {
       const href = attribute(tag, "href");
       if (!href) healthFailed();
-      urls.add(href);
+      add(href, relations.includes("stylesheet") ? "stylesheet" : "script");
     }
   }
-  return [...urls].sort();
+  return [...assets].sort(([left], [right]) => left.localeCompare(right))
+    .map(([url, role]) => ({ url, role }));
 }
 
 export async function verifyGitHubPagesRelease(input: {
@@ -222,6 +254,7 @@ export async function verifyGitHubPagesRelease(input: {
     const index = remoteManifest.files["index.html"];
     if (!index) healthFailed();
     assertAssetRecord(index, "index.html", remoteManifest.baseUrl);
+    assertRoleContentType(index.contentType, "index");
     const indexResult = await fetchChecked(
       index.url, index.contentType, index.size, fetchImpl, signal, true,
     );
@@ -238,12 +271,13 @@ export async function verifyGitHubPagesRelease(input: {
       assertAssetRecord(record, relativePath, remoteManifest.baseUrl);
       byUrl.set(record.url, [relativePath, record]);
     }
-    for (const url of bootAssetUrls(html)) {
+    for (const { url, role } of bootAssets(html)) {
       assertPagesUrl(url);
       const entry = byUrl.get(url);
       if (!entry) healthFailed();
       const [relativePath, record] = entry;
       if (!/\.(?:css|js|mjs)$/.test(relativePath)) healthFailed();
+      assertRoleContentType(record.contentType, role);
       const result = await fetchChecked(
         record.url, record.contentType, record.size, fetchImpl, signal, false,
       );

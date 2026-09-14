@@ -1,10 +1,16 @@
-type RuntimeConfig = {
-  platform: "miaobi";
-  apiFunctionUrl: string;
-  assetBaseUrl: string;
-};
+import {
+  validateMiaobiRuntimeInjection,
+  type MiaobiAssetMode,
+  type MiaobiRuntimeInjection,
+} from "./runtime-config";
 
-function runtimeConfigFrom(html: string): RuntimeConfig {
+type RuntimeConfig = MiaobiRuntimeInjection;
+
+function runtimeConfigFrom(
+  html: string,
+  assetMode: MiaobiAssetMode,
+  expectedApiOrigin?: string,
+): RuntimeConfig {
   const match = html.match(/window\.__MAGIC_RESUME_RUNTIME__=(\{[^<]+\})<\/script>/);
   if (!match) throw new Error("MIAOBI_INVALID_WEB_HTML");
   const config = JSON.parse(match[1]) as Partial<RuntimeConfig>;
@@ -14,11 +20,11 @@ function runtimeConfigFrom(html: string): RuntimeConfig {
   ) {
     throw new Error("MIAOBI_INVALID_WEB_HTML");
   }
-  return config as RuntimeConfig;
+  return validateMiaobiRuntimeInjection(config as RuntimeConfig, assetMode, expectedApiOrigin);
 }
 
-function cspFor(html: string): string {
-  const config = runtimeConfigFrom(html);
+function cspFor(html: string, assetMode: MiaobiAssetMode, expectedApiOrigin?: string): string {
+  const config = runtimeConfigFrom(html, assetMode, expectedApiOrigin);
   const assetSource = new URL(config.assetBaseUrl).origin;
   const apiSource = new URL(config.apiFunctionUrl).origin;
   return [
@@ -36,10 +42,14 @@ function cspFor(html: string): string {
   ].join("; ");
 }
 
-export function createWebFaasHandler(html: string) {
+export function createWebFaasHandler(
+  html: string,
+  assetMode: MiaobiAssetMode = "github-pages",
+  expectedApiOrigin?: string,
+) {
   const headers = {
     "Cache-Control": "no-store",
-    "Content-Security-Policy": cspFor(html),
+    "Content-Security-Policy": cspFor(html, assetMode, expectedApiOrigin),
     "Content-Type": "text/html; charset=utf-8",
     "X-Content-Type-Options": "nosniff",
     "X-Magic-Resume-Faas": "magic-resume-web",

@@ -4,10 +4,9 @@ import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, utimes, writeFi
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import config from "../../miaobi.config.json" with { type: "json" };
-import { injectMiaobiRuntime } from "../../miaobi/runtime-config";
+import { injectLegacyMiaobiRuntime } from "../../miaobi/runtime-config";
 import { MIAOBI_ASSET_BASE_PLACEHOLDER } from "../../vite.miaobi.config";
 import { buildWebFaas } from "./build-web-faas";
-import { assertGitHubPagesAssetBaseUrl } from "./github-pages-health";
 import {
   createMagicBuilderRunner,
   MagicBuilderError,
@@ -1323,15 +1322,14 @@ export async function deployMiaobi(options: {
       "magic-resume-api",
       platformOrigin,
     );
-    const assetBaseUrl = assertGitHubPagesAssetBaseUrl(manifest.baseUrl);
     const shell = (await readFile(resolve(outputDirectory, "client/index.html"), "utf8"))
-      .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, assetBaseUrl);
-    const html = injectMiaobiRuntime(shell, {
+      .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, manifest.baseUrl);
+    const html = injectLegacyMiaobiRuntime(shell, {
       platform: "miaobi",
       apiFunctionUrl: api.url,
-      assetBaseUrl,
-    });
-    const webBundlePath = await buildWebFaas(html, outputDirectory);
+      assetBaseUrl: manifest.baseUrl,
+    }, platformOrigin);
+    const webBundlePath = await buildWebFaas(html, outputDirectory, "legacy-tos", platformOrigin);
     const web = await publishFaas(
       runner,
       webBundlePath,

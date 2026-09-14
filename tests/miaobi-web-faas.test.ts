@@ -112,3 +112,47 @@ test("non-Pages runtime HTML is rejected before a bundle artifact is published",
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+const INVALID_API_URLS = [
+  "https://tos.example.test/api/faas/api-id",
+  "https://tenant.workers.dev/api/faas/api-id",
+  "https://cloudflare.example/api/faas/api-id",
+  "https://" + "user@" + "magic.solutionsuite.cn/api/faas/api-id",
+  "https://magic.solutionsuite.cn:444/api/faas/api-id",
+  "https://magic.solutionsuite.cn/api/faas/",
+  "https://magic.solutionsuite.cn/api/faas/api-id?query=1",
+  "https://magic.solutionsuite.cn/api/faas/api-id#fragment",
+  "https://magic.solutionsuite.cn/other/api-id",
+];
+
+for (const invalidApiUrl of INVALID_API_URLS) {
+  test(`runtime injection rejects noncanonical API URL: ${invalidApiUrl}`, () => {
+    assert.throws(() => injectMiaobiRuntime(SHELL, {
+      platform: "miaobi",
+      apiFunctionUrl: invalidApiUrl,
+      assetBaseUrl: ASSET_BASE,
+    }), /MIAOBI_INVALID_RUNTIME_CONFIG/);
+  });
+
+  test(`direct handler rejects noncanonical API URL: ${invalidApiUrl}`, () => {
+    assert.throws(
+      () => createWebFaasHandler(HTML.replace(API_URL, invalidApiUrl)),
+      /MIAOBI_INVALID_(?:RUNTIME_CONFIG|WEB_HTML)/,
+    );
+  });
+}
+
+test("bundle build rejects a noncanonical API URL before publishing an artifact", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-resume-web-faas-invalid-api-"));
+  const bundlePath = join(directory, "web-faas.cjs");
+  try {
+    await assert.rejects(
+      buildWebFaas(HTML.replace(API_URL, "https://tenant.workers.dev/api/faas/api-id"), directory),
+      /MIAOBI_INVALID_RUNTIME_CONFIG/,
+    );
+    await assert.rejects(access(bundlePath));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
