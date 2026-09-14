@@ -206,7 +206,7 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
     });
     assert.deepEqual(result, {
       shellPath: join(outputDirectory, "index.html"),
-      assetDirectory: join(outputDirectory, "assets"),
+      assetDirectory: outputDirectory,
     });
 
     const shell = await readFile(result.shellPath, "utf8");
@@ -214,7 +214,9 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
       shell,
       /<script[^>]+type="module"[^>]*>import\("https:\/\/miaobi\.invalid\/__ASSET_BASE__\//,
     );
-    assert.match(shell, /<link[^>]+rel="stylesheet"[^>]+href="https:\/\/miaobi\.invalid\/__ASSET_BASE__\//);
+    assert.match(shell, /<link[^>]+rel="stylesheet"[^>]+href="https:\/\/miaobi\.invalid\/__ASSET_BASE__\/assets\//);
+    assert.match(shell, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/fonts\/AlibabaPuHuiTi-3-55-Regular\.ttf/);
+    assert.match(shell, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/favicon\.ico\?v=2/);
     assert.doesNotMatch(shell, /<iframe|html box/i);
 
     const files = await readFilesRecursively(outputDirectory);
@@ -230,6 +232,8 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
       /workers\.dev|(?:from\s*|import\s*\()["'](?:cloudflare:|wrangler)/i,
     );
     assert.doesNotMatch(javascript, /(?:from\s*|import\s*\()["']node:/);
+    assert.doesNotMatch(javascript, /["'`]\/(?:avatar\.png|features\/|fonts\/|icon\.png|logo\.svg|template-snapshots\/|web-shot\.png)/);
+    assert.match(javascript, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/template-snapshots\/zh\/classic\.png/);
     assert.match(javascript, /platform\s*===\s*["']miaobi["']/);
     assert.match(javascript, /createHashHistory|hashchange/);
     assert.equal(await snapshotPath(join(dirname(outputDirectory), "server")), "<missing>");

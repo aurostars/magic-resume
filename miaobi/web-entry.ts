@@ -20,7 +20,7 @@ function cspFor(html: string): string {
     "default-src 'none'",
     `script-src 'unsafe-inline' ${assetSource}`,
     `style-src 'unsafe-inline' ${assetSource}`,
-    `img-src data: blob: ${assetSource}`,
+    `img-src data: blob: 'self' ${assetSource} ${new URL(config.apiFunctionUrl).origin}`,
     `font-src data: ${assetSource}`,
     "connect-src https:",
     "worker-src blob:",

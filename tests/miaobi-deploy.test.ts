@@ -375,7 +375,7 @@ test("publishes assets, API, Web, checks both URLs, then switches the page and a
     };
 
     const state = await deployMiaobi({ runner: fakeRunner(events), gitCommit: COMMIT, now: NOW });
-    assert.deepEqual(events, ["asset", "asset", "api", "web", "health-api", "health-web", "page"]);
+    assert.deepEqual(events, ["asset", "asset", "asset", "api", "web", "health-api", "health-web", "page"]);
     assert.deepEqual(state, {
       schemaVersion: 2,
       apiBuildMarker: BUILD_MARKER,
@@ -794,7 +794,7 @@ test("holds an exclusive deployment lock before any publication", { concurrency:
   });
 });
 
-test("a rerun updates existing FaaS resources with --id", { concurrency: false }, async () => {
+test("a rerun creates fresh FaaS resources and preserves prior rollback IDs", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const prior: MiaobiDeploymentState = {
       schemaVersion: 2,
@@ -820,10 +820,12 @@ test("a rerun updates existing FaaS resources with --id", { concurrency: false }
 
     await deployMiaobi({ runner, gitCommit: COMMIT, now: new Date("2026-09-13T16:47:00.000Z") });
     const faasCalls = calls.filter((args) => args[0] === "faas");
-    assert.ok(faasCalls[0].includes("--id") && faasCalls[0].includes("api-old"));
+    assert.equal(faasCalls[0].includes("--id"), false);
     assert.ok(faasCalls[0].includes("--name") && faasCalls[0].includes("magic-resume-api"));
-    assert.ok(faasCalls[1].includes("--id") && faasCalls[1].includes("web-old"));
+    assert.equal(faasCalls[1].includes("--id"), false);
     assert.ok(faasCalls[1].includes("--name") && faasCalls[1].includes("magic-resume-web"));
+    assert.equal(prior.apiFaasId, "api-old");
+    assert.equal(prior.webFaasId, "web-old");
     const pageCall = calls.find((args) => args[0] === "page");
     assert.ok(pageCall?.includes("--id") && pageCall.includes("vv6BtLE8MTR"));
   });
@@ -1188,7 +1190,7 @@ test("reclaims an old lock after its owner PID exits", { concurrency: false }, a
   });
 });
 
-test("migrates a strictly validated version 1 deployment state and reuses its IDs", { concurrency: false }, async () => {
+test("migrates a strictly validated version 1 deployment state without mutating its FaaS IDs", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const legacy = { ...validPriorState(), schemaVersion: 1 };
     delete (legacy as { apiBuildMarker?: string }).apiBuildMarker;
@@ -1203,8 +1205,8 @@ test("migrates a strictly validated version 1 deployment state and reuses its ID
       now: NOW,
     });
     const faasCalls = calls.filter((args) => args[0] === "faas");
-    assert.ok(faasCalls[0].includes("api-old"));
-    assert.ok(faasCalls[1].includes("web-old"));
+    assert.equal(faasCalls[0].includes("api-old"), false);
+    assert.equal(faasCalls[1].includes("web-old"), false);
     assert.equal(state.schemaVersion, 2);
     assert.equal(state.apiBuildMarker, BUILD_MARKER);
   });

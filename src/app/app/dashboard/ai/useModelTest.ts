@@ -3,12 +3,29 @@ import { toAIConnection, type AIModelProfile } from "@/config/ai-models";
 import { combineAbortSignals } from "@/lib/abort-signal";
 import { requestPdfImport } from "@/lib/pdf-import-client";
 import { ResumeImportError } from "@/lib/resume-import-schema";
+import { getApiRequestUrl } from "@/config/runtime-endpoints";
 
 export type ModelTestState =
   | { status: "idle" }
   | { status: "running"; kind: "text" | "pdf" }
   | { status: "success"; kind: "text" | "pdf" }
   | { status: "error"; error: unknown };
+
+export async function requestTextModelTest(
+  connection: ReturnType<typeof toAIConnection>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(getApiRequestUrl("/api/ai-test"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connection }),
+    signal,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.ok) {
+    throw new ResumeImportError(data?.code || "upstreamError");
+  }
+}
 
 export function useModelTest(profile: AIModelProfile) {
   const [state, setState] = useState<ModelTestState>({ status: "idle" });
@@ -58,18 +75,13 @@ export function useModelTest(profile: AIModelProfile) {
         if (data.code !== digits)
           throw new ResumeImportError("visionTestFailed");
       } else {
-        const response = await fetch("/api/ai-test", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ connection }),
-          signal: combineAbortSignals([
+        await requestTextModelTest(
+          connection,
+          combineAbortSignals([
             abort.signal,
             AbortSignal.timeout(130_000),
           ]),
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok || !data?.ok)
-          throw new ResumeImportError(data?.code || "upstreamError");
+        );
       }
       if (revision.current === currentRevision)
         setState({ status: "success", kind });

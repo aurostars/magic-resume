@@ -4,19 +4,22 @@ import { handleResumeImport } from "./resume-import";
 export type ApiRoutePath =
   | "/api/grammar"
   | "/api/polish"
+  | "/api/ai-test"
   | "/api/resume-import"
   | "/api/proxy/image";
 
 export interface ApiRouterDependencies {
   grammar: (request: Request) => Promise<Response>;
   polish: (request: Request) => Promise<Response>;
+  aiTest: (request: Request) => Promise<Response>;
   resumeImport: (request: Request) => Promise<Response>;
   imageProxy: (request: Request) => Promise<Response>;
 }
 
-const defaultDependencies: ApiRouterDependencies = {
+export const defaultApiRouterDependencies: ApiRouterDependencies = {
   grammar: (request) => handleTextRequest(request, "grammar"),
   polish: (request) => handleTextRequest(request, "polish"),
+  aiTest: (request) => handleTextRequest(request, "test"),
   resumeImport: (request) => handleResumeImport(request),
   imageProxy: async (request) => {
     const { handleImageProxy } = await import("./image-proxy");
@@ -30,6 +33,7 @@ const routes: Record<
 > = {
   "/api/grammar": { method: "POST", dependency: "grammar" },
   "/api/polish": { method: "POST", dependency: "polish" },
+  "/api/ai-test": { method: "POST", dependency: "aiTest" },
   "/api/resume-import": { method: "POST", dependency: "resumeImport" },
   "/api/proxy/image": { method: "GET", dependency: "imageProxy" },
 };
@@ -41,7 +45,7 @@ function jsonError(status: number, error: string, code: string, headers?: Header
 export async function handleApiRequest(
   request: Request,
   logicalPath?: string,
-  dependencies: ApiRouterDependencies = defaultDependencies,
+  dependencies: ApiRouterDependencies = defaultApiRouterDependencies,
 ): Promise<Response> {
   const requestUrl = new URL(request.url);
   let logicalUrl: URL;

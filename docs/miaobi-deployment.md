@@ -41,7 +41,7 @@ corepack pnpm build:miaobi
 
 - `api-faas.cjs`、`api-faas.meta.json`：API FaaS 与绑定 commit/nonce/hash 的构建元数据；
 - `web-faas.cjs`：部署前占位版本，部署时会用最终 HTTPS API/TOS URL 重新生成；
-- `client/`：浏览器客户端与 `client/assets/`；
+- `client/`：完整浏览器客户端，包括 `client/assets/`、字体、模板快照、favicon、SVG 与图片；发布时整棵客户端资源树都会进入同一不可变 TOS release；
 - `page.html`：固定妙笔页面的本地发布工件，部署时会改写为最终 Web FaaS 跳转；
 - `manifest.json`：本地生产产物清单；
 - `asset-manifest.json`：仅在静态资源全部上传成功后由部署流程原子生成，记录妙笔返回的 HTTPS TOS URL。
@@ -71,15 +71,15 @@ corepack pnpm deploy:miaobi
 发布顺序固定且不可跳过：
 
 1. 预检持久化目录并取得带心跳的独占锁及单调递增 generation；
-2. 上传 release 标记和客户端资源，所有资源完成后原子提交 `dist/miaobi/asset-manifest.json`；
-3. 发布或更新 API FaaS；
-4. 将妙笔返回的 HTTPS API URL 和 HTTPS TOS 基址注入 HTML，重建并发布 Web FaaS；
+2. 上传 release 标记和完整 `client/` 资源树；资源全部成功后先提交 owner-scoped 不可变 manifest，再原子更新 `dist/miaobi/asset-manifest.json` 兼容视图；
+3. 为本 release **新建** API FaaS（不使用历史 ID 原地覆盖）；
+4. 将妙笔返回的 HTTPS API URL 和 HTTPS TOS 基址注入 HTML，重建并**新建** Web FaaS（不使用历史 ID 原地覆盖）；
 5. 校验 API 构建标记、Web 运行时配置和两端健康状态；
 6. 持久化 pending 与 `page-inflight` 记录后，更新固定页面；
 7. 持久化 `page-confirmed`，再提交不可变 generation state；
 8. 清理本 generation 的 pending。历史不可变记录仍保留。
 
-在第 6 步之前失败不会切换页面。页面成功确认后即使最终 state 提交中断，后续进程也只补交本地 state，不会重复发布页面。
+在第 6 步之前失败不会切换页面，也不会修改上一 release 的 API/Web FaaS；新 ID 只有在页面切换成功且 generation state 提交后才成为下一次部署的 prior，历史 FaaS 保留用于人工回滚。页面成功确认后即使最终 state 提交中断，后续进程也只补交本地 state，不会重复发布页面。
 
 ## 5. Generation fencing 与状态目录
 
@@ -90,8 +90,9 @@ corepack pnpm deploy:miaobi
 ```text
 .miaobi/
 ├── states/<generation>-<ownerToken>.json   # 权威、不可变的已提交部署记录
+├── manifests/<releaseId>-<ownerToken>.json # 资源发布权威、不可变 manifest
 ├── state.json                              # 资源发布兼容/恢复视图，不是部署权威
-└── reservations/                           # release ID 本地预留
+└── reservations/<releaseId>.json           # owner-scoped release ID 本地预留
 .miaobi-recovery/
 ├── generations/                            # 单调 generation 预留
 ├── pending/                                # 页面提交前事务
@@ -102,6 +103,8 @@ corepack pnpm deploy:miaobi
 
 - 以 `.miaobi/states/` 中最高 generation 的有效记录为权威部署状态。
 - `.miaobi/state.json` 仅是资源发布状态的兼容/恢复提示；不得用它覆盖 generation state。
+- 资源 reservation、state 与 manifest 在任何上传前执行目录持久化预检；写入使用文件 `fsync`、独占硬链接提交和目录 `fsync`。上传阶段失败会由当前 owner 删除尚未提交的 reservation，允许同 release 安全重试；manifest 进入 staged 后则 fail closed，必须保留现场。
+- 妙笔 API FaaS 提供 `/api/grammar`、`/api/polish`、`/api/ai-test`、`/api/resume-import` 和 `/api/proxy/image`。图片代理只使用 Node 内置 DNS 与 HTTP(S) transport：每一跳先验证全部解析地址，再把 socket lookup 固定到该地址集合；不存在 ambient `fetch` 回退。
 - 旧版 `.miaobi/deployment.json` 和 pending 文件只用于严格校验后的迁移兼容，不应作为新自动化的写入目标。
 - 这些目录使用 `0700`，记录使用 `0600`。它们防止意外损坏和非同 UID 进程写入，但不对同一用户身份下的恶意代码提供真实性保证。
 - 不要修改、排序重写或删除不可变记录来“修复”部署；保留现场并由人工审查。

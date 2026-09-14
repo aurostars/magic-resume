@@ -134,16 +134,9 @@ const PreviewDock = ({
     if (!activeResumeId) return;
     try {
       const newId = duplicateResume(activeResumeId);
-      const targetPath = `/app/workbench/${newId}`;
       setActiveResume(newId);
       toast.success(t("copyResume.success"));
       router.push({ to: "/app/workbench/$id", params: { id: newId } });
-
-      requestAnimationFrame(() => {
-        if (window.location.pathname !== targetPath) {
-          window.location.assign(targetPath);
-        }
-      });
     } catch (error) {
       toast.error(t("copyResume.error"));
     }

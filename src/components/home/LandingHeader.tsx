@@ -1,6 +1,6 @@
 
 import { useState } from "react";
-import { usePathname } from "@/lib/navigation";
+import { usePathname, useRouter } from "@/lib/navigation";
 import { useTranslations } from "@/i18n/compat/client";
 import { Menu, Moon, Sun, X } from "lucide-react";
 
@@ -16,6 +16,7 @@ import GoDashboard from "./GoDashboard";
 export default function LandingHeader() {
   const t = useTranslations("home");
   const pathname = usePathname();
+  const router = useRouter();
   const locale = pathname.split("/")[1];
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
@@ -26,7 +27,7 @@ export default function LandingHeader() {
           <div className="flex items-center justify-between h-20">
             <div
               className="flex items-center  cursor-pointer group"
-              onClick={() => (window.location.href = `/${locale}/`)}
+              onClick={() => router.push({ to: "/$locale", params: { locale } })}
             >
               <Logo size={60} />
               <span className="font-serif text-[24px] tracking-tight font-semibold text-foreground/90">

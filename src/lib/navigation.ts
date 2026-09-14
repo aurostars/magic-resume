@@ -1,4 +1,5 @@
 import { useLocation, useNavigate } from "@tanstack/react-router";
+import { getRuntimeConfig } from "@/config/runtime-endpoints";
 
 type NavigateTarget =
   | string
@@ -32,7 +33,11 @@ export function usePathname() {
 
 export function redirect(to: string): never {
   if (typeof window !== "undefined") {
-    window.location.href = to;
+    if (getRuntimeConfig().platform === "miaobi") {
+      window.location.hash = to.startsWith("/") ? `#${to}` : `#/${to}`;
+    } else {
+      window.location.assign(to);
+    }
   }
   throw new Error(`Redirected to ${to}`);
 }

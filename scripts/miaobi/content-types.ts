@@ -6,7 +6,10 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".mjs": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -21,7 +24,7 @@ export function contentTypeFor(relativePath: string): string | null {
 }
 
 export function isRewritableTextAsset(relativePath: string): boolean {
-  return [".html", ".js", ".mjs", ".css"].includes(
+  return [".html", ".js", ".mjs", ".css", ".json", ".svg", ".txt", ".xml"].includes(
     extname(relativePath).toLowerCase(),
   );
 }

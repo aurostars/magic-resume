@@ -1,5 +1,10 @@
 import { createMiaobiFaasAdapter } from "../scripts/miaobi/faas-adapter";
-import { handleApiRequest } from "../src/lib/server/api-router";
+import {
+  defaultApiRouterDependencies,
+  handleApiRequest,
+} from "../src/lib/server/api-router";
+import { handleImageProxy, type ImageProxyTransport } from "../src/lib/server/image-proxy";
+import { createNodeImageProxyTransport } from "../src/lib/server/node-image-transport";
 
 declare const __MIAOBI_API_BUILD_MARKER__: string;
 const API_BUILD_MARKER = typeof __MIAOBI_API_BUILD_MARKER__ === "string"
@@ -8,7 +13,19 @@ const API_BUILD_MARKER = typeof __MIAOBI_API_BUILD_MARKER__ === "string"
 
 export interface MiaobiFaasRequest extends Request {}
 
-const routeMiaobiApi = createMiaobiFaasAdapter(handleApiRequest);
+export function createMiaobiApiHandler(
+  imageTransport: ImageProxyTransport = createNodeImageProxyTransport(),
+) {
+  return createMiaobiFaasAdapter((request, logicalPath) =>
+    handleApiRequest(request, logicalPath, {
+      ...defaultApiRouterDependencies,
+      imageProxy: (imageRequest) => handleImageProxy(imageRequest, {
+        transport: imageTransport,
+      }),
+    }));
+}
+
+const routeMiaobiApi = createMiaobiApiHandler();
 
 export async function handleMiaobiApi(request: Request): Promise<Response> {
   const response = await routeMiaobiApi(request);

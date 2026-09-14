@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -471,6 +472,41 @@ test("uploads duplicate final content once and maps it to a deterministic key", 
     assert.equal(manifest.files["a.js"].key, canonicalKey);
     assert.equal(manifest.files["z.js"].key, canonicalKey);
     assert.equal(manifest.files["a.js"].url, manifest.files["z.js"].url);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("commits an owner-scoped immutable manifest before exposing the compatibility manifest", async () => {
+  const { root, directory } = await fixture();
+  const { runner } = fakeRunner();
+  await writeFile(join(directory, "app.js"), "app");
+  try {
+    const manifest = await publishAssets({ directory, releaseId: RELEASE_ID, runner });
+    const names = await readdir(join(root, ".miaobi", "manifests"));
+    assert.equal(names.length, 1);
+    assert.match(names[0], new RegExp(`^${RELEASE_ID}-[0-9a-f]{32}\\.json$`));
+    assert.deepEqual(
+      JSON.parse(await readFile(join(root, ".miaobi", "manifests", names[0]), "utf8")),
+      manifest,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("releases an uncommitted reservation after upload failure so the same release can recover", { concurrency: false }, async () => {
+  const { root, directory } = await fixture();
+  await writeFile(join(directory, "app.js"), "app");
+  try {
+    await assert.rejects(
+      publishAssets({ directory, releaseId: RELEASE_ID, runner: fakeRunner({ failAt: 2 }).runner }),
+      { code: "MIAOBI_CLI_FAILED" },
+    );
+    const retry = fakeRunner();
+    const manifest = await publishAssets({ directory, releaseId: RELEASE_ID, runner: retry.runner });
+    assert.equal(manifest.releaseId, RELEASE_ID);
+    assert.equal(retry.uploads.length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

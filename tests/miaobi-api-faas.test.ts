@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleMiaobiApi } from "../miaobi/api-entry";
+import { createMiaobiApiHandler, handleMiaobiApi } from "../miaobi/api-entry";
 import { createMiaobiFaasAdapter } from "../scripts/miaobi/faas-adapter";
 
 test("a POST FaaS request reaches the selected API route", async () => {
@@ -73,28 +73,28 @@ for (const [name, url] of [
   });
 }
 
-test("the non-Cloudflare image route stays fail-closed without a pinned transport", async () => {
+test("the Miaobi image route uses its explicit pinned transport without ambient fetch", async () => {
   const ambientFetch = globalThis.fetch;
   let ambientCalls = 0;
   globalThis.fetch = async () => {
     ambientCalls += 1;
-    return new Response(new Uint8Array([1]), {
-      headers: { "Content-Type": "image/png" },
-    });
+    throw new Error("ambient fetch must not be used");
   };
 
   try {
-    const response = await handleMiaobiApi(
+    const handler = createMiaobiApiHandler({
+      fetch: async () => new Response(new Uint8Array([1]), {
+        headers: { "Content-Type": "image/png" },
+      }),
+    });
+    const response = await handler(
       new Request(
         "https://magic.solutionsuite.cn/api/faas/id?__path=%2Fapi%2Fproxy%2Fimage&url=https%3A%2F%2Fimages.example.test%2Fphoto.png",
       ),
     );
 
-    assert.equal(response.status, 403);
-    assert.deepEqual(await response.json(), {
-      error: "Image target is not allowed",
-      code: "blockedTarget",
-    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), Uint8Array.of(1));
     assert.equal(ambientCalls, 0);
   } finally {
     globalThis.fetch = ambientFetch;

@@ -9,6 +9,7 @@ function dependencies(): ApiRouterDependencies {
   return {
     grammar: async () => Response.json({ handledBy: "grammar" }),
     polish: async () => Response.json({ handledBy: "polish" }),
+    aiTest: async () => Response.json({ handledBy: "aiTest" }),
     resumeImport: async () => Response.json({ handledBy: "resumeImport" }),
     imageProxy: async () => Response.json({ handledBy: "imageProxy" }),
   };
@@ -17,6 +18,7 @@ function dependencies(): ApiRouterDependencies {
 for (const [path, method, handledBy] of [
   ["/api/grammar", "POST", "grammar"],
   ["/api/polish", "POST", "polish"],
+  ["/api/ai-test", "POST", "aiTest"],
   ["/api/resume-import", "POST", "resumeImport"],
   ["/api/proxy/image", "GET", "imageProxy"],
 ] as const) {

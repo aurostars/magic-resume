@@ -93,8 +93,10 @@ const [
   { useAIConfigStore },
   { useGrammarStore },
   { requestPdfImport },
+  { requestTextModelTest },
   { getRouter },
   { createAppHistory },
+  { redirect: browserRedirect },
 ] = await Promise.all([
   import("../src/i18n/compat/client"),
   import("../src/components/shared/ai/AIPolishDialog"),
@@ -102,8 +104,10 @@ const [
   import("../src/store/useAIConfigStore"),
   import("../src/store/useGrammarStore"),
   import("../src/lib/pdf-import-client"),
+  import("../src/app/app/dashboard/ai/useModelTest"),
   import("../src/router"),
   import("../src/config/runtime-endpoints"),
+  import("../src/lib/navigation"),
 ]);
 
 const originalFetch = globalThis.fetch;
@@ -188,6 +192,16 @@ test("runtime history uses browser URLs by default and hash URLs for Miaobi", as
   assert.equal(window.location.hash, "#/settings");
 });
 
+test("legacy browser redirects remain inside the Miaobi hash router", () => {
+  window.history.replaceState(null, "", "/api/faas/web-id#/app/dashboard");
+  setMiaobiRuntime();
+
+  assert.throws(() => browserRedirect("/app/dashboard/resumes"), /Redirected/);
+
+  assert.equal(window.location.pathname, "/api/faas/web-id");
+  assert.equal(window.location.hash, "#/app/dashboard/resumes");
+});
+
 test("grammar check sends its real request through the Miaobi endpoint", async () => {
   setMiaobiRuntime();
   configureTextModel();
@@ -229,6 +243,28 @@ test("AI polish sends its real request through the Miaobi endpoint", async () =>
       requestedUrl,
       "https://magic.solutionsuite.cn/api/faas/shared?tenant=resume&__path=%2Fapi%2Fpolish",
     ),
+  );
+});
+
+test("text model test sends its real request through the Miaobi endpoint", async () => {
+  setMiaobiRuntime();
+  let requestedUrl = "";
+  globalThis.fetch = (async (input) => {
+    requestedUrl = String(input);
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+
+  await requestTextModelTest({
+    provider: "qwen",
+    protocol: "chat-completions",
+    apiKey: "test-key",
+    model: "qwen-test",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  });
+
+  assert.equal(
+    requestedUrl,
+    "https://magic.solutionsuite.cn/api/faas/shared?tenant=resume&__path=%2Fapi%2Fai-test",
   );
 });
 

@@ -1012,11 +1012,9 @@ async function publishFaas(
   bundlePath: string,
   name: string,
   platformOrigin: string,
-  existingId?: string,
 ) {
-  const selector = existingId ? ["--name", name, "--id", existingId] : ["--name", name];
   return parseFaasPublishResponse(await runMagicBuilderObject(runner, [
-    "faas", "publish", bundlePath, ...selector, "--format", "json", "--quiet",
+    "faas", "publish", bundlePath, "--name", name, "--format", "json", "--quiet",
   ]), platformOrigin);
 }
 
@@ -1308,12 +1306,12 @@ export async function deployMiaobi(options: {
       );
     }
 
-    const previous = await priorState(stateStorage, platformOrigin);
+    await priorState(stateStorage, platformOrigin);
     const apiMetadata = await readApiBuildMetadata(outputDirectory, options.gitCommit);
     const releaseId = createReleaseId(options.gitCommit, options.now);
     await stateLock.assertOwnership();
     const manifest = await publishAssets({
-      directory: resolve(outputDirectory, "client/assets"),
+      directory: resolve(outputDirectory, "client"),
       releaseId,
       runner,
     });
@@ -1323,7 +1321,6 @@ export async function deployMiaobi(options: {
       resolve(outputDirectory, "api-faas.cjs"),
       "magic-resume-api",
       platformOrigin,
-      previous?.apiFaasId,
     );
     const shell = (await readFile(resolve(outputDirectory, "client/index.html"), "utf8"))
       .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, manifest.baseUrl);
@@ -1338,7 +1335,6 @@ export async function deployMiaobi(options: {
       webBundlePath,
       "magic-resume-web",
       platformOrigin,
-      previous?.webFaasId,
     );
     const health = {
       apiFaasUrl: api.url,
