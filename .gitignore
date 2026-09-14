@@ -47,3 +47,4 @@ src/routeTree.gen.ts
 .miaobi/state.lock/
 .miaobi/reservations/
 /.miaobi-recovery/
+/.miaobi/pages-worktrees/
