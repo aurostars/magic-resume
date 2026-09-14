@@ -162,13 +162,22 @@ async function removeWorktree(
   if (incomplete) throw new Error("MIAOBI_WORKTREE_CLEANUP_FAILED");
 }
 
-function markCleanupIncomplete(error: unknown): void {
-  if ((typeof error === "object" && error !== null) || typeof error === "function") {
+class PublicationCleanupError extends Error {
+  readonly cleanupIncomplete = true;
+  readonly originalCategory: "not-found" | "non-fast-forward" | "other";
+
+  constructor(original: unknown) {
+    super("MIAOBI_PUBLICATION_FAILED_CLEANUP_INCOMPLETE");
+    this.name = "PublicationCleanupError";
+    let kind: CommandError["kind"];
     try {
-      Object.defineProperty(error, "cleanupIncomplete", { value: true, enumerable: false });
+      kind = (typeof original === "object" && original !== null)
+        ? (original as CommandError).kind
+        : undefined;
     } catch {
-      // Preserve the original failure even when it is not extensible.
+      kind = undefined;
     }
+    this.originalCategory = kind === "not-found" || kind === "non-fast-forward" ? kind : "other";
   }
 }
 
@@ -230,7 +239,7 @@ async function createPublicationAttempt(input: {
       cwd: worktreeDirectory,
       signal: input.signal,
     })).stdout.trim();
-    await input.runner.run(["push", "fork", "HEAD:gh-pages"], {
+    await input.runner.run(["push", "--porcelain", "fork", "HEAD:gh-pages"], {
       cwd: worktreeDirectory,
       signal: input.signal,
     });
@@ -247,8 +256,8 @@ async function createPublicationAttempt(input: {
         orphanBranch ? `refs/heads/${orphanBranch}` : undefined,
       );
     } catch (cleanupError) {
-      if (originalError !== undefined) markCleanupIncomplete(originalError);
-      else throw cleanupError;
+      if (originalError !== undefined) throw new PublicationCleanupError(originalError);
+      throw cleanupError;
     }
   }
 }
@@ -366,8 +375,8 @@ export async function runGitHubPagesPublisherWithSignals(
     interrupted = true;
     controller.abort();
   };
-  process.once("SIGINT", interrupt);
-  process.once("SIGTERM", interrupt);
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
   try {
     const result = await publishGitHubPages({ ...input, signal: controller.signal });
     if (interrupted) throw new Error("MIAOBI_PUBLISH_INTERRUPTED");

@@ -61,7 +61,12 @@ class RecordingLocalForkRunner implements GitCommandRunner {
     try {
       return await command("git", args, options?.cwd);
     } catch (error) {
-      if (args[0] === "push" && /non-fast-forward|fetch first|stale info/i.test((error as { stderr?: string }).stderr ?? "")) {
+      if (
+        args[0] === "push" && args.includes("--porcelain") && args.includes("HEAD:gh-pages") &&
+        /^!\tHEAD:(?:refs\/heads\/)?gh-pages\t\[rejected\] \((?:non-fast-forward|fetch first|stale info)\)$/m.test(
+          (error as { stdout?: string }).stdout ?? "",
+        )
+      ) {
         Object.assign(error as object, { kind: "non-fast-forward" });
       }
       throw error;
@@ -201,7 +206,7 @@ test("first publication creates an orphan gh-pages root, materializes assets, an
     assert.equal(result.releaseManifestUrl, `https://aurostars.github.io/magic-resume/releases/${SOURCE_COMMIT}/manifest.json`);
     assert.deepEqual(value.admin.calls, [{ owner: "aurostars", repo: "magic-resume", branch: "gh-pages", path: "/" }]);
     const pushes = value.runner.calls.filter(({ args }) => args[0] === "push").map(({ args }) => args);
-    assert.deepEqual(pushes, [["push", "fork", "HEAD:gh-pages"]]);
+    assert.deepEqual(pushes, [["push", "--porcelain", "fork", "HEAD:gh-pages"]]);
     assert.equal(pushes.flat().some((argument) => argument === "origin" || argument.includes("force")), false);
     assert.equal(value.runner.calls.flatMap(({ args }) => args).some((argument) =>
       argument === "-f" || argument === "--force" || /^-[^-]*f/.test(argument) || argument.includes("force")
@@ -586,7 +591,7 @@ test("cleanup attempts remove, filesystem removal, and prune then reports a sani
   }
 });
 
-test("an original publication error is preserved and safely marked when cleanup is incomplete", async () => {
+test("an original publication error is safely categorized when cleanup is incomplete", async () => {
   const value = await fixture();
   const originalFailure = new Error("MIAOBI_COMMIT_FAILED");
   try {
@@ -598,9 +603,11 @@ test("an original publication error is preserved and safely marked when cleanup 
       return undefined;
     };
     await assert.rejects(publish(value), (error: unknown) => {
-      assert.equal(error, originalFailure);
-      assert.equal((error as { cleanupIncomplete?: boolean }).cleanupIncomplete, true);
-      assert.equal((error as Error).message.includes("KNOWN_TEST_SECRET"), false);
+      const failure = error as Error & { cleanupIncomplete?: boolean; originalCategory?: string };
+      assert.equal(failure.message, "MIAOBI_PUBLICATION_FAILED_CLEANUP_INCOMPLETE");
+      assert.equal(failure.cleanupIncomplete, true);
+      assert.equal(failure.originalCategory, "other");
+      assert.equal(failure.message.includes("KNOWN_TEST_SECRET"), false);
       return true;
     });
     assert.equal(value.runner.calls.some(({ args }) => args[0] === "worktree" && args[1] === "prune"), true);
@@ -700,12 +707,201 @@ test("does not retry a non-fast-forward when that attempt's cleanup is incomplet
       return undefined;
     };
     await assert.rejects(publish(value), (error: unknown) => {
-      assert.equal(error, conflict);
-      assert.equal((error as { cleanupIncomplete?: boolean }).cleanupIncomplete, true);
+      const failure = error as Error & { cleanupIncomplete?: boolean; originalCategory?: string };
+      assert.equal(failure.message, "MIAOBI_PUBLICATION_FAILED_CLEANUP_INCOMPLETE");
+      assert.equal(failure.cleanupIncomplete, true);
+      assert.equal(failure.originalCategory, "non-fast-forward");
       return true;
     });
     assert.equal(pushes, 1);
   } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+
+test("real hook rejections containing NFF phrases remain non-retryable other failures", async () => {
+  for (const phrase of ["fetch first", "stale info", "non-fast-forward"]) {
+    const value = await fixture();
+    try {
+      await command("git", ["config", "core.hooksPath", "hooks"], value.remote);
+      const hook = join(value.remote, "hooks", "pre-receive");
+      await writeFile(hook, `#!/bin/sh\nprintf '%s\\n' '${phrase} KNOWN_TEST_SECRET' >&2\nexit 1\n`);
+      await chmod(hook, 0o755);
+      const production = createGitCommandRunner();
+      let pushes = 0;
+      const runner: GitCommandRunner = {
+        async run(args, options) {
+          if (args[0] === "remote" && args[1] === "get-url") {
+            return { stdout: `${EXPECTED_FORK}\n`, stderr: "" };
+          }
+          if (args[0] === "push") pushes += 1;
+          return production.run(args, options);
+        },
+      };
+      await assert.rejects(publishGitHubPages({ ...publicationInput(value), runner }), (error: unknown) => {
+        assert.equal((error as { kind?: string }).kind, "other");
+        assert.equal((error as Error).message, "GIT_COMMAND_FAILED");
+        assert.equal((error as Error).message.includes("KNOWN_TEST_SECRET"), false);
+        return true;
+      });
+      assert.equal(pushes, 1, phrase);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("real porcelain push classifies only the rejected gh-pages ref as non-fast-forward", async () => {
+  const value = await fixture();
+  try {
+    await seedPages(value.remote, value.root);
+    const stale = join(value.root, "stale");
+    await command("git", ["clone", "--branch", "gh-pages", value.remote, stale]);
+    await command("git", ["config", "user.name", "Stale"], stale);
+    await command("git", ["config", "user.email", "stale@example.test"], stale);
+    await writeFile(join(stale, "stale.txt"), "stale\n");
+    await command("git", ["add", "stale.txt"], stale);
+    await command("git", ["commit", "-m", "stale"], stale);
+    const competitor = join(value.root, "competitor-porcelain");
+    await command("git", ["clone", "--branch", "gh-pages", value.remote, competitor]);
+    await command("git", ["config", "user.name", "Competitor"], competitor);
+    await command("git", ["config", "user.email", "competitor@example.test"], competitor);
+    await writeFile(join(competitor, "winner.txt"), "winner\n");
+    await command("git", ["add", "winner.txt"], competitor);
+    await command("git", ["commit", "-m", "winner"], competitor);
+    await command("git", ["push", "origin", "HEAD:gh-pages"], competitor);
+    const runner = createGitCommandRunner();
+    await assert.rejects(
+      runner.run(["push", "--porcelain", value.remote, "HEAD:gh-pages"], { cwd: stale }),
+      (error: unknown) => {
+        assert.equal((error as { kind?: string }).kind, "non-fast-forward");
+        assert.equal((error as Error).message, "GIT_COMMAND_FAILED");
+        return true;
+      },
+    );
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("frozen, sealed, and non-Error failures are wrapped when cleanup is incomplete and never retried", async () => {
+  const thrownValues: Array<{ value: unknown; category: "non-fast-forward" | "other" }> = [
+    { value: Object.freeze(Object.assign(new Error("FROZEN_SECRET"), { kind: "non-fast-forward" })), category: "non-fast-forward" },
+    { value: Object.seal(Object.assign(new Error("SEALED_SECRET"), { kind: "non-fast-forward" })), category: "non-fast-forward" },
+    { value: "STRING_SECRET", category: "other" },
+    { value: new Proxy({}, { get: () => { throw new Error("PROXY_SECRET"); } }), category: "other" },
+  ];
+  for (const { value: thrownValue, category } of thrownValues) {
+    const value = await fixture();
+    let pushes = 0;
+    try {
+      await seedPages(value.remote, value.root);
+      const original = value.runner.run.bind(value.runner);
+      value.runner.run = async (args, options) => {
+        value.runner.calls.push({ args: [...args], cwd: options?.cwd });
+        if (args[0] === "push") {
+          pushes += 1;
+          throw thrownValue;
+        }
+        if (args[0] === "worktree" && ["remove", "prune"].includes(args[1])) {
+          throw new Error("CLEANUP_SECRET");
+        }
+        return original(args, options);
+      };
+      await assert.rejects(publish(value), (error: unknown) => {
+        const failure = error as Error & { cleanupIncomplete?: boolean; originalCategory?: string };
+        assert.equal(failure.message, "MIAOBI_PUBLICATION_FAILED_CLEANUP_INCOMPLETE");
+        assert.equal(failure.cleanupIncomplete, true);
+        assert.equal(failure.originalCategory, category);
+        assert.equal(failure.message.includes("SECRET"), false);
+        return true;
+      });
+      assert.equal(pushes, 1);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("repeated same and mixed real signals are absorbed until delayed cleanup settles", async () => {
+  const value = await fixture();
+  const ready = join(value.root, "ready-repeat");
+  const cleanupReady = join(value.root, "cleanup-ready");
+  const moduleUrl = pathToFileURL(join(process.cwd(), "scripts", "miaobi", "publish-github-pages.ts")).href;
+  const runnerUrl = pathToFileURL(join(process.cwd(), "scripts", "miaobi", "git-runner.ts")).href;
+  const childScript = `
+    import { writeFile } from "node:fs/promises";
+    import { runGitHubPagesPublisherWithSignals } from ${JSON.stringify(moduleUrl)};
+    import { createGitCommandRunner } from ${JSON.stringify(runnerUrl)};
+    const [repositoryDirectory, clientDirectory, ready, cleanupReady] = process.argv.slice(1);
+    const base = createGitCommandRunner();
+    const runner = {
+      async run(args, options) {
+        if (args[0] === "remote" && args[1] === "get-url") {
+          return { stdout: "https://github.com/aurostars/magic-resume.git\\n", stderr: "" };
+        }
+        if (args[0] === "commit") {
+          const result = await base.run(args, options);
+          const keepAlive = setInterval(() => undefined, 1_000);
+          const interrupted = new Promise((_, reject) =>
+            options.signal.addEventListener("abort", () => reject(new Error("interrupted")), { once: true }));
+          await writeFile(ready, "ready");
+          try { await interrupted; } finally { clearInterval(keepAlive); }
+          return result;
+        }
+        if (args[0] === "worktree" && args[1] === "remove") {
+          const result = await base.run(args, options);
+          await writeFile(cleanupReady, "cleanup");
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          return result;
+        }
+        return base.run(args, options);
+      }
+    };
+    try {
+      await runGitHubPagesPublisherWithSignals({
+        repositoryDirectory,
+        clientDirectory,
+        sourceCommit: ${JSON.stringify(SOURCE_COMMIT)},
+        releaseId: ${JSON.stringify(RELEASE_ID)},
+        runner,
+        admin: { async ensureBranchSource() {} },
+      });
+      process.exitCode = 2;
+    } catch (error) {
+      process.exitCode = error?.message === "MIAOBI_PUBLISH_INTERRUPTED" ? 143 : 3;
+    }
+  `;
+  const child = spawn(process.execPath, [
+    "--import", "tsx", "--input-type=module", "--eval", childScript,
+    value.repository, value.client, ready, cleanupReady,
+  ], { cwd: process.cwd(), shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const stderr: Buffer[] = [];
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, rejectExit) => {
+    child.once("error", rejectExit);
+    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+  });
+  const waitFor = async (path: string): Promise<void> => {
+    const deadline = Date.now() + 30_000;
+    while (!await exists(path)) {
+      if (Date.now() > deadline) throw new Error(`publisher timeout: ${Buffer.concat(stderr).toString("utf8")}`);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  };
+  try {
+    await waitFor(ready);
+    child.kill("SIGTERM");
+    await waitFor(cleanupReady);
+    child.kill("SIGTERM");
+    child.kill("SIGINT");
+    const outcome = await exit;
+    assert.deepEqual(outcome, { code: 143, signal: null }, Buffer.concat(stderr).toString("utf8"));
+    assert.deepEqual(await worktreePaths(value.repository), [value.repository]);
+    assert.equal((await command("git", ["for-each-ref", "--format=%(refname)", "refs/heads/miaobi-pages-"], value.repository)).stdout, "");
+  } finally {
+    child.kill("SIGKILL");
     await rm(value.root, { recursive: true, force: true });
   }
 });

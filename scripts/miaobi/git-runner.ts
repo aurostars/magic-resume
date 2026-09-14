@@ -28,8 +28,22 @@ export class RedactedCommandError extends Error {
   }
 }
 
-function classifyFailure(stderr: string): CommandFailureKind {
-  if (/\[rejected\].*\((?:non-fast-forward|fetch first|stale info)\)|non-fast-forward|fetch first|stale info/i.test(stderr)) {
+function isRejectedPagesRef(stdout: string, args: string[]): boolean {
+  if (args[0] !== "push" || !args.includes("--porcelain") || !args.includes("HEAD:gh-pages")) {
+    return false;
+  }
+  return stdout.split(/\r?\n/).some((line) => {
+    const fields = line.split("\t");
+    if (fields.length < 3 || fields[0].trim() !== "!") return false;
+    const ref = fields[1].trim();
+    const summary = fields.slice(2).join("\t").trim();
+    return (ref === "HEAD:gh-pages" || ref === "HEAD:refs/heads/gh-pages") &&
+      /^\[rejected\] \((?:non-fast-forward|fetch first|stale info)\)$/.test(summary);
+  });
+}
+
+function classifyFailure(stdout: string, stderr: string, args: string[]): CommandFailureKind {
+  if (isRejectedPagesRef(stdout, args)) {
     return "non-fast-forward";
   }
   if (/HTTP 404|status code 404|not found|couldn't find remote ref|no such ref/i.test(stderr)) {
@@ -68,7 +82,7 @@ function createCommandRunner(command: "git" | "gh"): GitCommandRunner {
             command,
             exitCode,
             signal,
-            kind: classifyFailure(output.stderr),
+            kind: classifyFailure(output.stdout, output.stderr, args),
           }));
         });
       });
