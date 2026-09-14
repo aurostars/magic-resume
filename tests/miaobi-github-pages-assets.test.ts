@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -95,6 +96,7 @@ test("materializes the complete allowed tree while filtering private, map, serve
     assert.equal(app.key, app.objectPath);
     assert.equal(app.url, `https://aurostars.github.io/magic-resume/${app.objectPath}`);
     const appBytes = await readFile(join(pagesDirectory, app.objectPath));
+    assert.equal((await stat(join(pagesDirectory, app.objectPath))).mode & 0o222, 0);
     const graphHash = app.objectPath.split("/")[1];
     assert.equal(
       appBytes.toString("utf8"),
@@ -383,42 +385,6 @@ test("rejects a source file modified through the same inode while it is being sn
   }
 });
 
-test("revalidates committed object paths before publishing release metadata", async () => {
-  const { root, clientDirectory, pagesDirectory } = await fixture();
-  await writeFile(join(clientDirectory, "a.js"), "expected");
-  for (let index = 0; index < 200; index += 1) {
-    await writeFile(join(clientDirectory, `z-${String(index).padStart(3, "0")}.js`), String(index));
-  }
-
-  const attacker = (async () => {
-    for (;;) {
-      try {
-        const graphNames = await readdir(join(pagesDirectory, "objects"));
-        for (const graphName of graphNames) {
-          const target = join(pagesDirectory, "objects", graphName, "a.js");
-          if (await exists(target)) {
-            await rename(target, `${target}.original`);
-            await writeFile(target, "conflict");
-            return;
-          }
-        }
-      } catch {
-        // Publication has not created the object root yet.
-      }
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-  })();
-  try {
-    await assert.rejects(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)), {
-      code: "MIAOBI_OBJECT_CONFLICT",
-    });
-    await attacker;
-    assert.equal(await exists(join(pagesDirectory, "releases", SOURCE_COMMIT, "manifest.json")), false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("allows only one concurrent manifest for the same source commit", async () => {
   const first = await fixture();
   const second = await fixture();
@@ -471,76 +437,61 @@ test("merges concurrent releases into the index without losing entries", async (
 });
 
 
-test("rejects replacement of an object ancestor even when replacement bytes match", async () => {
-  const { root, clientDirectory, pagesDirectory } = await fixture();
-  const replacement = join(root, "replacement-graph");
-  await mkdir(replacement);
-  for (let index = 0; index < 100; index += 1) {
-    const name = `${String(index).padStart(3, "0")}.js`;
-    await writeFile(join(clientDirectory, name), String(index));
-    await writeFile(join(replacement, name), String(index));
-  }
-  const attacker = (async () => {
-    for (;;) {
-      try {
-        const [graphName] = await readdir(join(pagesDirectory, "objects"));
-        if (graphName) {
-          const graphDirectory = join(pagesDirectory, "objects", graphName);
-          await rename(graphDirectory, `${graphDirectory}.original`);
-          await rename(replacement, graphDirectory);
-          return;
-        }
-      } catch {
-        // Publication has not created the graph directory yet.
-      }
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-  })();
-  try {
-    await assert.rejects(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)), {
-      code: "MIAOBI_OBJECT_CONFLICT",
-    });
-    await attacker;
-    assert.equal(await exists(join(pagesDirectory, "releases", SOURCE_COMMIT, "manifest.json")), false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
-
-test("binds every object again after manifest staging and fails closed before metadata commit", async () => {
+test("installs the complete graph at one directory commit point visible to an independent process", async () => {
   const { root, clientDirectory, pagesDirectory } = await fixture();
-  for (let index = 0; index < 1500; index += 1) {
+  const assetCount = 2000;
+  for (let index = 0; index < assetCount; index += 1) {
     await writeFile(join(clientDirectory, `${String(index).padStart(4, "0")}.js`), `asset-${index}`);
   }
-  const releaseDirectory = join(pagesDirectory, "releases", SOURCE_COMMIT);
-  const attacker = (async () => {
+  const readyPath = join(root, "observer-ready");
+  const resultPath = join(root, "observer-result");
+  const observerScript = String.raw`
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const [pages, sourceCommit, expected, ready, result] = process.argv.slice(1);
+    fs.writeFileSync(ready, "ready");
+    const countFiles = (directory) => fs.readdirSync(directory, { withFileTypes: true })
+      .reduce((count, entry) => count + (entry.isDirectory()
+        ? countFiles(path.join(directory, entry.name))
+        : entry.isFile() ? 1 : 0), 0);
+    const deadline = Date.now() + 120000;
     for (;;) {
-      try {
-        const staged = (await readdir(releaseDirectory)).some((name) =>
-          name.startsWith(".") && name.endsWith(".tmp")
-        );
-        if (staged) {
-          const [graphName] = await readdir(join(pagesDirectory, "objects"));
-          const target = join(pagesDirectory, "objects", graphName, "0000.js");
-          await rename(target, `${target}.verified`);
-          await writeFile(target, "post-validation-conflict");
-          return;
+      const objects = path.join(pages, "objects");
+      if (fs.existsSync(objects)) {
+        for (const name of fs.readdirSync(objects)) {
+          if (/^[0-9a-f]{64}$/.test(name)) {
+            const count = countFiles(path.join(objects, name));
+            if (count !== Number(expected)) {
+              fs.writeFileSync(result, JSON.stringify({ partial: count }));
+              process.exit(0);
+            }
+          }
         }
-      } catch {
-        // Manifest staging has not started yet.
       }
-      await new Promise((resolve) => setImmediate(resolve));
+      if (fs.existsSync(path.join(pages, "releases", sourceCommit, "manifest.json"))) {
+        fs.writeFileSync(result, JSON.stringify({ complete: true }));
+        process.exit(0);
+      }
+      if (Date.now() > deadline) process.exit(2);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
     }
-  })();
+  `;
+  const observer = spawn(process.execPath, [
+    "-e", observerScript, pagesDirectory, SOURCE_COMMIT, String(assetCount), readyPath, resultPath,
+  ], { stdio: "inherit" });
+  const observerExit = new Promise<number | null>((resolveExit, rejectExit) => {
+    observer.once("error", rejectExit);
+    observer.once("exit", resolveExit);
+  });
   try {
-    await assert.rejects(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)), {
-      code: "MIAOBI_OBJECT_CONFLICT",
-    });
-    await attacker;
-    assert.equal(await exists(join(releaseDirectory, "manifest.json")), false);
-    assert.equal(await exists(join(pagesDirectory, "releases", "index.json")), false);
+    while (!await exists(readyPath)) await new Promise((resolveWait) => setImmediate(resolveWait));
+    const result = await materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
+    assert.equal(await observerExit, 0);
+    assert.deepEqual(JSON.parse(await readFile(resultPath, "utf8")), { complete: true });
+    assert.equal(Object.keys(result.manifest.files).length, assetCount);
   } finally {
+    observer.kill();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -580,7 +531,9 @@ test("does not take over a live owner while concurrent publication is active", a
     const during = await stat(lockDirectory);
     assert.equal(during.dev, before.dev);
     assert.equal(during.ino, before.ino);
-    await Promise.all([first, second]);
+    const outcomes = await Promise.allSettled([first, second]);
+    assert.equal(outcomes[0].status, "fulfilled");
+    assert.equal(outcomes[1].status === "fulfilled" || outcomes[1].reason?.code === "MIAOBI_RELEASE_CONFLICT", true);
   } finally {
     await first.catch(() => undefined);
     await rm(root, { recursive: true, force: true });
@@ -620,6 +573,53 @@ test("an old owner never removes a successor lock it does not own", async () => 
     assert.equal(successor.ownerToken, "ffffffffffffffffffffffffffffffff");
   } finally {
     await publicationFinished;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("treats a far-future heartbeat as corrupt instead of waiting forever", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  const lockDirectory = join(pagesDirectory, ".github-pages-assets.lock");
+  await mkdir(lockDirectory, { recursive: true });
+  await writeFile(join(lockDirectory, "owner.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    ownerToken: "00000000000000000000000000000002",
+    pid: 2_147_483_647,
+    heartbeatAt: "2999-01-01T00:00:00.000Z",
+  })}\n`);
+  await writeFile(join(clientDirectory, "app.js"), "safe");
+  try {
+    const result = await materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
+    assert.equal(result.manifest.sourceCommit, SOURCE_COMMIT);
+    assert.equal(await exists(lockDirectory), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounds active-lock waiting through small clock rollback without taking over its owner", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  const lockDirectory = join(pagesDirectory, ".github-pages-assets.lock");
+  const ownerToken = "00000000000000000000000000000003";
+  await mkdir(lockDirectory, { recursive: true });
+  await writeFile(join(lockDirectory, "owner.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    ownerToken,
+    pid: process.pid,
+    heartbeatAt: new Date(Date.now() + 4_000).toISOString(),
+  })}\n`);
+  await writeFile(join(clientDirectory, "app.js"), "safe");
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)), {
+      code: "MIAOBI_RELEASE_CONFLICT",
+    });
+    assert.ok(Date.now() - startedAt < 5_000, "lock acquisition must have a deterministic bound");
+    assert.equal(JSON.parse(await readFile(join(lockDirectory, "owner.json"), "utf8")).ownerToken,
+      ownerToken);
+    assert.equal(await exists(join(pagesDirectory, "releases", SOURCE_COMMIT, "manifest.json")), false);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

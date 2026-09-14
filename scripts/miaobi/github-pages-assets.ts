@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import {
+  chmod,
   link,
   lstat,
   mkdir,
@@ -58,6 +59,8 @@ const FORBIDDEN_ASSET_HOSTS = [
 ];
 
 const LOCK_LEASE_MS = 60_000;
+const LOCK_MAX_CLOCK_SKEW_MS = 5_000;
+const LOCK_ACQUIRE_TIMEOUT_MS = 3_000;
 const LOCK_RETRY_MS = 10;
 
 class MaterializationError extends Error {
@@ -319,178 +322,135 @@ async function sameBytes(path: string, expected: Buffer): Promise<boolean> {
   }
 }
 
-async function publishImmutableObject(
-  pagesDirectory: string,
-  objectPath: string,
-  content: Buffer,
-): Promise<boolean> {
-  const targetPath = join(pagesDirectory, objectPath);
-  await ensureDirectory(dirname(targetPath));
-  const temporaryPath = join(dirname(targetPath), `.${randomUUID()}.tmp`);
-  let handle;
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    handle = await open(
-      temporaryPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o644,
-    );
-    await handle.writeFile(content);
     await handle.sync();
+  } finally {
     await handle.close();
-    handle = undefined;
-    try {
-      await link(temporaryPath, targetPath);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (!await sameBytes(targetPath, content)) {
-        throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-      }
-      return false;
-    }
-  } catch (error) {
-    if (error instanceof MaterializationError) throw error;
-    throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
-async function publishImmutableAlias(
-  pagesDirectory: string,
-  sourceObjectPath: string,
-  objectPath: string,
-  content: Buffer,
-): Promise<boolean> {
-  const targetPath = join(pagesDirectory, objectPath);
-  await ensureDirectory(dirname(targetPath));
+async function syncTree(directory: string): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory()) await syncTree(join(directory, entry.name));
+  }
+  await syncDirectory(directory);
+}
+
+async function removeStagingTree(directory: string): Promise<void> {
   try {
-    await link(join(pagesDirectory, sourceObjectPath), targetPath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if (!await sameBytes(targetPath, content)) {
-      throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    const entries = await readdir(directory, { withFileTypes: true });
+    await chmod(directory, 0o755);
+    for (const entry of entries) {
+      if (entry.isDirectory()) await removeStagingTree(join(directory, entry.name));
     }
-    return false;
+    await rm(directory, { recursive: true, force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
-async function directoryChain(root: string, targetDirectory: string): Promise<DirectoryIdentity[]> {
-  const identities: DirectoryIdentity[] = [];
-  let current = root;
-  const rootMetadata = await lstat(current);
-  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) invalidPath();
-  identities.push({ path: current, device: rootMetadata.dev, inode: rootMetadata.ino });
-  for (const component of relative(root, targetDirectory).split(sep).filter(Boolean)) {
-    current = join(current, component);
+async function assertCompleteGraph(directory: string, assets: FinalAsset[]): Promise<void> {
+  const expected = new Set(assets.map((asset) => asset.relativePath));
+  const actual = new Set<string>();
+  async function visit(current: string, prefix: string): Promise<void> {
     const metadata = await lstat(current);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) invalidPath();
-    identities.push({ path: current, device: metadata.dev, inode: metadata.ino });
-  }
-  return identities;
-}
-
-async function assertImmutableObject(
-  pagesDirectory: string,
-  objectPath: string,
-  content: Buffer,
-): Promise<void> {
-  const targetPath = join(pagesDirectory, objectPath);
-  const ancestors = await directoryChain(pagesDirectory, dirname(targetPath));
-  let handle;
-  try {
-    handle = await open(targetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const before = await handle.stat();
-    const pathBefore = await lstat(targetPath);
-    if (
-      !before.isFile() || pathBefore.isSymbolicLink() || before.nlink < 1 ||
-      before.dev !== pathBefore.dev || before.ino !== pathBefore.ino
-    ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-    const actual = await handle.readFile();
-    const after = await handle.stat();
-    const pathAfter = await lstat(targetPath);
-    if (
-      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs ||
-      after.dev !== pathAfter.dev || after.ino !== pathAfter.ino || !actual.equals(content)
-    ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-    for (const ancestor of ancestors) {
-      const metadata = await lstat(ancestor.path);
-      if (
-        !metadata.isDirectory() || metadata.isSymbolicLink() ||
-        metadata.dev !== ancestor.device || metadata.ino !== ancestor.inode
-      ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-    }
-  } catch (error) {
-    if (error instanceof MaterializationError) throw error;
-    throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
-function assertImmutableObjectSync(
-  pagesDirectory: string,
-  objectPath: string,
-  content: Buffer,
-): void {
-  const targetPath = join(pagesDirectory, objectPath);
-  const ancestors: DirectoryIdentity[] = [];
-  let current = pagesDirectory;
-  for (const component of relative(pagesDirectory, dirname(targetPath)).split(sep).filter(Boolean)) {
-    const metadata = lstatSync(current);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
     }
-    ancestors.push({ path: current, device: metadata.dev, inode: metadata.ino });
-    current = join(current, component);
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) await visit(path, relativePath);
+      else if (entry.isFile() && !entry.isSymbolicLink()) actual.add(relativePath);
+      else throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    }
   }
-  const finalDirectory = lstatSync(current);
-  ancestors.push({ path: current, device: finalDirectory.dev, inode: finalDirectory.ino });
-
-  let descriptor: number | undefined;
   try {
-    descriptor = openSync(targetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const before = fstatSync(descriptor);
-    const pathBefore = lstatSync(targetPath);
-    const actual = readFileSync(descriptor);
-    const after = fstatSync(descriptor);
-    const pathAfter = lstatSync(targetPath);
-    if (
-      !before.isFile() || pathBefore.isSymbolicLink() || before.nlink < 1 ||
-      before.dev !== pathBefore.dev || before.ino !== pathBefore.ino ||
-      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs ||
-      after.dev !== pathAfter.dev || after.ino !== pathAfter.ino || !actual.equals(content)
-    ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-    for (const ancestor of ancestors) {
-      const metadata = lstatSync(ancestor.path);
-      if (
-        !metadata.isDirectory() || metadata.isSymbolicLink() ||
-        metadata.dev !== ancestor.device || metadata.ino !== ancestor.inode
-      ) throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    await visit(directory, "");
+    if (actual.size !== expected.size || Array.from(actual).some((path) => !expected.has(path))) {
+      throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    }
+    for (const asset of assets) {
+      if (!await sameBytes(join(directory, asset.relativePath), asset.content)) {
+        throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+      }
     }
   } catch (error) {
     if (error instanceof MaterializationError) throw error;
     throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
-function assertAllImmutableObjectsAtCommit(
+async function installImmutableGraph(
   pagesDirectory: string,
+  graphHash: string,
   assets: FinalAsset[],
-  records: Record<string, GitHubPagesAssetRecord>,
-): void {
-  for (const asset of assets) {
-    assertImmutableObjectSync(
-      pagesDirectory,
-      records[asset.relativePath].objectPath,
-      asset.content,
-    );
+): Promise<boolean> {
+  const objectsDirectory = join(pagesDirectory, "objects");
+  await ensureDirectory(objectsDirectory);
+  const targetDirectory = join(objectsDirectory, graphHash);
+  try {
+    const metadata = await lstat(targetDirectory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+    }
+    await assertCompleteGraph(targetDirectory, assets);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const stagingDirectory = join(objectsDirectory, `.${graphHash}.stage-${randomUUID()}`);
+  await mkdir(stagingDirectory, { mode: 0o755 });
+  try {
+    const canonicalByContent = new Map<string, string>();
+    for (const asset of assets) {
+      const targetPath = join(stagingDirectory, asset.relativePath);
+      await ensureDirectory(dirname(targetPath));
+      const canonicalPath = canonicalByContent.get(asset.contentHash);
+      if (canonicalPath) {
+        await link(canonicalPath, targetPath);
+      } else {
+        const handle = await open(
+          targetPath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o644,
+        );
+        try {
+          await handle.writeFile(asset.content);
+          await handle.chmod(0o444);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        canonicalByContent.set(asset.contentHash, targetPath);
+      }
+    }
+    await syncTree(stagingDirectory);
+
+    // Node exposes no renameat2(RENAME_NOREPLACE) / renamex_np(RENAME_EXCL).
+    // Minimal portable fallback: all trusted publishers honor the owner-verified writer lock,
+    // reject any pre-existing graph above, and use POSIX rename as the one visibility point.
+    // After rename, pagesDirectory must remain exclusively owned by that trusted publisher
+    // account; files are 0444 to catch accidental mutation. A hostile same-account process is
+    // explicitly outside this boundary, so this does not claim kernel no-replace against one.
+    try {
+      await rename(stagingDirectory, targetDirectory);
+    } catch (error) {
+      if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      await assertCompleteGraph(targetDirectory, assets);
+      return false;
+    }
+    await syncDirectory(objectsDirectory);
+    return true;
+  } catch (error) {
+    if (error instanceof MaterializationError) throw error;
+    throw new MaterializationError("MIAOBI_OBJECT_CONFLICT");
+  } finally {
+    await removeStagingTree(stagingDirectory).catch(() => undefined);
   }
 }
 
@@ -549,8 +509,9 @@ function readLockOwnerSync(lockPath: string): WriterLockOwner | null {
 }
 
 function ownerLeaseExpired(owner: WriterLockOwner | null, lockMtimeMs: number): boolean {
+  const now = Date.now();
   const heartbeatMs = owner ? new Date(owner.heartbeatAt).getTime() : lockMtimeMs;
-  return Date.now() - heartbeatMs > LOCK_LEASE_MS;
+  return heartbeatMs > now + LOCK_MAX_CLOCK_SKEW_MS || now - heartbeatMs > LOCK_LEASE_MS;
 }
 
 async function acquireWriterLock(pagesDirectory: string): Promise<WriterLock> {
@@ -558,10 +519,16 @@ async function acquireWriterLock(pagesDirectory: string): Promise<WriterLock> {
   const lockPath = join(pagesDirectory, ".github-pages-assets.lock");
   const ownerPath = join(lockPath, "owner.json");
   const ownerToken = randomUUID().split("-").join("");
+  const acquisitionStarted = process.hrtime.bigint();
+  const acquisitionTimedOut = (): boolean =>
+    Number(process.hrtime.bigint() - acquisitionStarted) / 1_000_000 >= LOCK_ACQUIRE_TIMEOUT_MS;
   let lockIdentity: DirectoryIdentity | undefined;
   let staleQuarantine: string | undefined;
 
   for (;;) {
+    if (acquisitionTimedOut()) {
+      throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    }
     try {
       mkdirSync(lockPath, { mode: 0o700 });
       const metadata = lstatSync(lockPath);
@@ -586,6 +553,9 @@ async function acquireWriterLock(pagesDirectory: string): Promise<WriterLock> {
       if (!observedMetadata.isDirectory() || observedMetadata.isSymbolicLink()) invalidPath();
       const observedOwner = await readLockOwner(lockPath);
       if (!ownerLeaseExpired(observedOwner, observedMetadata.mtimeMs)) {
+        if (acquisitionTimedOut()) {
+          throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+        }
         await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
         continue;
       }
@@ -856,27 +826,9 @@ export async function materializeGitHubPagesRelease(input: {
         createdAtForRelease(input.releaseId),
     };
 
-    const canonicalByContent = new Map<string, string>();
-    for (const asset of assets) {
-      const objectPath = records[asset.relativePath].objectPath;
-      const canonicalObjectPath = canonicalByContent.get(asset.contentHash);
-      const created = canonicalObjectPath === undefined
-        ? await publishImmutableObject(pagesDirectory, objectPath, asset.content)
-        : await publishImmutableAlias(
-          pagesDirectory,
-          canonicalObjectPath,
-          objectPath,
-          asset.content,
-        );
-      canonicalByContent.set(asset.contentHash, canonicalObjectPath ?? objectPath);
-      if (created) createdObjectPaths.push(objectPath);
-    }
-    for (const asset of assets) {
-      await assertImmutableObject(
-        pagesDirectory,
-        records[asset.relativePath].objectPath,
-        asset.content,
-      );
+    const graphCreated = await installImmutableGraph(pagesDirectory, graphHash, assets);
+    if (graphCreated) {
+      createdObjectPaths.push(...assets.map((asset) => records[asset.relativePath].objectPath));
     }
 
     const indexPath = join(pagesDirectory, "releases", "index.json");
@@ -907,11 +859,7 @@ export async function materializeGitHubPagesRelease(input: {
     );
 
     await releaseWriter.assertOwned();
-    await writeJsonImmutable(manifestPath, manifest, () => {
-      releaseWriter.assertOwnedSync();
-      assertAllImmutableObjectsAtCommit(pagesDirectory, assets, records);
-      releaseWriter.assertOwnedSync();
-    });
+    await writeJsonImmutable(manifestPath, manifest, releaseWriter.assertOwnedSync);
     await releaseWriter.assertOwned();
     await writeJsonAtomically(indexPath, { schemaVersion: 1, releases: sortedReleases });
     return { manifest, releaseDirectory, createdObjectPaths };
