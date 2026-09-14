@@ -5,7 +5,8 @@ import type { MagicBuilderRunner } from "./types";
 export type MagicBuilderErrorCode =
   | "MIAOBI_CLI_FAILED"
   | "MIAOBI_AUTH_REQUIRED"
-  | "MIAOBI_INVALID_RESPONSE";
+  | "MIAOBI_INVALID_RESPONSE"
+  | "MIAOBI_OWNERSHIP_LOST";
 
 export class MagicBuilderError extends Error {
   readonly code: MagicBuilderErrorCode;

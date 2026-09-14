@@ -1168,19 +1168,154 @@ test("an active owner refreshes its token-bound heartbeat and remains exclusive"
   });
 });
 
+test("a superseded owner is fenced before its next remote side effect and preserves the successor transaction", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const clock = new FakeLockClock();
+    const ownerAEvents: string[] = [];
+    let ownerAKey = "";
+    let resolveOwnerA!: (result: { stdout: string; stderr: string }) => void;
+    const ownerABlocked = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolveOwnerA = resolve; });
+    const ownerA = deployMiaobi({
+      runner: {
+        async run(args) {
+          ownerAEvents.push(args[0]);
+          if (ownerAEvents.length > 1) throw new Error("superseded owner performed another remote call");
+          ownerAKey = args[args.indexOf("--key") + 1];
+          return ownerABlocked;
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+      lockClock: clock,
+    });
+    const ownerAOutcome = ownerA.catch((error: unknown) => error as Error);
+    while (ownerAEvents.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+    clock.current += LOCK_LEASE_MS + 10_000;
+    const ownerBEvents: string[] = [];
+    let resolveOwnerBPage!: (result: { stdout: string; stderr: string }) => void;
+    const ownerBPageBlocked = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolveOwnerBPage = resolve; });
+    const ownerBRunner: MagicBuilderRunner = {
+      async run(args) {
+        if (args[0] === "file") {
+          ownerBEvents.push("asset");
+          const key = args[args.indexOf("--key") + 1];
+          return { stdout: JSON.stringify({ id: `owner-b-upload-${ownerBEvents.length}`, url: `https://tos.example.test/${key}` }), stderr: "" };
+        }
+        if (args[0] === "page") {
+          ownerBEvents.push("page");
+          return ownerBPageBlocked;
+        }
+        const api = args.includes("magic-resume-api");
+        ownerBEvents.push(api ? "api" : "web");
+        const id = api ? "api-new" : "web-new";
+        return { stdout: JSON.stringify({ id, faas_url: `https://magic.solutionsuite.cn/api/faas/${id}` }), stderr: "" };
+      },
+    };
+    globalThis.fetch = async (input) => healthyResponse(
+      input,
+      "api-new",
+      "59a06b5c2c12-20260913164700",
+    );
+    const ownerB = deployMiaobi({
+      runner: ownerBRunner,
+      gitCommit: COMMIT,
+      now: new Date("2026-09-13T16:47:00.000Z"),
+      lockClock: clock,
+    });
+    while (!ownerBEvents.includes("page")) await new Promise((resolve) => setImmediate(resolve));
+
+    const lockPath = join(root, ".miaobi-recovery/deployment.lock");
+    const pendingPath = join(root, ".miaobi-recovery/deployment.pending.json");
+    const successorLock = await readFile(lockPath, "utf8");
+    const successorPending = await readFile(pendingPath, "utf8");
+    resolveOwnerA({ stdout: JSON.stringify({ id: "owner-a-upload", url: `https://tos.example.test/${ownerAKey}` }), stderr: "" });
+
+    const ownerAError = await ownerAOutcome;
+    assert.equal(ownerAError.message, "MIAOBI_OWNERSHIP_LOST");
+    assert.deepEqual(ownerAEvents, ["file"]);
+    assert.equal(await readFile(lockPath, "utf8"), successorLock);
+    assert.equal(await readFile(pendingPath, "utf8"), successorPending);
+
+    resolveOwnerBPage({
+      stdout: JSON.stringify({
+        id: "vv6BtLE8MTR",
+        html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR",
+      }),
+      stderr: "",
+    });
+    const ownerBState = await ownerB;
+    assert.equal(ownerBState.releaseId, "59a06b5c2c12-20260913164700");
+  });
+});
+
+test("losing ownership during page publication preserves pending and forbids the state commit", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const clock = new FakeLockClock();
+    const events: string[] = [];
+    const base = fakeRunner(events);
+    let resolvePage!: (result: { stdout: string; stderr: string }) => void;
+    const blockedPage = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolvePage = resolve; });
+    const deployment = deployMiaobi({
+      runner: {
+        async run(args) {
+          if (args[0] === "page") {
+            events.push("page");
+            return blockedPage;
+          }
+          return base.run(args);
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+      lockClock: clock,
+      fetch: async (input) => healthyResponse(input),
+    });
+    const outcome = deployment.catch((error: unknown) => error as Error);
+    const pendingPath = join(root, ".miaobi-recovery/deployment.pending.json");
+    while (!events.includes("page")) await new Promise((resolve) => setImmediate(resolve));
+    const pendingBefore = await readFile(pendingPath, "utf8");
+
+    const lockPath = join(root, ".miaobi-recovery/deployment.lock");
+    await rm(lockPath);
+    const successorLock = JSON.stringify({
+      schemaVersion: 1,
+      pid: process.pid,
+      token: "dddddddddddddddddddddddddddddddd",
+      startedAt: new Date(clock.current).toISOString(),
+      processStartedAt: new Date(clock.current - process.uptime() * 1000).toISOString(),
+    });
+    await writeFile(lockPath, successorLock, { mode: 0o600 });
+    resolvePage({
+      stdout: JSON.stringify({
+        id: "vv6BtLE8MTR",
+        html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR",
+      }),
+      stderr: "",
+    });
+
+    const error = await outcome;
+    assert.equal(error.message, "MIAOBI_OWNERSHIP_LOST");
+    assert.equal(await readFile(pendingPath, "utf8"), pendingBefore);
+    await assert.rejects(readFile(join(root, ".miaobi/deployment.json"), "utf8"));
+    assert.equal(await readFile(lockPath, "utf8"), successorLock);
+  });
+});
+
 test("a stopped heartbeat expires after the generous lease and can be recovered", { concurrency: false }, async () => {
   await inFixture(async () => {
     const clock = new FakeLockClock();
     let resolveOwner!: (result: { stdout: string; stderr: string }) => void;
     const blocked = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolveOwner = resolve; });
+    let ownerCalls = 0;
     const owner = deployMiaobi({
-      runner: { async run() { return blocked; } },
+      runner: { async run() { ownerCalls += 1; return blocked; } },
       gitCommit: COMMIT,
       now: NOW,
       lockClock: clock,
     });
     const ownerOutcome = owner.catch((error: unknown) => error as Error);
-    while (clock.timers.size === 0) await new Promise((resolve) => setImmediate(resolve));
+    while (ownerCalls === 0) await new Promise((resolve) => setImmediate(resolve));
     clock.stop();
     clock.current += LOCK_LEASE_MS + 10_000;
     globalThis.fetch = async (input) => healthyResponse(

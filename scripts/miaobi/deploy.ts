@@ -222,10 +222,15 @@ async function refreshLockHeartbeat(
   }
 }
 
+type StateLock = {
+  assertOwnership: () => Promise<void>;
+  release: () => Promise<void>;
+};
+
 async function acquireStateLock(
   state: TrustedRecovery,
   clock: StateLockClock,
-): Promise<() => Promise<void>> {
+): Promise<StateLock> {
   await assertStorageIdentity(state);
   const token = randomUUID().replaceAll("-", "");
   const processStartedAt = new Date(clock.now() - process.uptime() * 1000).toISOString();
@@ -254,28 +259,45 @@ async function acquireStateLock(
       await rm(stagedLockPath);
       const claimed = await lstat(state.lockPath);
       if (!claimed.isFile() || claimed.isSymbolicLink()) throw new Error();
+      let ownershipLost = false;
       let heartbeatRunning = false;
+      const loseOwnership = (): void => {
+        ownershipLost = true;
+        clock.clearInterval(heartbeatTimer);
+      };
+      const verifyOwnership = async (): Promise<void> => {
+        if (ownershipLost) throw new MagicBuilderError("MIAOBI_OWNERSHIP_LOST");
+        try {
+          await refreshLockHeartbeat(state, token, claimed, clock.now());
+        } catch {
+          loseOwnership();
+          throw new MagicBuilderError("MIAOBI_OWNERSHIP_LOST");
+        }
+      };
       const heartbeatTimer = clock.setInterval(() => {
-        if (heartbeatRunning) return;
+        if (heartbeatRunning || ownershipLost) return;
         heartbeatRunning = true;
-        void refreshLockHeartbeat(state, token, claimed, clock.now())
-          .catch(() => clock.clearInterval(heartbeatTimer))
+        void verifyOwnership()
+          .catch(() => undefined)
           .finally(() => { heartbeatRunning = false; });
       }, LOCK_HEARTBEAT_MS);
       heartbeatTimer.unref?.();
-      return async () => {
-        clock.clearInterval(heartbeatTimer);
-        try {
-          await assertStorageIdentity(state);
-          const current = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
-          if (current?.token !== token) return;
-          const beforeRemove = await lstat(state.lockPath);
-          if (beforeRemove.dev === claimed.dev && beforeRemove.ino === claimed.ino) {
-            await rm(state.lockPath, { force: true });
+      return {
+        assertOwnership: verifyOwnership,
+        release: async () => {
+          clock.clearInterval(heartbeatTimer);
+          try {
+            await assertStorageIdentity(state);
+            const current = await readJsonFile(state.lockPath) as { token?: unknown } | undefined;
+            if (current?.token !== token) return;
+            const beforeRemove = await lstat(state.lockPath);
+            if (beforeRemove.dev === claimed.dev && beforeRemove.ino === claimed.ino) {
+              await rm(state.lockPath, { force: true });
+            }
+          } catch {
+            // Never remove a lock whose directory identity or ownership changed.
           }
-        } catch {
-          // Never remove a lock whose directory identity or ownership changed.
-        }
+        },
       };
     } catch (error) {
       await handle?.close().catch(() => undefined);
@@ -338,6 +360,23 @@ async function acquireStateLock(
     }
   }
   throw codedError("MIAOBI_STATE_LOCKED");
+}
+
+function fencedRunner(runner: MagicBuilderRunner, lock: StateLock): MagicBuilderRunner {
+  return {
+    platformOrigin: runner.platformOrigin,
+    async run(args) {
+      await lock.assertOwnership();
+      try {
+        const result = await runner.run(args);
+        await lock.assertOwnership();
+        return result;
+      } catch (error) {
+        await lock.assertOwnership();
+        throw error;
+      }
+    },
+  };
 }
 
 function markerCommit(buildMarker: string): string | undefined {
@@ -699,6 +738,17 @@ async function checkHealth(check: HealthCheck): Promise<void> {
   }
 }
 
+async function checkHealthWithOwnership(lock: StateLock, check: HealthCheck): Promise<void> {
+  await lock.assertOwnership();
+  try {
+    await checkHealth(check);
+    await lock.assertOwnership();
+  } catch (error) {
+    await lock.assertOwnership();
+    throw error;
+  }
+}
+
 function pageHtml(webFaasUrl: string, webFaasId: string, platformOrigin: string): string {
   const safeUrl = validatePublishedUrl(webFaasUrl, `/api/faas/${validateResourceId(webFaasId)}`, platformOrigin);
   const scriptUrl = JSON.stringify(safeUrl).replace(/</g, "\\u003c");
@@ -787,6 +837,7 @@ async function reconcilePending(
   recovery: TrustedRecovery,
   runner: MagicBuilderRunner,
   platformOrigin: string,
+  lock: StateLock,
 ): Promise<MiaobiDeploymentState> {
   const canonicalPage = pageHtml(
     pending.deployment.webFaasUrl,
@@ -808,13 +859,21 @@ async function reconcilePending(
     await handle.close();
     handle = undefined;
     await assertStorageIdentity(recovery);
-    await publishPage(runner, temporaryPage, platformOrigin);
-    await writeAtomicJson(state, state.path, pending.deployment);
-    for (const entry of cleanup) {
-      await assertStorageIdentity(entry.storage);
-      await rm(entry.path, { force: true });
+    const stagedStatePath = await stageJson(state, state.path, pending.deployment);
+    try {
+      await lock.assertOwnership();
+      await publishPage(runner, temporaryPage, platformOrigin);
+      await lock.assertOwnership();
+      await commitStaged(stagedStatePath, state.path, state);
+      for (const entry of cleanup) {
+        await lock.assertOwnership();
+        await assertStorageIdentity(entry.storage);
+        await rm(entry.path, { force: true });
+      }
+      return pending.deployment;
+    } finally {
+      await safeRemoveStaged(state, stagedStatePath);
     }
-    return pending.deployment;
   } finally {
     await handle?.close().catch(() => undefined);
     await safeRemoveStaged(recovery, temporaryPage);
@@ -829,13 +888,14 @@ export async function deployMiaobi(options: {
   healthTimeoutMs?: number;
   lockClock?: StateLockClock;
 }): Promise<MiaobiDeploymentState> {
-  let releaseLock: (() => Promise<void>) | undefined;
+  let stateLock: StateLock | undefined;
   try {
     const platformOrigin = resolveMagicPlatformOrigin(options.runner.platformOrigin);
     const { outputDirectory, statePath, legacyPendingPath, recoveryPath } = deploymentPaths();
     const stateStorage = await trustedState(statePath);
     const recoveryStorage = await trustedRecovery(recoveryPath, legacyPendingPath);
-    releaseLock = await acquireStateLock(recoveryStorage, options.lockClock ?? systemLockClock);
+    stateLock = await acquireStateLock(recoveryStorage, options.lockClock ?? systemLockClock);
+    const runner = fencedRunner(options.runner, stateLock);
 
     const pendingRecord = await pendingState(
       stateStorage,
@@ -853,21 +913,24 @@ export async function deployMiaobi(options: {
         pendingRecord.cleanup,
         stateStorage,
         recoveryStorage,
-        options.runner,
+        runner,
         platformOrigin,
+        stateLock,
       );
     }
 
     const previous = await priorState(stateStorage, platformOrigin);
     const apiMetadata = await readApiBuildMetadata(outputDirectory, options.gitCommit);
     const releaseId = createReleaseId(options.gitCommit, options.now);
+    await stateLock.assertOwnership();
     const manifest = await publishAssets({
       directory: resolve(outputDirectory, "client/assets"),
       releaseId,
-      runner: options.runner,
+      runner,
     });
+    await stateLock.assertOwnership();
     const api = await publishFaas(
-      options.runner,
+      runner,
       resolve(outputDirectory, "api-faas.cjs"),
       "magic-resume-api",
       platformOrigin,
@@ -882,7 +945,7 @@ export async function deployMiaobi(options: {
     });
     const webBundlePath = await buildWebFaas(html, outputDirectory);
     const web = await publishFaas(
-      options.runner,
+      runner,
       webBundlePath,
       "magic-resume-web",
       platformOrigin,
@@ -895,8 +958,8 @@ export async function deployMiaobi(options: {
       fetch: options.fetch ?? globalThis.fetch,
       timeoutMs: options.healthTimeoutMs ?? 10_000,
     };
-    await checkHealth({ ...health, url: api.url, kind: "api" });
-    await checkHealth({ ...health, url: web.url, kind: "web" });
+    await checkHealthWithOwnership(stateLock, { ...health, url: api.url, kind: "api" });
+    await checkHealthWithOwnership(stateLock, { ...health, url: web.url, kind: "web" });
 
     const pagePath = resolve(outputDirectory, "page.html");
     await writeFile(pagePath, pageHtml(web.url, web.id, platformOrigin), { encoding: "utf8", mode: 0o600 });
@@ -926,8 +989,11 @@ export async function deployMiaobi(options: {
     const stagedStatePath = await stageJson(stateStorage, stateStorage.path, deployment);
     await writeAtomicJson(recoveryStorage, recoveryStorage.pendingPath, pendingDeployment);
     try {
-      await publishPage(options.runner, pagePath, platformOrigin);
+      await stateLock.assertOwnership();
+      await publishPage(runner, pagePath, platformOrigin);
+      await stateLock.assertOwnership();
       await commitStaged(stagedStatePath, stateStorage.path, stateStorage);
+      await stateLock.assertOwnership();
       await assertStorageIdentity(recoveryStorage);
       await rm(recoveryStorage.pendingPath, { force: true });
     } finally {
@@ -938,7 +1004,7 @@ export async function deployMiaobi(options: {
     if ((error as { code?: string }).code?.startsWith("MIAOBI_")) throw error;
     throw codedError("MIAOBI_DEPLOY_FAILED");
   } finally {
-    await releaseLock?.();
+    await stateLock?.release();
   }
 }
 
