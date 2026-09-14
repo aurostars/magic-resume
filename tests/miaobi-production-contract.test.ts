@@ -101,9 +101,38 @@ async function filesRecursively(directory: string): Promise<string[]> {
   return files;
 }
 
-async function withIsolatedDirectory<T>(directory: string, run: () => Promise<T>): Promise<T> {
+async function removeGeneratedDirectory(directory: string): Promise<void> {
+  try {
+    const metadata = await lstat(directory);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      await rm(directory, { force: true });
+    } else {
+      await rm(directory, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function withIsolatedDirectory<T>(
+  directory: string,
+  run: () => Promise<T>,
+  operations: { removeDirectory?: (path: string) => Promise<void> } = {},
+): Promise<T> {
   const parent = dirname(directory);
-  const backup = join(parent, `${directory.slice(parent.length + 1)}.backup-${process.pid}-${randomUUID()}`);
+  const name = directory.slice(parent.length + 1);
+  const backup = join(parent, `${name}.backup-${process.pid}-${randomUUID()}`);
+  const removeDirectory = operations.removeDirectory ?? removeGeneratedDirectory;
   let hasBackup = false;
   let prepared = false;
 
@@ -123,23 +152,35 @@ async function withIsolatedDirectory<T>(directory: string, run: () => Promise<T>
     return await run();
   } finally {
     if (prepared) {
+      let cleanupError: unknown;
       try {
-        const metadata = await lstat(directory);
-        if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-          await rm(directory, { force: true });
-        } else {
-          await rm(directory, { recursive: true, force: true });
-        }
+        await removeDirectory(directory);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        cleanupError = error;
       }
-      if (hasBackup) await rename(backup, directory);
+
+      if (hasBackup) {
+        if (await pathExists(directory)) {
+          const quarantine = join(parent, `${name}.quarantine-${process.pid}-${randomUUID()}`);
+          await rename(directory, quarantine);
+        }
+        await rename(backup, directory);
+      }
+
+      if (cleanupError) throw cleanupError;
     }
   }
 }
 
+function normalizeEscapedUrlSyntax(text: string): string {
+  return text
+    .replace(/\\(?:\/|u002f|x2f)/gi, "/")
+    .replace(/\\(?:u003a|x3a)/gi, ":");
+}
+
 function extractAbsoluteHttpUrls(text: string): string[] {
-  const matches = text.match(/https?:\/\/(?!\$\{)[^\s"'`<>\\]+/g) ?? [];
+  const normalized = normalizeEscapedUrlSyntax(text);
+  const matches = normalized.match(/https?:\/\/(?!\$\{)[^\s"'`<>\\]+/gi) ?? [];
   return matches
     .map((value) => value.replace(/[),.;\]}]+$/g, ""))
     .filter((value) => URL.canParse(value));
@@ -192,6 +233,28 @@ function assertAllowedGeneratedUrl(value: string, tosOrigins: ReadonlySet<string
   );
 }
 
+test("escaped absolute URLs are normalized before the exact allowlist is applied", () => {
+  const rejected = [
+    String.raw`https:\/\/evil.example/path`,
+    String.raw`HtTpS\X3A\U002F\X2Fevil.example/path`,
+    String.raw`http\u003a\/\/evil.example/path`,
+  ];
+  for (const fixture of rejected) {
+    const urls = extractAbsoluteHttpUrls(fixture);
+    assert.equal(urls.length, 1, `escaped URL was not extracted: ${fixture}`);
+    assert.throws(() => assertAllowedGeneratedUrl(urls[0], new Set()), /unexpected generated URL origin/);
+  }
+
+  for (const [fixture, expected] of [
+    [String.raw`https\u003a\x2f\/magic.solutionsuite.cn/path`, "https://magic.solutionsuite.cn/path"],
+    [String.raw`https\x3a\/\/miaobi.invalid\/__ASSET_BASE__\/chunk.js`, "https://miaobi.invalid/__ASSET_BASE__/chunk.js"],
+  ] as const) {
+    const urls = extractAbsoluteHttpUrls(fixture);
+    assert.deepEqual(urls, [expected]);
+    assert.doesNotThrow(() => assertAllowedGeneratedUrl(urls[0], new Set()));
+  }
+});
+
 test("build isolation restores an existing dist sentinel and rejects unsafe inputs", { concurrency: false }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "magic-resume-production-contract-"));
   const directory = join(fixture, "dist");
@@ -214,6 +277,41 @@ test("build isolation restores an existing dist sentinel and rejects unsafe inpu
     await mkdir(join(fixture, "target"));
     await symlink(join(fixture, "target"), directory, "dir");
     await assert.rejects(withIsolatedDirectory(directory, async () => undefined), /must not be a symlink/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("build isolation restores an existing dist sentinel when generated-dist cleanup fails", { concurrency: false }, async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "magic-resume-production-contract-cleanup-"));
+  const directory = join(fixture, "dist");
+  try {
+    await mkdir(directory);
+    await writeFile(join(directory, "sentinel.txt"), "caller-owned");
+
+    await assert.rejects(
+      withIsolatedDirectory(
+        directory,
+        async () => {
+          await mkdir(directory);
+          await writeFile(join(directory, "generated.txt"), "generated");
+        },
+        {
+          removeDirectory: async () => {
+            const error = new Error("simulated cleanup failure") as NodeJS.ErrnoException;
+            error.code = "EPERM";
+            throw error;
+          },
+        },
+      ),
+      /simulated cleanup failure/,
+    );
+
+    assert.equal(await readFile(join(directory, "sentinel.txt"), "utf8"), "caller-owned");
+    await assert.rejects(access(join(directory, "generated.txt")));
+    const quarantines = (await readdir(fixture)).filter((entry) => entry.startsWith("dist.quarantine-"));
+    assert.equal(quarantines.length, 1);
+    assert.equal(await readFile(join(fixture, quarantines[0], "generated.txt"), "utf8"), "generated");
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

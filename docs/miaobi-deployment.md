@@ -58,6 +58,14 @@ corepack pnpm build:miaobi
 corepack pnpm deploy:miaobi
 ```
 
+Windows PowerShell 使用对应的显式三步：
+
+```powershell
+$env:MIAOBI_GIT_COMMIT = (git rev-parse HEAD)
+corepack pnpm build:miaobi
+corepack pnpm deploy:miaobi
+```
+
 `corepack pnpm deploy:miaobi` 只接受与 `api-faas.meta.json` 一致的 `MIAOBI_GIT_COMMIT`。不要用环境变量绕过 commit 校验，也不要把认证信息写入命令历史、文档或日志。
 
 发布顺序固定且不可跳过：
