@@ -255,29 +255,48 @@ async function assertStorageIdentity(state: TrustedStorage): Promise<void> {
 }
 
 async function preflightDirectoryDurability(storage: TrustedStorage): Promise<void> {
-  await assertStorageIdentity(storage);
-  const cached = durableDirectoryIdentities.get(storage.directory);
-  if (cached?.device === storage.device && cached.inode === storage.inode) return;
-
-  let handle;
   try {
-    handle = await open(storage.directory, constants.O_RDONLY);
-    const opened = await handle.stat();
-    if (
-      !opened.isDirectory() || opened.dev !== storage.device || opened.ino !== storage.inode
-    ) throw new Error();
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
     await assertStorageIdentity(storage);
-    durableDirectoryIdentities.set(storage.directory, {
-      device: storage.device,
-      inode: storage.inode,
-    });
+    const cached = durableDirectoryIdentities.get(storage.directory);
+    if (cached?.device === storage.device && cached.inode === storage.inode) return;
+
+    let handle;
+    try {
+      handle = await open(storage.directory, constants.O_RDONLY);
+      const opened = await handle.stat();
+      if (
+        !opened.isDirectory() || opened.dev !== storage.device || opened.ino !== storage.inode
+      ) throw new Error();
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await assertStorageIdentity(storage);
+      durableDirectoryIdentities.set(storage.directory, {
+        device: storage.device,
+        inode: storage.inode,
+      });
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
   } catch {
     throw codedError("MIAOBI_DURABILITY_UNSUPPORTED");
-  } finally {
-    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function preflightDeploymentDurability(
+  state: TrustedState,
+  recovery: TrustedRecovery,
+): Promise<void> {
+  for (const storage of [
+    recovery,
+    recovery.generations,
+    recovery.pending,
+    recovery.pageInflight,
+    recovery.pageConfirmed,
+    state,
+    state.states,
+  ]) {
+    await preflightDirectoryDurability(storage);
   }
 }
 
@@ -1252,7 +1271,7 @@ export async function deployMiaobi(options: {
     const { outputDirectory, legacyStatePath, legacyPendingPath, legacyExternalPendingPath } = deploymentPaths();
     const stateStorage = await trustedState(legacyStatePath);
     const recoveryStorage = await trustedRecovery(legacyExternalPendingPath, legacyPendingPath);
-    await preflightDirectoryDurability(recoveryStorage);
+    await preflightDeploymentDurability(stateStorage, recoveryStorage);
     stateLock = await acquireStateLock(recoveryStorage, stateStorage, options.lockClock ?? systemLockClock);
     const runner = fencedRunner(options.runner, stateLock);
 
