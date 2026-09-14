@@ -188,6 +188,17 @@ async function onlyPendingRecord(root: string): Promise<Awaited<ReturnType<typeo
   return records[0];
 }
 
+async function pagePhaseRecords(root: string, phase: "page-inflight" | "page-confirmed"): Promise<Array<{
+  generation: number;
+  ownerToken: string;
+  pending: { phase: string; deployment: MiaobiDeploymentState };
+}>> {
+  const directory = join(root, `.miaobi-recovery/${phase}`);
+  const files = (await readdir(directory))
+    .filter((name) => /^[1-9]\d*-[0-9a-f]{32}\.json$/.test(name));
+  return Promise.all(files.map(async (name) => JSON.parse(await readFile(join(directory, name), "utf8"))));
+}
+
 test("publishes assets, API, Web, checks both URLs, then switches the page and atomically saves state", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const events: string[] = [];
@@ -556,11 +567,18 @@ test("creates trusted 0700 transaction storage and exclusive 0600 immutable reco
       ".miaobi/states",
       ".miaobi-recovery",
       ".miaobi-recovery/pending",
+      ".miaobi-recovery/page-inflight",
+      ".miaobi-recovery/page-confirmed",
       ".miaobi-recovery/generations",
     ]) assert.equal((await stat(join(root, directory))).mode & 0o777, 0o700);
     const stateFiles = await generationFiles(root, ".miaobi/states");
     assert.equal(stateFiles.length, 1);
     assert.equal((await stat(join(root, ".miaobi/states", stateFiles[0]))).mode & 0o777, 0o600);
+    for (const phase of ["page-inflight", "page-confirmed"] as const) {
+      const records = await readdir(join(root, `.miaobi-recovery/${phase}`));
+      assert.equal(records.length, 1);
+      assert.equal((await stat(join(root, `.miaobi-recovery/${phase}`, records[0]))).mode & 0o777, 0o600);
+    }
   });
 });
 
@@ -693,7 +711,7 @@ test("rejects an untrusted runner platform origin before publication", { concurr
   }
 });
 
-test("keeps a durable pending page transaction when final state commit fails and reconciles it first", { concurrency: false }, async () => {
+test("keeps a confirmed page transaction when final state commit fails and recovers without republishing", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     globalThis.fetch = async (input) => healthyResponse(input);
 
@@ -722,26 +740,52 @@ test("keeps a durable pending page transaction when final state commit fails and
     const recoveryRunner: MagicBuilderRunner = {
       async run(args) {
         recoveryCalls.push(args);
-        assert.equal(args[0], "page");
-        return {
-          stdout: JSON.stringify({
-            id: "vv6BtLE8MTR",
-            html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR",
-          }),
-          stderr: "",
-        };
+        throw new Error("confirmed recovery must not call the remote API");
       },
     };
     const recovered = await deployMiaobi({ runner: recoveryRunner, gitCommit: COMMIT, now: NOW });
     assert.deepEqual(recovered, pending.deployment);
-    assert.equal(recoveryCalls.length, 1);
-    assert.ok(recoveryCalls[0].includes("--id") && recoveryCalls[0].includes("vv6BtLE8MTR"));
+    assert.equal(recoveryCalls.length, 0);
     assert.equal((await pendingRecords(root)).length, 1);
     assert.deepEqual((await authoritativeState(root)).deployment, recovered);
   });
 });
 
-test("keeps pending on uncertain page output and ignores a mutable artifact during reconcile", { concurrency: false }, async () => {
+test("a successor may publish a prepared transaction that never entered the page API", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(deployMiaobi({
+      runner: fakeRunner([]),
+      gitCommit: COMMIT,
+      now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("simulated crash before page");
+      },
+    }));
+    assert.equal((await pagePhaseRecords(root, "page-inflight")).length, 0);
+
+    const calls: string[][] = [];
+    const recovered = await deployMiaobi({
+      runner: {
+        async run(args) {
+          calls.push(args);
+          return {
+            stdout: JSON.stringify({ id: "vv6BtLE8MTR", html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR" }),
+            stderr: "",
+          };
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], "page");
+    assert.equal((await pagePhaseRecords(root, "page-confirmed")).length, 1);
+    assert.deepEqual((await authoritativeState(root)).deployment, recovered);
+  });
+});
+
+test("keeps an uncertain page barrier and never republishes a mutable artifact", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const events: string[] = [];
     const base = fakeRunner(events);
@@ -759,27 +803,21 @@ test("keeps pending on uncertain page output and ignores a mutable artifact duri
     const pending = (await onlyPendingRecord(root)).pending;
     await writeFile(join(root, pending.page.artifactPath), "tampered page");
 
-    const publishedPages: string[] = [];
-    const recovered = await deployMiaobi({
-      runner: {
-        async run(args) {
-          assert.equal(args[0], "page");
-          publishedPages.push(await readFile(args[2], "utf8"));
-          return {
-            stdout: JSON.stringify({
-              id: "vv6BtLE8MTR",
-              html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR",
-            }),
-            stderr: "",
-          };
+    let recoveryCalls = 0;
+    await assert.rejects(
+      deployMiaobi({
+        runner: {
+          async run() {
+            recoveryCalls += 1;
+            throw new Error("must not republish an uncertain page");
+          },
         },
-      },
-      gitCommit: COMMIT,
-      now: NOW,
-    });
-    assert.equal(recovered.webFaasId, "web-new");
-    assert.match(publishedPages[0], /magic\.solutionsuite\.cn\/api\/faas\/web-new/);
-    assert.doesNotMatch(publishedPages[0], /tampered/);
+        gitCommit: COMMIT,
+        now: NOW,
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+    );
+    assert.equal(recoveryCalls, 0);
     assert.equal((await pendingRecords(root)).length, 1);
   });
 });
@@ -857,7 +895,7 @@ test("reconciles the recovery anchor after the .miaobi directory is replaced", {
       now: NOW,
     });
     assert.deepEqual(recovered, pending.deployment);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 0);
     assert.equal((await pendingRecords(root)).length, 1);
   });
 });
@@ -868,14 +906,12 @@ test("rejects a pending artifact and matching attacker hash instead of switching
     const base = fakeRunner(events);
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({
-      runner: {
-        async run(args) {
-          if (args[0] === "page") return { stdout: "uncertain", stderr: "" };
-          return base.run(args);
-        },
-      },
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("leave prepared for validation");
+      },
     }));
 
     const record = await onlyPendingRecord(root);
@@ -1009,52 +1045,73 @@ test("migrates a strictly validated version 1 deployment state and reuses its ID
   });
 });
 
-test("reconciles a legacy pending only when local API metadata safely supplies its marker", { concurrency: false }, async () => {
+test("a legacy pending without a page phase fails closed after safe validation", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const base = fakeRunner([]);
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({
-      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("leave prepared for recovery");
+      },
     }));
     const record = await onlyPendingRecord(root);
     const currentPath = join(root, ".miaobi-recovery/pending", `${record.generation}-${record.ownerToken}.json`);
     const legacyPath = join(root, ".miaobi/deployment.pending.json");
     const legacy = structuredClone(record.pending) as any;
     legacy.schemaVersion = 1;
+    delete legacy.phase;
     delete legacy.apiBuildMarker;
     legacy.deployment.schemaVersion = 1;
     delete legacy.deployment.apiBuildMarker;
     await writeFile(legacyPath, JSON.stringify(legacy), { mode: 0o600 });
     await rm(currentPath);
 
-    const calls: string[][] = [];
-    let materializedLegacy = false;
-    const recovered = await deployMiaobi({
-      runner: {
-        async run(args) {
-          calls.push(args);
-          return {
-            stdout: JSON.stringify({ id: "vv6BtLE8MTR", html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR" }),
-            stderr: "",
-          };
-        },
-      },
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({
+        runner: { async run() { calls += 1; throw new Error("must not publish"); } },
+        gitCommit: COMMIT,
+        now: NOW,
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+    );
+    assert.equal(calls, 0);
+    assert.equal((await readFile(legacyPath, "utf8")).length > 0, true);
+  });
+});
+
+test("an unphased schema 2 generation pending is treated as an uncertain page result", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const base = fakeRunner([]);
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(deployMiaobi({
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
       transactionHook: async ({ point }) => {
-        if (point === "before-state-commit") {
-          materializedLegacy = (await generationFiles(root, ".miaobi-recovery/pending")).length === 1;
-        }
+        if (point === "before-page-inflight") throw new Error("leave prepared for migration fixture");
       },
-    });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0][0], "page");
-    assert.equal(materializedLegacy, true);
-    assert.equal(recovered.schemaVersion, 2);
-    assert.equal(recovered.apiBuildMarker, BUILD_MARKER);
-    assert.equal((await readFile(legacyPath, "utf8")).length > 0, true);
+    }));
+    const record = await onlyPendingRecord(root) as any;
+    const path = join(root, ".miaobi-recovery/pending", `${record.generation}-${record.ownerToken}.json`);
+    record.pending.schemaVersion = 2;
+    delete record.pending.phase;
+    await writeFile(path, JSON.stringify(record), { mode: 0o600 });
+
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({
+        runner: { async run() { calls += 1; throw new Error("must not publish"); } },
+        gitCommit: COMMIT,
+        now: NOW,
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+    );
+    assert.equal(calls, 0);
+    assert.equal((await readFile(path, "utf8")).length > 0, true);
   });
 });
 
@@ -1063,9 +1120,12 @@ test("preserves a legacy pending whose marker disagrees with local API metadata"
     const base = fakeRunner([]);
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({
-      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("leave prepared for recovery");
+      },
     }));
     const generated = await onlyPendingRecord(root);
     const generatedPath = join(root, ".miaobi-recovery/pending", `${generated.generation}-${generated.ownerToken}.json`);
@@ -1073,6 +1133,7 @@ test("preserves a legacy pending whose marker disagrees with local API metadata"
     const pending = structuredClone(generated.pending) as any;
     const forgedMarker = `${COMMIT}.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
     pending.schemaVersion = 1;
+    delete pending.phase;
     pending.apiBuildMarker = forgedMarker;
     pending.deployment.schemaVersion = 1;
     pending.deployment.apiBuildMarker = forgedMarker;
@@ -1139,9 +1200,12 @@ test("rejects release and API marker commit-prefix mismatches in state and pendi
       const base = fakeRunner([]);
       globalThis.fetch = async (input) => healthyResponse(input);
       await assert.rejects(deployMiaobi({
-        runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+        runner: base,
         gitCommit: COMMIT,
         now: NOW,
+        transactionHook: async ({ point }) => {
+          if (point === "before-page-inflight") throw new Error("leave prepared for validation");
+        },
       }));
       const record = await onlyPendingRecord(root);
       const pendingPath = join(root, ".miaobi-recovery/pending", `${record.generation}-${record.ownerToken}.json`);
@@ -1337,6 +1401,114 @@ test("losing ownership during page publication preserves pending and forbids the
   });
 });
 
+test("a foreign page-inflight barrier freezes every successor without another remote mutation", { concurrency: false, timeout: 10_000 }, async () => {
+  await inFixture(async (root) => {
+    const clock = new FakeLockClock();
+    const ownerAEvents: string[] = [];
+    const ownerABase = fakeRunner(ownerAEvents);
+    let resolveOwnerAPage!: (result: { stdout: string; stderr: string }) => void;
+    const ownerAPage = new Promise<{ stdout: string; stderr: string }>((resolve) => { resolveOwnerAPage = resolve; });
+    const ownerA = deployMiaobi({
+      runner: {
+        async run(args) {
+          if (args[0] === "page") {
+            ownerAEvents.push("page");
+            return ownerAPage;
+          }
+          return ownerABase.run(args);
+        },
+      },
+      gitCommit: COMMIT,
+      now: NOW,
+      lockClock: clock,
+      fetch: async (input) => healthyResponse(input),
+    });
+    const ownerAOutcome = ownerA.catch((error: unknown) => error as Error);
+    while (!ownerAEvents.includes("page")) await new Promise((resolve) => setImmediate(resolve));
+    const inflight = await pagePhaseRecords(root, "page-inflight");
+    assert.equal(inflight.length, 1);
+    assert.equal(inflight[0].pending.phase, "page-inflight");
+
+    clock.stop();
+    clock.current += LOCK_LEASE_MS + 10_000;
+    for (const successor of ["B", "C"]) {
+      let calls = 0;
+      await assert.rejects(
+        deployMiaobi({
+          runner: { async run() { calls += 1; throw new Error(`owner ${successor} must not publish`); } },
+          gitCommit: COMMIT,
+          now: NOW,
+          lockClock: clock,
+        }),
+        (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+      );
+      assert.equal(calls, 0);
+    }
+
+    resolveOwnerAPage({
+      stdout: JSON.stringify({ id: "vv6BtLE8MTR", html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR" }),
+      stderr: "",
+    });
+    assert.equal((await ownerAOutcome).message, "MIAOBI_OWNERSHIP_LOST");
+    assert.equal((await pagePhaseRecords(root, "page-inflight")).length, 1);
+    assert.equal((await pagePhaseRecords(root, "page-confirmed")).length, 0);
+    assert.deepEqual(await generationFiles(root, ".miaobi/states"), []);
+  });
+});
+
+test("page success is durably confirmed before state commit", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    globalThis.fetch = async (input) => healthyResponse(input);
+    let observedConfirmed = false;
+    const state = await deployMiaobi({
+      runner: fakeRunner([]),
+      gitCommit: COMMIT,
+      now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point !== "before-state-commit") return;
+        const confirmed = await pagePhaseRecords(root, "page-confirmed");
+        assert.equal(confirmed.length, 1);
+        assert.equal(confirmed[0].pending.phase, "page-confirmed");
+        assert.equal(confirmed[0].pending.deployment.releaseId, RELEASE_ID);
+        observedConfirmed = true;
+      },
+    });
+    assert.equal(observedConfirmed, true);
+    assert.deepEqual((await authoritativeState(root)).deployment, state);
+  });
+});
+
+test("a crash after remote page success but before confirmation remains permanently uncertain", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    globalThis.fetch = async (input) => healthyResponse(input);
+    await assert.rejects(
+      deployMiaobi({
+        runner: fakeRunner([]),
+        gitCommit: COMMIT,
+        now: NOW,
+        transactionHook: async ({ point }) => {
+          if (point === "before-page-confirmation") throw new Error("simulated crash");
+        },
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_DEPLOY_FAILED",
+    );
+    assert.equal((await pagePhaseRecords(root, "page-inflight")).length, 1);
+    assert.equal((await pagePhaseRecords(root, "page-confirmed")).length, 0);
+    assert.deepEqual(await generationFiles(root, ".miaobi/states"), []);
+
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({
+        runner: { async run() { calls += 1; throw new Error("must not publish"); } },
+        gitCommit: COMMIT,
+        now: NOW,
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+    );
+    assert.equal(calls, 0);
+  });
+});
+
 test("a stopped heartbeat expires after the generous lease and can be recovered", { concurrency: false }, async () => {
   await inFixture(async () => {
     const clock = new FakeLockClock();
@@ -1474,9 +1646,12 @@ test("multiple unresolved generation transactions require recovery before any pa
     const base = fakeRunner([]);
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({
-      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("leave prepared for recovery");
+      },
     }));
     const first = await onlyPendingRecord(root);
     const secondToken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1499,7 +1674,7 @@ test("multiple unresolved generation transactions require recovery before any pa
   });
 });
 
-test("a successor reconciles an older pending before any new publication", { concurrency: false, timeout: 10_000 }, async () => {
+test("a successor commits an older confirmed page without any new publication", { concurrency: false, timeout: 10_000 }, async () => {
   await inFixture(async (root) => {
     const clock = new FakeLockClock();
     let resumeOwnerA!: () => void;
@@ -1531,11 +1706,7 @@ test("a successor reconciles an older pending before any new publication", { con
       runner: {
         async run(args) {
           ownerBCalls.push(args);
-          assert.equal(args[0], "page");
-          return {
-            stdout: JSON.stringify({ id: "vv6BtLE8MTR", html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR" }),
-            stderr: "",
-          };
+          throw new Error("confirmed recovery must not publish");
         },
       },
       gitCommit: COMMIT,
@@ -1545,9 +1716,9 @@ test("a successor reconciles an older pending before any new publication", { con
     resumeOwnerA();
 
     assert.equal((await ownerAOutcome).message, "MIAOBI_OWNERSHIP_LOST");
-    assert.equal(ownerBCalls.length, 1);
+    assert.equal(ownerBCalls.length, 0);
     const stateFiles = await generationFiles(root, ".miaobi/states");
-    assert.equal(stateFiles.length, 2);
+    assert.equal(stateFiles.length, 1);
     const authority = await authoritativeState(root);
     assert.deepEqual(authority.deployment, ownerBState);
     assert.equal(authority.resolvedGeneration, ownerAIdentity.generation);
@@ -1566,7 +1737,7 @@ test("a stale owner paused before cleanup cannot delete a successor pending or o
     let ownerAIdentity: { generation: number; ownerToken: string } | undefined;
     type GenerationDeployOptions = Parameters<typeof deployMiaobi>[0] & {
       transactionHook?: (event: {
-        point: "before-pending-commit" | "before-state-commit" | "before-pending-cleanup";
+        point: "before-pending-commit" | "before-page-inflight" | "before-page-confirmation" | "before-state-commit" | "before-pending-cleanup";
         generation: number;
         ownerToken: string;
       }) => Promise<void>;
@@ -1653,9 +1824,12 @@ test("different external and legacy pending records block every page action and 
     const base = fakeRunner([]);
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({
-      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("leave prepared for recovery");
+      },
     }));
     const generated = await onlyPendingRecord(root);
     const generatedPath = join(root, ".miaobi-recovery/pending", `${generated.generation}-${generated.ownerToken}.json`);
@@ -1666,6 +1840,7 @@ test("different external and legacy pending records block every page action and 
     await rm(generatedPath);
     const legacy = structuredClone(external) as any;
     legacy.schemaVersion = 1;
+    delete legacy.phase;
     delete legacy.apiBuildMarker;
     legacy.deployment.schemaVersion = 1;
     delete legacy.deployment.apiBuildMarker;
@@ -1688,14 +1863,17 @@ test("different external and legacy pending records block every page action and 
   });
 });
 
-test("identical external and legacy pending records reconcile once and remain as non-authoritative anchors", { concurrency: false }, async () => {
+test("identical legacy anchors remain frozen when their page phase is unknowable", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const base = fakeRunner([]);
     globalThis.fetch = async (input) => healthyResponse(input);
     await assert.rejects(deployMiaobi({
-      runner: { async run(args) { return args[0] === "page" ? { stdout: "uncertain", stderr: "" } : base.run(args); } },
+      runner: base,
       gitCommit: COMMIT,
       now: NOW,
+      transactionHook: async ({ point }) => {
+        if (point === "before-page-inflight") throw new Error("leave prepared for recovery");
+      },
     }));
     const generated = await onlyPendingRecord(root);
     const generatedPath = join(root, ".miaobi-recovery/pending", `${generated.generation}-${generated.ownerToken}.json`);
@@ -1706,36 +1884,34 @@ test("identical external and legacy pending records reconcile once and remain as
     await rm(generatedPath);
     const legacy = structuredClone(external) as any;
     legacy.schemaVersion = 1;
+    delete legacy.phase;
     delete legacy.apiBuildMarker;
     legacy.deployment.schemaVersion = 1;
     delete legacy.deployment.apiBuildMarker;
     await writeFile(legacyPath, JSON.stringify(legacy), { mode: 0o600 });
 
-    const calls: string[][] = [];
-    const recovered = await deployMiaobi({
-      runner: {
-        async run(args) {
-          calls.push(args);
-          return {
-            stdout: JSON.stringify({ id: "vv6BtLE8MTR", html_box_url: "https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR" }),
-            stderr: "",
-          };
-        },
-      },
-      gitCommit: COMMIT,
-      now: NOW,
-    });
-    assert.equal(recovered.webFaasId, "web-new");
-    assert.equal(calls.filter((args) => args[0] === "page").length, 1);
+    let calls = 0;
+    await assert.rejects(
+      deployMiaobi({
+        runner: { async run() { calls += 1; throw new Error("must not publish"); } },
+        gitCommit: COMMIT,
+        now: NOW,
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+    );
+    assert.equal(calls, 0);
     assert.equal((await readFile(externalPath, "utf8")).length > 0, true);
     assert.equal((await readFile(legacyPath, "utf8")).length > 0, true);
 
     const nextEvents: string[] = [];
-    await assert.rejects(deployMiaobi({
-      runner: fakeRunner(nextEvents, "asset"),
-      gitCommit: COMMIT,
-      now: new Date("2026-09-13T16:47:00.000Z"),
-    }));
-    assert.deepEqual(nextEvents, ["asset"]);
+    await assert.rejects(
+      deployMiaobi({
+        runner: fakeRunner(nextEvents, "asset"),
+        gitCommit: COMMIT,
+        now: new Date("2026-09-13T16:47:00.000Z"),
+      }),
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+    );
+    assert.deepEqual(nextEvents, []);
   });
 });
