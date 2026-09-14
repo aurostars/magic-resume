@@ -95,9 +95,17 @@ pnpm build
 
 ### Miaobi native deployment
 
-Miaobi operators need an authenticated `magic-builder` 1.3.0+ and a reviewed commit. Run `corepack pnpm deploy:miaobi`; the script generation-fences concurrent deployers and fails closed with `MIAOBI_PAGE_RESULT_UNCERTAIN` when a remote page result cannot be proven. Never automatically retry or override that condition.
+Miaobi operators need an authenticated `magic-builder` 1.3.0+ and a reviewed commit. On macOS/Linux, run the explicit build-and-deploy contract from the repository root:
 
-Resume data and WebDAV credentials remain in the current browser profile; they are not moved to Miaobi FaaS or TOS. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. See the [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) for build artifacts, state recovery, deployment order, rollback, and verification limits.
+```bash
+export MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)"
+corepack pnpm build:miaobi
+corepack pnpm deploy:miaobi
+```
+
+The deploy script generation-fences concurrent deployers and fails closed with `MIAOBI_PAGE_RESULT_UNCERTAIN` when a remote page result cannot be proven. Never automatically retry or override that condition.
+
+Resume data and WebDAV credentials remain in the current browser profile; they are not moved to Miaobi FaaS or TOS. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. The [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) is authoritative for Windows commands, build artifacts, state recovery, deployment order, rollback, and verification limits.
 
 ### AI provider networking
 

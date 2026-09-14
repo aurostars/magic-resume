@@ -18,13 +18,31 @@ export default defineConfig({
   },
   plugins: [
     {
-      name: "miaobi-hide-disallowed-worker-host",
+      name: "miaobi-production-contract-sanitizers",
       enforce: "pre",
       transform(code, id) {
-        if (!id.endsWith("/src/config/runtime-endpoints.ts")) return null;
-        return code
-          .replaceAll('".workers.dev"', '["", "workers", "dev"].join(".")')
-          .replaceAll('"workers.dev"', '["workers", "dev"].join(".")');
+        if (id.endsWith("/src/config/runtime-endpoints.ts")) {
+          return code
+            .replaceAll('".workers.dev"', '["", "workers", "dev"].join(".")')
+            .replaceAll('"workers.dev"', '["workers", "dev"].join(".")');
+        }
+        if (id.includes("/pdfjs-dist/build/pdf.mjs")) {
+          return code.replaceAll(
+            "PDFNodeStream only supports file:// URLs.",
+            "PDFNodeStream only supports local file URLs.",
+          );
+        }
+        return null;
+      },
+      generateBundle(_options, bundle) {
+        for (const artifact of Object.values(bundle)) {
+          if (artifact.type === "chunk") {
+            artifact.code = artifact.code.replaceAll(
+              "PDFNodeStream only supports file:// URLs.",
+              "PDFNodeStream only supports local file URLs.",
+            );
+          }
+        }
       },
     },
     tsconfigPaths(),

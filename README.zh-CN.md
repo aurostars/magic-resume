@@ -95,9 +95,17 @@ pnpm build
 
 ### 妙笔原生部署
 
-运维人员需先安装并登录 `magic-builder` 1.3.0 或更高版本，并使用已评审的 commit，然后运行 `corepack pnpm deploy:miaobi`。部署采用 generation fencing 防止过期进程继续发布；远端页面结果无法确认时会以 `MIAOBI_PAGE_RESULT_UNCERTAIN` 关闭失败，绝不能自动重试或覆盖。
+运维人员需先安装并登录 `magic-builder` 1.3.0 或更高版本，并使用已评审的 commit。在 macOS/Linux 仓库根目录执行既定的显式构建与部署契约：
 
-简历与 WebDAV 凭据仍位于当前浏览器 profile，不会迁入妙笔 FaaS 或 TOS。Cloudflare 仅作为人工回滚路径保留，不参与妙笔运行时。构建产物、状态恢复、发布顺序、回滚与验证限制详见[妙笔原生部署指南（中文为主 / English summary）](docs/miaobi-deployment.md)。
+```bash
+export MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)"
+corepack pnpm build:miaobi
+corepack pnpm deploy:miaobi
+```
+
+Windows 命令见下方权威指南。部署采用 generation fencing 防止过期进程继续发布；远端页面结果无法确认时会以 `MIAOBI_PAGE_RESULT_UNCERTAIN` 关闭失败，绝不能自动重试或覆盖。
+
+简历与 WebDAV 凭据仍位于当前浏览器 profile，不会迁入妙笔 FaaS 或 TOS。Cloudflare 仅作为人工回滚路径保留，不参与妙笔运行时。[妙笔原生部署指南（中文为主 / English summary）](docs/miaobi-deployment.md)是 Windows 命令、构建产物、状态恢复、发布顺序、回滚与验证限制的权威说明。
 
 ### AI 厂商网络配置
 

@@ -21,7 +21,7 @@ export async function buildMiaobiArtifacts(options: {
     await readFile(shellPath, "utf8"),
     {
       platform: "miaobi",
-      apiFunctionUrl: "https://miaobi.invalid/__API_FAAS__/",
+      apiFunctionUrl: "https://magic.solutionsuite.cn/__BUILD_ONLY_API_FAAS__/",
       assetBaseUrl: options.assetBasePlaceholder,
     },
   );
