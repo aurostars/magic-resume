@@ -5,7 +5,11 @@ import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, uti
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { deployMiaobi, type MiaobiDeploymentState } from "../scripts/miaobi/deploy";
+import {
+  deployMiaobi as deployMiaobiProduction,
+  type MiaobiDeploymentState,
+} from "../scripts/miaobi/deploy";
+import type { GitHubPagesPublication } from "../scripts/miaobi/publish-github-pages";
 import type { MagicBuilderRunner } from "../scripts/miaobi/types";
 
 const COMMIT = "59a06b5c2c127d287d01016e5be4d781e310fe2e";
@@ -13,7 +17,31 @@ const BUILD_NONCE = "0123456789abcdef0123456789abcdef";
 const BUILD_MARKER = `${COMMIT}.${BUILD_NONCE}`;
 const NOW = new Date("2026-09-13T16:46:00.000Z");
 const RELEASE_ID = "59a06b5c2c12-20260913164600";
+const PAGES_BASE_URL = "https://aurostars.github.io/magic-resume/";
 const LOCK_LEASE_MS = 120_000;
+
+function deployMiaobi(
+  options: Parameters<typeof deployMiaobiProduction>[0],
+): ReturnType<typeof deployMiaobiProduction> {
+  return deployMiaobiProduction({
+    publishPages: async ({ sourceCommit, releaseId }): Promise<GitHubPagesPublication> => ({
+      manifest: {
+        schemaVersion: 1,
+        provider: "github-pages",
+        sourceCommit,
+        releaseId,
+        createdAt: options.now.toISOString(),
+        baseUrl: PAGES_BASE_URL,
+        files: {},
+      },
+      pagesCommit: "a".repeat(40),
+      pagesBaseUrl: PAGES_BASE_URL,
+      releaseManifestUrl: `${PAGES_BASE_URL}releases/${sourceCommit}/manifest.json`,
+    }),
+    verifyPages: async () => undefined,
+    ...options,
+  });
+}
 
 type FakeLockTimer = {
   callback: () => void | Promise<void>;
@@ -111,6 +139,17 @@ function validPriorState(): MiaobiDeploymentState {
   };
 }
 
+function validPagesState(): MiaobiDeploymentState {
+  return {
+    ...validPriorState(),
+    schemaVersion: 3,
+    assetProvider: "github-pages",
+    pagesCommit: "a".repeat(40),
+    pagesBaseUrl: PAGES_BASE_URL,
+    releaseManifestUrl: `${PAGES_BASE_URL}releases/${COMMIT}/manifest.json`,
+  } as MiaobiDeploymentState;
+}
+
 function healthyResponse(
   input: RequestInfo | URL,
   apiId = "api-new",
@@ -131,7 +170,7 @@ function healthyResponse(
   const runtime = {
     platform: "miaobi",
     apiFunctionUrl: `${platformOrigin}/api/faas/${apiId}`,
-    assetBaseUrl: `https://tos.example.test/magic-resume/releases/${releaseId}/`,
+    assetBaseUrl: PAGES_BASE_URL,
   };
   return new Response(
     `<!doctype html><script>window.__MAGIC_RESUME_RUNTIME__=${JSON.stringify(runtime)}</script>`,
@@ -375,9 +414,13 @@ test("publishes assets, API, Web, checks both URLs, then switches the page and a
     };
 
     const state = await deployMiaobi({ runner: fakeRunner(events), gitCommit: COMMIT, now: NOW });
-    assert.deepEqual(events, ["asset", "asset", "asset", "api", "web", "health-api", "health-web", "page"]);
+    assert.deepEqual(events, ["api", "web", "health-api", "health-web", "page"]);
     assert.deepEqual(state, {
-      schemaVersion: 2,
+      schemaVersion: 3,
+      assetProvider: "github-pages",
+      pagesCommit: "a".repeat(40),
+      pagesBaseUrl: PAGES_BASE_URL,
+      releaseManifestUrl: `${PAGES_BASE_URL}releases/${COMMIT}/manifest.json`,
       apiBuildMarker: BUILD_MARKER,
       releaseId: RELEASE_ID,
       apiFaasId: "api-new",
@@ -473,7 +516,7 @@ test("rejects mismatched or untrusted page responses without committing state", 
   }
 });
 
-for (const failedStage of ["asset", "api", "web"] as const) {
+for (const failedStage of ["api", "web"] as const) {
   test(`${failedStage} failure prevents page publication and exposes only a safe code`, { concurrency: false }, async () => {
     await inFixture(async () => {
       const events: string[] = [];
@@ -494,7 +537,8 @@ for (const failedStage of ["asset", "api", "web"] as const) {
 test("health checks reject stale API/Web identity and runtime release markers", { concurrency: false }, async (context) => {
   const invalidWebBodies = [
     healthyResponse("https://magic.solutionsuite.cn/api/faas/web-new", "api-old").text(),
-    healthyResponse("https://magic.solutionsuite.cn/api/faas/web-new", "api-new", "59a06b5c2c12-20260912000000").text(),
+    healthyResponse("https://magic.solutionsuite.cn/api/faas/web-new", "api-new").text()
+      .then((body) => body.replace(PAGES_BASE_URL, "https://aurostars.github.io/magic-resume-other/")),
   ];
   for (const pendingBody of invalidWebBodies) {
     const body = await pendingBody;
@@ -674,6 +718,10 @@ test("rejects malformed prior deployment state before passing any ID to the CLI"
     { ...validPriorState(), releaseId: "prior-release" },
     { ...validPriorState(), deployedAt: "not-a-date" },
     { ...validPriorState(), extra: "unexpected" },
+    { ...validPagesState(), assetProvider: "tos" },
+    { ...validPagesState(), pagesCommit: "short" },
+    { ...validPagesState(), pagesBaseUrl: "https://evil.example/magic-resume/" },
+    { ...validPagesState(), releaseManifestUrl: `${PAGES_BASE_URL}releases/${"b".repeat(40)}/manifest.json` },
   ];
   for (const value of invalidStates) {
     await context.test(JSON.stringify(value), { concurrency: false }, async () => {
@@ -1154,7 +1202,7 @@ test("reclaims a stale heartbeat even when the recorded PID is alive and may hav
       await utimes(lockPath, old, old);
       globalThis.fetch = async (input) => healthyResponse(input);
       const state = await deployMiaobi({ runner: fakeRunner([]), gitCommit: COMMIT, now: NOW });
-      assert.equal(state.schemaVersion, 2);
+      assert.equal(state.schemaVersion, 3);
     } finally {
       child.kill();
       if (child.exitCode === null) await new Promise<void>((resolve) => child.once("close", () => resolve()));
@@ -1186,7 +1234,7 @@ test("reclaims an old lock after its owner PID exits", { concurrency: false }, a
     await utimes(lockPath, old, old);
     globalThis.fetch = async (input) => healthyResponse(input);
     const state = await deployMiaobi({ runner: fakeRunner([]), gitCommit: COMMIT, now: NOW });
-    assert.equal(state.schemaVersion, 2);
+    assert.equal(state.schemaVersion, 3);
   });
 });
 
@@ -1207,7 +1255,7 @@ test("migrates a strictly validated version 1 deployment state without mutating 
     const faasCalls = calls.filter((args) => args[0] === "faas");
     assert.equal(faasCalls[0].includes("api-old"), false);
     assert.equal(faasCalls[1].includes("web-old"), false);
-    assert.equal(state.schemaVersion, 2);
+    assert.equal(state.schemaVersion, 3);
     assert.equal(state.apiBuildMarker, BUILD_MARKER);
   });
 });
@@ -1233,6 +1281,10 @@ test("a legacy pending without a page phase fails closed after safe validation",
     delete legacy.apiBuildMarker;
     legacy.deployment.schemaVersion = 1;
     delete legacy.deployment.apiBuildMarker;
+    delete legacy.deployment.assetProvider;
+    delete legacy.deployment.pagesCommit;
+    delete legacy.deployment.pagesBaseUrl;
+    delete legacy.deployment.releaseManifestUrl;
     await writeFile(legacyPath, JSON.stringify(legacy), { mode: 0o600 });
     await rm(currentPath);
 
@@ -1497,7 +1549,7 @@ test("a superseded owner is fenced before its next remote side effect and preser
 
     const ownerAError = await ownerAOutcome;
     assert.equal(ownerAError.message, "MIAOBI_OWNERSHIP_LOST");
-    assert.deepEqual(ownerAEvents, ["file"]);
+    assert.deepEqual(ownerAEvents, ["faas"]);
     assert.equal(await readFile(lockPath, "utf8"), successorLock);
     assert.equal(await readFile(successorPendingPath, "utf8"), successorPending);
 
@@ -1704,7 +1756,7 @@ test("a stopped heartbeat expires after the generous lease and can be recovered"
       now: new Date("2026-09-13T16:47:00.000Z"),
       lockClock: clock,
     });
-    assert.equal(recovered.schemaVersion, 2);
+    assert.equal(recovered.schemaVersion, 3);
 
     resolveOwner({ stdout: "invalid", stderr: "" });
     assert.ok((await ownerOutcome) instanceof Error);
@@ -1797,14 +1849,14 @@ test("a stale owner resuming pending commit cannot outrank the successor", { con
     const recoveryEvents: string[] = [];
     await assert.rejects(
       deployMiaobi({
-        runner: fakeRunner(recoveryEvents, "asset"),
+        runner: fakeRunner(recoveryEvents, "api"),
         gitCommit: COMMIT,
         now: new Date("2026-09-13T16:48:00.000Z"),
         lockClock: clock,
       }),
       (error: unknown) => (error as Error).message === "MIAOBI_CLI_FAILED",
     );
-    assert.deepEqual(recoveryEvents, ["asset"]);
+    assert.deepEqual(recoveryEvents, ["api"]);
   });
 });
 
@@ -2011,6 +2063,10 @@ test("different external and legacy pending records block every page action and 
     delete legacy.apiBuildMarker;
     legacy.deployment.schemaVersion = 1;
     delete legacy.deployment.apiBuildMarker;
+    delete legacy.deployment.assetProvider;
+    delete legacy.deployment.pagesCommit;
+    delete legacy.deployment.pagesBaseUrl;
+    delete legacy.deployment.releaseManifestUrl;
     legacy.deployment.webFaasId = "web-other";
     legacy.deployment.webFaasUrl = "https://magic.solutionsuite.cn/api/faas/web-other";
     const otherPage = '<!doctype html><meta charset="utf-8"><script>location.replace("https://magic.solutionsuite.cn/api/faas/web-other")</script><a href="https://magic.solutionsuite.cn/api/faas/web-other">打开魔方简历</a>';
@@ -2030,7 +2086,7 @@ test("different external and legacy pending records block every page action and 
   });
 });
 
-test("identical legacy anchors remain frozen when their page phase is unknowable", { concurrency: false }, async () => {
+test("mixed legacy and Pages anchors remain frozen when their page phase is unknowable", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     const base = fakeRunner([]);
     globalThis.fetch = async (input) => healthyResponse(input);
@@ -2055,6 +2111,10 @@ test("identical legacy anchors remain frozen when their page phase is unknowable
     delete legacy.apiBuildMarker;
     legacy.deployment.schemaVersion = 1;
     delete legacy.deployment.apiBuildMarker;
+    delete legacy.deployment.assetProvider;
+    delete legacy.deployment.pagesCommit;
+    delete legacy.deployment.pagesBaseUrl;
+    delete legacy.deployment.releaseManifestUrl;
     await writeFile(legacyPath, JSON.stringify(legacy), { mode: 0o600 });
 
     let calls = 0;
@@ -2064,7 +2124,7 @@ test("identical legacy anchors remain frozen when their page phase is unknowable
         gitCommit: COMMIT,
         now: NOW,
       }),
-      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_RECOVERY_REQUIRED",
     );
     assert.equal(calls, 0);
     assert.equal((await readFile(externalPath, "utf8")).length > 0, true);
@@ -2077,7 +2137,7 @@ test("identical legacy anchors remain frozen when their page phase is unknowable
         gitCommit: COMMIT,
         now: new Date("2026-09-13T16:47:00.000Z"),
       }),
-      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
+      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_RECOVERY_REQUIRED",
     );
     assert.deepEqual(nextEvents, []);
   });

@@ -36,7 +36,9 @@ export async function buildMiaobiArtifacts(options: {
   await writeFile(
     resolve(options.outputDirectory, "manifest.json"),
     `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      assetProvider: "github-pages",
+      pagesBaseUrl: config.githubPages.baseUrl,
       platformOrigin,
       pageUrl,
       artifacts: {

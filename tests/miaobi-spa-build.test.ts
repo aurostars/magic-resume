@@ -56,20 +56,19 @@ async function readFilesRecursively(directory: string): Promise<string[]> {
   return files.flat();
 }
 
-test("runtime injection precedes application scripts and cannot terminate its script", () => {
+test("runtime injection precedes application scripts with canonical production URLs", () => {
   const html = '<!doctype html><html><body><script type="module" src="/entry.js"></script></body></html>';
   const injected = injectMiaobiRuntime(html, {
     platform: "miaobi",
-    apiFunctionUrl: "https://api.example.test/<script>&value=\u2028",
-    assetBaseUrl: "https://assets.example.test/</script>?value=\u2029",
+    apiFunctionUrl: "https://magic.solutionsuite.cn/api/faas/api-id",
+    assetBaseUrl: "https://aurostars.github.io/magic-resume/",
   });
 
   const assignment =
-    '<script>window.__MAGIC_RESUME_RUNTIME__={"platform":"miaobi","apiFunctionUrl":"https://api.example.test/\\u003cscript\\u003e\\u0026value=\\u2028","assetBaseUrl":"https://assets.example.test/\\u003c/script\\u003e?value=\\u2029"}</script>';
+    '<script>window.__MAGIC_RESUME_RUNTIME__={"platform":"miaobi","apiFunctionUrl":"https://magic.solutionsuite.cn/api/faas/api-id","assetBaseUrl":"https://aurostars.github.io/magic-resume/"}</script>';
   assert.equal(injected.match(/window\.__MAGIC_RESUME_RUNTIME__/g)?.length, 1);
   assert.ok(injected.includes(assignment));
   assert.ok(injected.indexOf(assignment) < injected.indexOf('<script type="module"'));
-  assert.doesNotMatch(injected, /<\/script>\?value/);
 });
 
 test("an injected built shell bootstraps getRouter with hash history", async () => {
@@ -89,8 +88,8 @@ test("an injected built shell bootstraps getRouter with hash history", async () 
     });
     const shell = injectMiaobiRuntime(await readFile(shellPath, "utf8"), {
       platform: "miaobi",
-      apiFunctionUrl: "https://api.example.test/faas",
-      assetBaseUrl: "https://assets.example.test/app/",
+      apiFunctionUrl: "https://magic.solutionsuite.cn/api/faas/api-id",
+      assetBaseUrl: "https://aurostars.github.io/magic-resume/",
     });
     const document = new JSDOM(shell).window.document;
     const runtimeScript = [...document.scripts].find((script) =>

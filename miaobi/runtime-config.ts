@@ -109,8 +109,9 @@ function injectRuntime(
 export function injectMiaobiRuntime(
   html: string,
   config: MiaobiRuntimeInjection,
+  expectedApiOrigin = API_ORIGIN,
 ): string {
-  return injectRuntime(html, config, "github-pages");
+  return injectRuntime(html, config, "github-pages", expectedApiOrigin);
 }
 
 export function injectLegacyMiaobiRuntime(

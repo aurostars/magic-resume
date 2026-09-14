@@ -134,7 +134,9 @@ function hasForbiddenAssetUrl(text: string): boolean {
         hostname === forbidden || hostname.endsWith(`.${forbidden}`)
       ) || hostname.split(".").some((label) => label === "tos" || label.startsWith("tos-"));
     } catch {
-      return true;
+      // Regex literals and operators may resemble protocol-relative URLs after
+      // minification; only successfully parsed URL candidates can name a host.
+      return false;
     }
   });
 }

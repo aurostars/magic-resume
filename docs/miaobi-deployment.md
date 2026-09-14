@@ -1,56 +1,57 @@
 # 妙笔原生部署 / Miaobi Native Deployment
 
-本文是 Magic Resume 妙笔原生部署的运维契约。中文为主；文末提供 English summary。这里不记录内部令牌、原始平台 API 或 CLI 原始响应。
+本文是 Magic Resume 妙笔原生部署的运维契约。中文为主；文末提供 English summary。不得在文档、命令历史或日志中记录令牌和 CLI 原始认证响应。
 
-## 1. 适用范围
+## 1. 生产拓扑与固定契约
 
-妙笔生产链路由以下部分组成：
+默认生产链路由以下部分组成：
 
-- TOS 上按 release 隔离的静态客户端资源；
+- `https://aurostars.github.io/magic-resume/` 上公开、不可变、内容寻址的浏览器资源；
 - 妙笔 API FaaS；
-- 妙笔 Web FaaS（提供注入运行时配置后的 HTML）；
-- 固定页面 `https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR`，只在最后一步切换到已通过健康检查的 Web FaaS。
+- 妙笔 Web FaaS，负责提供注入运行时配置后的 HTML；
+- 固定页面 `https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR`，只在所有健康检查成功后切换。
 
-Cloudflare 构建仍被保留，**仅用于人工回滚**。妙笔运行时不会加载 Cloudflare Worker、`workers.dev` 或 Cloudflare 资源。
+浏览器运行时只允许 GitHub Pages 资源域名与 `https://magic.solutionsuite.cn/api/faas/<id>` FaaS 域名。不得依赖 TOS、Cloudflare 或 `workers.dev`。早期 TOS 方案因生产发布受阻而放弃，仅作为历史背景，不是回滚或默认路径。
 
 ## 2. 前置条件
 
-1. Node.js 20+，并可通过 Corepack 使用仓库锁定的 pnpm。
-2. 工作区干净，部署目标 commit 已完成评审与本地回归。
-3. 已安装并通过官方方式登录 `magic-builder` **1.3.0 或更高版本**。可运行 `magic-builder --version` 检查版本；本文不记录认证材料。
-4. 部署机器和文件系统必须支持目录 `fsync`、硬链接以及安全的文件权限。能力预检失败时部署会在任何远端副作用前以 `MIAOBI_DURABILITY_UNSUPPORTED` 终止。
-5. 同一工作区同一时刻只运行一个部署。锁会阻止并发发布；不要手工删除活跃锁。
+1. Node.js 20+，通过 Corepack 使用仓库锁定的 pnpm。
+2. 工作区干净，目标 commit 已评审并完成本地回归。
+3. 安装并登录 `gh`；`gh auth status` 必须成功，且账号对 `aurostars/magic-resume` 有 `gh-pages` 写权限和 Pages 管理权限。
+4. 安装并登录 `magic-builder` 1.3.0+；用 `magic-builder --version` 检查版本。
+5. `fork` remote 必须只有一个 push URL，并精确指向 GitHub 上的 `aurostars/magic-resume`。部署器会拒绝其他 owner、repo、主机、凭据 URL 或多个 push destination。
+6. GitHub Pages 必须为公开站点，source 为 `gh-pages` 分支根目录 `/`。首次发布时部署器在 push 后通过 GitHub API 启用或修正该 source；执行者必须具备相应权限。
+7. 文件系统必须支持目录 `fsync`、硬链接和安全权限；预检失败会在任何远端副作用前返回 `MIAOBI_DURABILITY_UNSUPPORTED`。
+8. 同一工作区同一时刻只运行一个部署，不要手工删除活跃锁。
+
+检查命令：
+
+```bash
+gh auth status
+git remote get-url --push --all fork
+magic-builder --version
+```
 
 ## 3. 构建与本地契约检查
 
-在仓库根目录运行：
-
 ```bash
 corepack pnpm exec tsx --test tests/miaobi-production-contract.test.ts
-```
-
-该测试会真实执行妙笔构建和默认 Cloudflare 构建，并验证完整产物、安全主机约束、禁止的 `workers.dev` 与已知测试凭据，以及默认构建的 `dist/client`、`dist/server/server.js`。
-
-也可以单独生成妙笔产物：
-
-```bash
 corepack pnpm build:miaobi
 ```
 
-构建产物位于 `dist/miaobi/`：
+`dist/miaobi/` 包含：
 
-- `api-faas.cjs`、`api-faas.meta.json`：API FaaS 与绑定 commit/nonce/hash 的构建元数据；
-- `web-faas.cjs`：部署前占位版本，部署时会用最终 HTTPS API/TOS URL 重新生成；
-- `client/`：完整浏览器客户端，包括 `client/assets/`、字体、模板快照、favicon、SVG 与图片；发布时整棵客户端资源树都会进入同一不可变 TOS release；
-- `page.html`：固定妙笔页面的本地发布工件，部署时会改写为最终 Web FaaS 跳转；
-- `manifest.json`：本地生产产物清单；
-- `asset-manifest.json`：仅在静态资源全部上传成功后由部署流程原子生成，记录妙笔返回的 HTTPS TOS URL。
+- `api-faas.cjs`、`api-faas.meta.json`：API FaaS 与绑定 source commit/nonce/hash 的元数据；
+- `web-faas.cjs`：部署前占位构建，部署时按最终 API URL 与 Pages base URL 重建；
+- `client/`：完整浏览器客户端；
+- `page.html`：固定页面发布工件，部署时改写为最终 Web FaaS 跳转；
+- `manifest.json`：schema v2 本地构建清单，声明 `assetProvider: github-pages` 和 Pages base URL。
 
-`dist/` 是可重建目录，不是部署事实来源。
+生产契约会递归检查构建输出与模拟 `gh-pages` staging：禁止已知 secret、本机绝对路径、TOS、Cloudflare Worker 和 `workers.dev` 依赖，并校验所有 URL allowlist。`dist/` 可重建，不是部署事实来源。
 
 ## 4. 生产部署
 
-先确认当前 commit，再构建，最后调用部署脚本：
+生产发布仅由 controller 在代码审查通过后执行：
 
 ```bash
 export MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)"
@@ -58,7 +59,7 @@ corepack pnpm build:miaobi
 corepack pnpm deploy:miaobi
 ```
 
-Windows PowerShell 使用对应的显式三步：
+PowerShell：
 
 ```powershell
 $env:MIAOBI_GIT_COMMIT = (git rev-parse HEAD)
@@ -66,108 +67,70 @@ corepack pnpm build:miaobi
 corepack pnpm deploy:miaobi
 ```
 
-`corepack pnpm deploy:miaobi` 只接受与 `api-faas.meta.json` 一致的 `MIAOBI_GIT_COMMIT`。不要用环境变量绕过 commit 校验，也不要把认证信息写入命令历史、文档或日志。
+权威顺序不可调整：
 
-发布顺序固定且不可跳过：
+1. 本地 build/test，并取得带心跳的独占 generation lock；
+2. 将同一 source commit/release 的内容寻址资源 push 到 `fork/gh-pages`；
+3. 校验远端 release manifest、`index.html` 和启动 CSS/JS 的状态码、MIME、大小与 SHA-256；
+4. 新建 API FaaS；
+5. 注入 API URL 与 Pages base URL，重建并新建 Web FaaS；
+6. 校验 API build marker、Web runtime 和两端健康状态；
+7. 持久化 pending/page-inflight 后切换固定页面，再持久化 page-confirmed；
+8. 提交不可变 schema-v3 generation state，最后清理本 generation pending。
 
-1. 预检持久化目录并取得带心跳的独占锁及单调递增 generation；
-2. 上传 release 标记和完整 `client/` 资源树；资源全部成功后先提交 owner-scoped 不可变 manifest，再原子更新 `dist/miaobi/asset-manifest.json` 兼容视图；
-3. 为本 release **新建** API FaaS（不使用历史 ID 原地覆盖）；
-4. 将妙笔返回的 HTTPS API URL 和 HTTPS TOS 基址注入 HTML，重建并**新建** Web FaaS（不使用历史 ID 原地覆盖）；
-5. 校验 API 构建标记、Web 运行时配置和两端健康状态；
-6. 持久化 pending 与 `page-inflight` 记录后，更新固定页面；
-7. 持久化 `page-confirmed`，再提交不可变 generation state；
-8. 清理本 generation 的 pending。历史不可变记录仍保留。
+`magic-builder file upload` 不属于该流程。Pages health 成功前不得调用任何 Magic CLI。Pages 发布失败或健康检查失败时，固定页面和 deployment state 均保持不变；Pages 成功后的 FaaS/健康/页面前失败只会留下未引用的不可变 Pages release。相同 source commit 与 release ID 的重跑会复用相同 Pages release，但始终新建 API/Web FaaS。
 
-在第 6 步之前失败不会切换页面，也不会修改上一 release 的 API/Web FaaS；新 ID 只有在页面切换成功且 generation state 提交后才成为下一次部署的 prior，历史 FaaS 保留用于人工回滚。页面成功确认后即使最终 state 提交中断，后续进程也只补交本地 state，不会重复发布页面。
+## 5. Generation fencing 与状态 schema
 
-## 5. Generation fencing 与状态目录
-
-部署锁不只是互斥锁。每次尝试都会取得 `(generation, ownerToken)`，所有远端调用前后均重新确认锁文件的 token、inode 与心跳。租约过期并被后继者接管后，旧进程会得到 `MIAOBI_OWNERSHIP_LOST`，不能继续执行远端副作用、提交更高优先级状态或删除后继者的 pending。这就是 generation fencing。
-
-状态布局：
+每次尝试取得 `(generation, ownerToken)`。Git push、Pages health、每次 FaaS 调用、page 调用和 state commit 的前后都验证 token、inode 与 lease。若 Pages push 完成时 ownership 已丢失，已发布 release 保留，但旧 owner 必须在 FaaS 前停止并返回 `MIAOBI_OWNERSHIP_LOST`。
 
 ```text
 .miaobi/
-├── states/<generation>-<ownerToken>.json   # 权威、不可变的已提交部署记录
-├── manifests/<releaseId>-<ownerToken>.json # 资源发布权威、不可变 manifest
-├── state.json                              # 资源发布兼容/恢复视图，不是部署权威
-└── reservations/<releaseId>.json           # owner-scoped release ID 本地预留
+└── states/<generation>-<ownerToken>.json
 .miaobi-recovery/
-├── generations/                            # 单调 generation 预留
-├── pending/                                # 页面提交前事务
-├── page-inflight/                          # 已进入远端页面调用的屏障
-├── page-confirmed/                         # 已确认的远端页面结果
-└── deployment.lock                         # 带心跳的当前所有者锁
+├── generations/
+├── pending/
+├── page-inflight/
+├── page-confirmed/
+└── deployment.lock
 ```
 
-- 以 `.miaobi/states/` 中最高 generation 的有效记录为权威部署状态。
-- `.miaobi/state.json` 仅是资源发布状态的兼容/恢复提示；不得用它覆盖 generation state。
-- 资源 reservation、state 与 manifest 在任何上传前执行目录持久化预检；写入使用文件 `fsync`、独占硬链接提交和目录 `fsync`。上传阶段失败会由当前 owner 删除尚未提交的 reservation，允许同 release 安全重试；manifest 进入 staged 后则 fail closed，必须保留现场。
-- 妙笔 API FaaS 提供 `/api/grammar`、`/api/polish`、`/api/ai-test`、`/api/resume-import` 和 `/api/proxy/image`。图片代理只使用 Node 内置 DNS 与 HTTP(S) transport：每一跳先验证全部解析地址，再把 socket lookup 固定到该地址集合；不存在 ambient `fetch` 回退。
-- 旧版 `.miaobi/deployment.json` 和 pending 文件只用于严格校验后的迁移兼容，不应作为新自动化的写入目标。
-- 这些目录使用 `0700`，记录使用 `0600`。它们防止意外损坏和非同 UID 进程写入，但不对同一用户身份下的恶意代码提供真实性保证。
-- 不要修改、排序重写或删除不可变记录来“修复”部署；保留现场并由人工审查。
+最高 generation 的有效 state 是权威状态。新记录使用 schema v3，包含：
 
-## 6. 远端页面结果不确定：必须 fail closed
+- `assetProvider: "github-pages"`；
+- 精确的 `pagesCommit`；
+- `pagesBaseUrl: "https://aurostars.github.io/magic-resume/"`；
+- 与 API build marker/source commit 一致的 `releaseManifestUrl`；
+- 新 API/Web FaaS ID、精确 URL、release ID、固定 page ID 和部署时间。
 
-一旦 `page-inflight` 已落盘，远端页面调用就可能已经生效。若进程在收到或持久化成功结果前中断，下一次运行会返回：
+v1/v2 state 仅可严格读取以支持回滚迁移；它们没有 Pages provenance，绝不能伪装或解释为 GitHub Pages release。旧 pending/page journal 的结果若不确定，继续 fail closed。
 
-```text
-MIAOBI_PAGE_RESULT_UNCERTAIN
-```
+## 6. 页面结果不确定
 
-此状态要求：
+一旦 `page-inflight` 已落盘，远端页面调用可能已生效。若无法证明结果，后续运行返回 `MIAOBI_PAGE_RESULT_UNCERTAIN`。此时必须停止自动发布和自动回滚，保存 `.miaobi/` 与 `.miaobi-recovery/`，人工核验页面、Web/API FaaS、Pages release 后再作独立评审决定。禁止自动覆盖、重试页面、删除屏障或伪造 confirmation。
 
-1. 立即停止自动发布和自动回滚；
-2. 人工检查固定远端页面当前实际指向、对应 Web FaaS、运行时 API URL 和 TOS release；
-3. 保存 `.miaobi/` 与 `.miaobi-recovery/` 现场，按独立审核后的恢复决定处理；
-4. **绝不能**自动覆盖、自动重试页面发布、删除 `page-inflight` 或伪造 `page-confirmed`。
+## 7. 回滚与存储增长
 
-即使本地 `page.html` 看起来正确，也不能证明远端页面调用未成功。任何自动重试都可能把较新的页面结果覆盖为旧 generation，因此实现会永久 fail closed，直到人工验证与处置。
+回滚应选择已审核的历史 source commit，在干净工作区重新执行完整 build/test/deploy，创建新的 FaaS 与 generation；不要修改历史 state 或原地覆盖 FaaS。v1/v2 记录可辅助选择历史 FaaS，但不能提供 Pages release 身份。
 
-## 7. 回滚
+`gh-pages` 的 `objects/<sha256>/...` 与 `releases/<sourceCommit>/manifest.json` 是不可变审计材料，会随唯一资源增长。定期监控仓库大小；删除对象或 release 必须经过独立保留策略评审，先证明没有任何保留 manifest 引用，再单独提交，绝不能在正常部署中自动垃圾回收。
 
-### 妙笔版本回滚
+Cloudflare 只保留为控制方人工灾备入口，不得由妙笔部署脚本自动切换。恢复妙笔前仍需解决所有不确定页面屏障。
 
-1. 若出现 `MIAOBI_PAGE_RESULT_UNCERTAIN`，先按上一节人工核验，禁止直接重跑。
-2. 选择已审核的历史 commit，在独立干净工作区重新执行完整构建、契约测试和回归。
-3. 使用该 commit 的 `MIAOBI_GIT_COMMIT` 执行正常部署流程。不要手改 manifest、generation state 或远端页面。
-4. 部署完成后核对新 generation、FaaS 健康状态与固定页面。
+## 8. 发布后验证与限制
 
-TOS release 是不可变发布单元；回滚也创建新的、可审计的部署 generation，而不是修改历史记录。
+controller 发布后至少核对：
 
-### Cloudflare 应急回滚
+- `fork/gh-pages` manifest 的 source commit 与目标 HEAD 相同；
+- Pages manifest、index 和启动资源为 2xx，hash/MIME 匹配；
+- API/Web FaaS marker 与 runtime 指向本次 build 和 Pages base URL；
+- 固定页面到达新的原生 Web FaaS；
+- 生成物与运行时文本不依赖 TOS、Cloudflare 或 `workers.dev`。
 
-Cloudflare 产物只作为外部、人工控制的灾备入口保留。仅在妙笔链路无法恢复且已获批准时，由控制方把入口切回最近已验证的 Cloudflare 发布。不要让妙笔 HTML/FaaS/TOS 产物依赖 Cloudflare，也不要在妙笔部署脚本中自动切换 Cloudflare。恢复妙笔前仍需解决所有不确定页面屏障。
-
-## 8. 浏览器本地数据边界
-
-- 简历、设置、AI 配置以及 WebDAV 凭据保存在当前浏览器 profile 的本地存储中；部署过程不会把这些浏览器数据迁入 FaaS 或 TOS。
-- 浏览器直接连接用户配置的 WebDAV 服务。简历和凭据不经过 Magic Resume API FaaS；远端简历是 HTTPS 传输的明文 JSON，Magic Resume 不提供静态加密。
-- 同一 profile 下的脚本、扩展或其他用户可能读取本地存储。请使用专用、最小权限、仅限目标目录的 WebDAV 账号，勿在共享设备保存凭据。
-- 清除浏览器本地数据会移除本地简历和已保存凭据，但不会删除 WebDAV 远端文件；部署/回滚也不会恢复浏览器本地数据。
-- AI key 仅由浏览器按当前配置发起请求时使用。没有一次性测试 key 时，只验证安全失败，不记录或复用真实 key。
-
-## 9. 发布后验证与限制
-
-生产发布和外部验证由控制方在独立评审后执行，不属于普通代码实现提交。发布后至少检查：
-
-- 固定页面可达且不跳转到 `workers.dev`；
-- “我的简历”和设置页可渲染；
-- 有交互浏览器时验证 localStorage、JSON 导入/导出、非空 Word/PDF 导出；
-- 只有提供一次性 AI key 时验证真实 AI；否则只验证安全失败；
-- 只有提供独立、可丢弃且已授权的 WebDAV 目录时验证真实同步；否则跳过；
-- 有控制台时确认没有新增 CSP、CORS、localStorage 或运行时错误。
-
-没有可丢弃 WebDAV 目录或 AI key 时，不能声称完成对应端到端外部验证。没有交互浏览器时，也不能声称完成 UI、本地存储、导出和控制台验证。
+浏览器 localStorage 中的简历、设置、AI 配置和 WebDAV 凭据不会迁入 FaaS 或 Pages。没有交互浏览器、一次性 AI key 或可丢弃 WebDAV 目录时，必须将对应 UI/AI/WebDAV/导出检查记录为“未执行”，不能声称验证成功。
 
 ---
 
 ## English summary
 
-Use authenticated `magic-builder` 1.3.0+, set `MIAOBI_GIT_COMMIT` to the reviewed HEAD, then run `corepack pnpm build:miaobi` and `corepack pnpm deploy:miaobi`. The deployment uploads immutable TOS assets, publishes API and Web FaaS, health-checks both, and switches the fixed page only after durable generation-fenced records are prepared.
-
-The highest valid record in `.miaobi/states/` is authoritative. `.miaobi/state.json` is only a compatibility/recovery hint for asset publication. A superseded owner is fenced from further remote mutations. `MIAOBI_PAGE_RESULT_UNCERTAIN` is permanently fail-closed: manually verify the remote page and never automatically override, retry, delete the in-flight barrier, or fabricate confirmation.
-
-Resume data, settings, AI configuration, and WebDAV credentials remain in the current browser profile. WebDAV traffic goes directly from the browser to the configured server. Cloudflare is retained only as a manually controlled rollback path and is not used by the Miaobi runtime. Real AI/WebDAV end-to-end checks require disposable credentials/directories; otherwise document them as skipped.
+After review, the controller checks `gh auth status`, validates the single `fork` push URL, builds the reviewed commit, and runs the generation-fenced deployment. The fixed order is GitHub Pages push, Pages health, fresh API FaaS, fresh Web FaaS, FaaS health, fixed-page switch, then immutable schema-v3 state. No Magic CLI call is allowed before Pages health succeeds. v1/v2 states remain read-only rollback inputs and never imply GitHub Pages provenance. Monitor immutable `gh-pages` storage growth and use a separately reviewed retention procedure. Production publication and source-main push are controller-only post-review steps.

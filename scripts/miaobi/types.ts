@@ -29,3 +29,23 @@ export interface GitHubPagesManifest extends MiaobiAssetManifest {
   sourceCommit: string;
   files: Record<string, GitHubPagesAssetRecord>;
 }
+
+export interface MiaobiDeploymentState {
+  schemaVersion: 2 | 3;
+  apiBuildMarker: string;
+  releaseId: string;
+  apiFaasId: string;
+  apiFaasUrl: string;
+  webFaasId: string;
+  webFaasUrl: string;
+  pageId: string;
+  deployedAt: string;
+}
+
+export interface MiaobiDeploymentStateV3 extends MiaobiDeploymentState {
+  schemaVersion: 3;
+  assetProvider: "github-pages";
+  pagesCommit: string;
+  pagesBaseUrl: string;
+  releaseManifestUrl: string;
+}

@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { materializeGitHubPagesRelease } from "../scripts/miaobi/github-pages-assets";
 
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
@@ -194,35 +195,7 @@ function extractAbsoluteHttpUrls(text: string): string[] {
     .filter((value) => URL.canParse(value));
 }
 
-async function manifestTosOrigins(): Promise<Set<string>> {
-  const path = join(miaobiDirectory, "asset-manifest.json");
-  try {
-    const manifest = JSON.parse(await readFile(path, "utf8")) as {
-      baseUrl?: unknown;
-      files?: Record<string, { url?: unknown }>;
-    };
-    assert.equal(typeof manifest.baseUrl, "string");
-    const base = new URL(manifest.baseUrl as string);
-    assert.equal(base.protocol, "https:");
-    assert.equal(base.username, "");
-    assert.equal(base.password, "");
-    assert.ok(manifest.files && typeof manifest.files === "object");
-    for (const record of Object.values(manifest.files)) {
-      assert.equal(typeof record.url, "string");
-      const url = new URL(record.url as string);
-      assert.equal(url.protocol, "https:");
-      assert.equal(url.username, "");
-      assert.equal(url.password, "");
-      assert.equal(url.origin, base.origin);
-    }
-    return new Set([base.origin]);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set();
-    throw error;
-  }
-}
-
-function assertAllowedGeneratedUrl(value: string, tosOrigins: ReadonlySet<string>): void {
+function assertAllowedGeneratedUrl(value: string, assetOrigins: ReadonlySet<string>): void {
   const url = new URL(value);
   assert.ok(url.protocol === "http:" || url.protocol === "https:");
   if (exactEmbeddedDataUrls.has(value)) return;
@@ -236,7 +209,7 @@ function assertAllowedGeneratedUrl(value: string, tosOrigins: ReadonlySet<string
     url.origin === "https://magic.solutionsuite.cn" ||
       exactRuntimeOrigins.has(url.origin) ||
       exactEmbeddedDataOrigins.has(url.origin) ||
-      tosOrigins.has(url.origin),
+      assetOrigins.has(url.origin),
     `unexpected generated URL origin: ${url.origin} (${value})`,
   );
 }
@@ -361,11 +334,15 @@ test("production builds emit isolated complete artifacts with only audited URLs 
 
     const manifest = JSON.parse(await readFile(join(miaobiDirectory, "manifest.json"), "utf8")) as {
       schemaVersion: number;
+      assetProvider: string;
+      pagesBaseUrl: string;
       platformOrigin: string;
       pageUrl: string;
       artifacts: Record<string, string>;
     };
-    assert.equal(manifest.schemaVersion, 1);
+    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.assetProvider, "github-pages");
+    assert.equal(manifest.pagesBaseUrl, "https://aurostars.github.io/magic-resume/");
     assert.deepEqual(manifest.artifacts, {
       apiFaas: "api-faas.cjs",
       apiMetadata: "api-faas.meta.json",
@@ -374,13 +351,27 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       webFaas: "web-faas.cjs",
     });
 
-    const tosOrigins = await manifestTosOrigins();
-    const generatedFiles = await filesRecursively(miaobiDirectory);
+    const assetOrigins = new Set(["https://aurostars.github.io"]);
+    const pagesDirectory = join(distDirectory, "gh-pages-staging");
+    await materializeGitHubPagesRelease({
+      clientDirectory: join(miaobiDirectory, "client"),
+      pagesDirectory,
+      sourceCommit: "59a06b5c2c127d287d01016e5be4d781e310fe2e",
+      releaseId: "59a06b5c2c12-20260914100000",
+      pagesOrigin: "https://aurostars.github.io",
+      pagesBasePath: "/magic-resume/",
+    });
+    const generatedFiles = [
+      ...await filesRecursively(miaobiDirectory),
+      ...await filesRecursively(pagesDirectory),
+    ];
     const violations: string[] = [];
     for (const path of generatedFiles.filter((candidate) => textExtensions.has(extname(candidate).toLowerCase()))) {
       const text = await readFile(path, "utf8");
       const artifact = relative(root, path);
-      for (const forbidden of ["workers.dev", "/Users/", "/workspace/", "file://"] as const) {
+      for (const forbidden of [
+        "workers.dev", "/Users/", "/workspace/", "file://", "tos.example", "cloudflareworkers.com",
+      ] as const) {
         if (text.toLowerCase().includes(forbidden.toLowerCase())) violations.push(`${artifact} contains ${forbidden}`);
       }
       if (/sourceMappingURL=(?:file:|\/Users\/|\/workspace\/)/i.test(text)) {
@@ -391,7 +382,7 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       }
       for (const url of extractAbsoluteHttpUrls(text)) {
         try {
-          assertAllowedGeneratedUrl(url, tosOrigins);
+          assertAllowedGeneratedUrl(url, assetOrigins);
         } catch (error) {
           violations.push(`${artifact}: ${(error as Error).message}`);
         }

@@ -1,5 +1,10 @@
 {
   "pageId": "vv6BtLE8MTR",
   "title": "魔方简历",
-  "assetKeyPrefix": "magic-resume/releases"
+  "githubPages": {
+    "owner": "aurostars",
+    "repository": "magic-resume",
+    "branch": "gh-pages",
+    "baseUrl": "https://aurostars.github.io/magic-resume/"
+  }
 }

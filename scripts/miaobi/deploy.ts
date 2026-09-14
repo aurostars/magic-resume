@@ -4,40 +4,46 @@ import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, utimes, writeFi
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import config from "../../miaobi.config.json" with { type: "json" };
-import { injectLegacyMiaobiRuntime } from "../../miaobi/runtime-config";
+import { injectMiaobiRuntime } from "../../miaobi/runtime-config";
 import { MIAOBI_ASSET_BASE_PLACEHOLDER } from "../../vite.miaobi.config";
 import { buildWebFaas } from "./build-web-faas";
+import { createGitCommandRunner, type GitCommandRunner } from "./git-runner";
+import { verifyGitHubPagesRelease } from "./github-pages-health";
 import {
   createMagicBuilderRunner,
   MagicBuilderError,
   resolveMagicPlatformOrigin,
   runMagicBuilderObject,
 } from "./magic-builder";
-import { createReleaseId, publishAssets } from "./publish-assets";
-import type { MagicBuilderRunner } from "./types";
+import { createReleaseId } from "./publish-assets";
+import {
+  publishGitHubPages,
+  type GitHubPagesAdmin,
+  type GitHubPagesPublication,
+} from "./publish-github-pages";
+import type {
+  MagicBuilderRunner,
+  MiaobiDeploymentState,
+  MiaobiDeploymentStateV3,
+} from "./types";
+export type { MiaobiDeploymentState, MiaobiDeploymentStateV3 } from "./types";
 
 export interface MiaobiDeployConfig {
   pageId: "vv6BtLE8MTR";
   title: "魔方简历";
-  assetKeyPrefix: "magic-resume/releases";
+  githubPages: {
+    owner: "aurostars";
+    repository: "magic-resume";
+    branch: "gh-pages";
+    baseUrl: "https://aurostars.github.io/magic-resume/";
+  };
 }
 
 /**
- * Crash-recovery state protected by 0700/0600 local storage. Its validation
+ * Crash-recovery state is protected by 0700/0600 local storage. Its validation
  * detects corruption and cross-field inconsistencies; it is not an
  * authentication boundary against malicious code running as the same UID.
  */
-export interface MiaobiDeploymentState {
-  schemaVersion: 2;
-  apiBuildMarker: string;
-  releaseId: string;
-  apiFaasId: string;
-  apiFaasUrl: string;
-  webFaasId: string;
-  webFaasUrl: string;
-  pageId: string;
-  deployedAt: string;
-}
 
 type PendingPhase = "prepared" | "page-inflight" | "page-confirmed";
 
@@ -548,8 +554,17 @@ function validateDeploymentFields(
       platformOrigin,
     );
     if (deployment.apiBuildMarker !== undefined) {
-      const markerPrefix = markerCommit(deployment.apiBuildMarker)?.slice(0, 12);
+      const sourceCommit = markerCommit(deployment.apiBuildMarker);
+      const markerPrefix = sourceCommit?.slice(0, 12);
       if (!markerPrefix || markerPrefix !== releasePrefix) throw new Error();
+      if (deployment.schemaVersion === 3) {
+        const pages = deployment as MiaobiDeploymentStateV3;
+        if (
+          pages.assetProvider !== "github-pages" || !/^[0-9a-f]{40}$/.test(pages.pagesCommit) ||
+          pages.pagesBaseUrl !== deployConfig.githubPages.baseUrl ||
+          pages.releaseManifestUrl !== `${pages.pagesBaseUrl}releases/${sourceCommit}/manifest.json`
+        ) throw new Error();
+      }
     }
   } catch {
     throw codedError("MIAOBI_STATE_FAILED");
@@ -567,16 +582,18 @@ function parseDeploymentState(
   ];
   const schemaVersion = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
   const hasMarker = typeof (value as { apiBuildMarker?: unknown } | null)?.apiBuildMarker === "string";
-  const expectedKeys = schemaVersion === 2 || (schemaVersion === 1 && hasMarker)
-    ? [...commonKeys, "apiBuildMarker"].sort()
-    : commonKeys.sort();
+  const expectedKeys = schemaVersion === 3
+    ? [...commonKeys, "apiBuildMarker", "assetProvider", "pagesCommit", "pagesBaseUrl", "releaseManifestUrl"].sort()
+    : schemaVersion === 2 || (schemaVersion === 1 && hasMarker)
+      ? [...commonKeys, "apiBuildMarker"].sort()
+      : commonKeys.sort();
   if (
     typeof value !== "object" || value === null ||
     JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
-    (schemaVersion !== 1 && schemaVersion !== 2) ||
+    (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) ||
     (value as { pageId?: unknown }).pageId !== deployConfig.pageId ||
     (hasMarker && !BUILD_MARKER_PATTERN.test((value as { apiBuildMarker: string }).apiBuildMarker)) ||
-    (schemaVersion === 2 && !hasMarker) ||
+    ((schemaVersion === 2 || schemaVersion === 3) && !hasMarker) ||
     typeof (value as { releaseId?: unknown }).releaseId !== "string" ||
     typeof (value as { deployedAt?: unknown }).deployedAt !== "string"
   ) throw codedError("MIAOBI_STATE_FAILED");
@@ -690,7 +707,7 @@ async function generationStates(state: TrustedState, platformOrigin: string): Pr
       value.resolvedGeneration > value.generation || !OWNER_TOKEN_PATTERN.test(value.resolvedOwnerToken)
     ) throw codedError("MIAOBI_STATE_FAILED");
     const deployment = parseDeploymentState(value.deployment, platformOrigin);
-    if (deployment.schemaVersion !== 2) throw codedError("MIAOBI_STATE_FAILED");
+    if (deployment.schemaVersion !== 2 && deployment.schemaVersion !== 3) throw codedError("MIAOBI_STATE_FAILED");
     records.push({ ...value, deployment, path });
   }
   return records.sort((left, right) => left.generation - right.generation);
@@ -751,7 +768,7 @@ function parsePending(value: unknown, platformOrigin: string): PendingDeployment
       !HASH_PATTERN.test(raw.page.sha256)
     ) throw new Error();
     const deployment = parseDeploymentState(raw.deployment, platformOrigin);
-    if (deployment.schemaVersion !== 2) throw new Error();
+    if (deployment.schemaVersion !== 2 && deployment.schemaVersion !== 3) throw new Error();
     return { ...raw, schemaVersion: 3, phase };
   } catch {
     throw codedError("MIAOBI_PENDING_INVALID");
@@ -820,8 +837,14 @@ function sameDeploymentSemantics(
   left: MiaobiDeploymentState,
   right: MiaobiDeploymentState,
 ): boolean {
+  const samePages = left.schemaVersion !== 3 || right.schemaVersion !== 3 || (
+    (left as MiaobiDeploymentStateV3).assetProvider === (right as MiaobiDeploymentStateV3).assetProvider &&
+    (left as MiaobiDeploymentStateV3).pagesCommit === (right as MiaobiDeploymentStateV3).pagesCommit &&
+    (left as MiaobiDeploymentStateV3).pagesBaseUrl === (right as MiaobiDeploymentStateV3).pagesBaseUrl &&
+    (left as MiaobiDeploymentStateV3).releaseManifestUrl === (right as MiaobiDeploymentStateV3).releaseManifestUrl
+  );
   return (
-    left.schemaVersion === right.schemaVersion && left.apiBuildMarker === right.apiBuildMarker &&
+    left.schemaVersion === right.schemaVersion && samePages && left.apiBuildMarker === right.apiBuildMarker &&
     left.releaseId === right.releaseId && left.apiFaasId === right.apiFaasId &&
     left.apiFaasUrl === right.apiFaasUrl && left.webFaasId === right.webFaasId &&
     left.webFaasUrl === right.webFaasUrl && left.pageId === right.pageId &&
@@ -1096,6 +1119,18 @@ async function checkHealthWithOwnership(lock: StateLock, check: HealthCheck): Pr
   }
 }
 
+async function fencedOperation<T>(lock: StateLock, operation: () => Promise<T>): Promise<T> {
+  await lock.assertOwnership();
+  try {
+    const result = await operation();
+    await lock.assertOwnership();
+    return result;
+  } catch (error) {
+    await lock.assertOwnership();
+    throw error;
+  }
+}
+
 function pageHtml(webFaasUrl: string, webFaasId: string, platformOrigin: string): string {
   const safeUrl = validatePublishedUrl(webFaasUrl, `/api/faas/${validateResourceId(webFaasId)}`, platformOrigin);
   const scriptUrl = JSON.stringify(safeUrl).replace(/</g, "\\u003c");
@@ -1262,6 +1297,11 @@ export async function deployMiaobi(options: {
   healthTimeoutMs?: number;
   lockClock?: StateLockClock;
   transactionHook?: DeploymentTransactionHook;
+  repositoryDirectory?: string;
+  gitRunner?: GitCommandRunner;
+  pagesAdmin?: GitHubPagesAdmin;
+  publishPages?: typeof publishGitHubPages;
+  verifyPages?: typeof verifyGitHubPagesRelease;
 }): Promise<MiaobiDeploymentState> {
   let stateLock: StateLock | undefined;
   try {
@@ -1309,13 +1349,26 @@ export async function deployMiaobi(options: {
     await priorState(stateStorage, platformOrigin);
     const apiMetadata = await readApiBuildMetadata(outputDirectory, options.gitCommit);
     const releaseId = createReleaseId(options.gitCommit, options.now);
-    await stateLock.assertOwnership();
-    const manifest = await publishAssets({
-      directory: resolve(outputDirectory, "client"),
+    const publication = await fencedOperation(stateLock, async () => (options.publishPages ?? publishGitHubPages)({
+      repositoryDirectory: options.repositoryDirectory ?? resolve("."),
+      clientDirectory: resolve(outputDirectory, "client"),
+      sourceCommit: options.gitCommit,
       releaseId,
-      runner,
-    });
-    await stateLock.assertOwnership();
+      runner: options.gitRunner ?? createGitCommandRunner(),
+      admin: options.pagesAdmin,
+    }));
+    await fencedOperation(stateLock, async () => (options.verifyPages ?? verifyGitHubPagesRelease)({
+      publication,
+      fetchImpl: options.fetch,
+    }));
+    if (
+      publication.manifest.schemaVersion !== 1 || publication.manifest.provider !== "github-pages" ||
+      publication.manifest.sourceCommit !== options.gitCommit || publication.manifest.releaseId !== releaseId ||
+      publication.manifest.baseUrl !== publication.pagesBaseUrl ||
+      publication.pagesBaseUrl !== deployConfig.githubPages.baseUrl ||
+      !/^[0-9a-f]{40}$/.test(publication.pagesCommit) ||
+      publication.releaseManifestUrl !== `${publication.pagesBaseUrl}releases/${options.gitCommit}/manifest.json`
+    ) throw codedError("MIAOBI_INVALID_PAGES_RELEASE");
     const api = await publishFaas(
       runner,
       resolve(outputDirectory, "api-faas.cjs"),
@@ -1323,13 +1376,13 @@ export async function deployMiaobi(options: {
       platformOrigin,
     );
     const shell = (await readFile(resolve(outputDirectory, "client/index.html"), "utf8"))
-      .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, manifest.baseUrl);
-    const html = injectLegacyMiaobiRuntime(shell, {
+      .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, publication.pagesBaseUrl);
+    const html = injectMiaobiRuntime(shell, {
       platform: "miaobi",
       apiFunctionUrl: api.url,
-      assetBaseUrl: manifest.baseUrl,
+      assetBaseUrl: publication.pagesBaseUrl,
     }, platformOrigin);
-    const webBundlePath = await buildWebFaas(html, outputDirectory, "legacy-tos", platformOrigin);
+    const webBundlePath = await buildWebFaas(html, outputDirectory, "github-pages", platformOrigin);
     const web = await publishFaas(
       runner,
       webBundlePath,
@@ -1338,7 +1391,7 @@ export async function deployMiaobi(options: {
     );
     const health = {
       apiFaasUrl: api.url,
-      assetBaseUrl: manifest.baseUrl,
+      assetBaseUrl: publication.pagesBaseUrl,
       apiBuildMarker: apiMetadata.buildMarker,
       fetch: options.fetch ?? globalThis.fetch,
       timeoutMs: options.healthTimeoutMs ?? 10_000,
@@ -1348,8 +1401,12 @@ export async function deployMiaobi(options: {
 
     const pagePath = resolve(outputDirectory, "page.html");
     await writeFile(pagePath, pageHtml(web.url, web.id, platformOrigin), { encoding: "utf8", mode: 0o600 });
-    const deployment: MiaobiDeploymentState = {
-      schemaVersion: 2,
+    const deployment: MiaobiDeploymentStateV3 = {
+      schemaVersion: 3,
+      assetProvider: "github-pages",
+      pagesCommit: publication.pagesCommit,
+      pagesBaseUrl: publication.pagesBaseUrl,
+      releaseManifestUrl: publication.releaseManifestUrl,
       apiBuildMarker: apiMetadata.buildMarker,
       releaseId,
       apiFaasId: api.id,

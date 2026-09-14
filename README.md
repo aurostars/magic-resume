@@ -95,17 +95,19 @@ pnpm build
 
 ### Miaobi native deployment
 
-Miaobi operators need an authenticated `magic-builder` 1.3.0+ and a reviewed commit. On macOS/Linux, run the explicit build-and-deploy contract from the repository root:
+Miaobi operators need authenticated `gh` and `magic-builder` 1.3.0+, a reviewed commit, and a `fork` Git remote whose only push URL is `aurostars/magic-resume`. GitHub Pages must be public and serve the `gh-pages` branch from `/`. Check `gh auth status` before running the explicit build-and-deploy contract:
 
 ```bash
+gh auth status
+git remote get-url --push --all fork
 export MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)"
 corepack pnpm build:miaobi
 corepack pnpm deploy:miaobi
 ```
 
-The deploy script generation-fences concurrent deployers and fails closed with `MIAOBI_PAGE_RESULT_UNCERTAIN` when a remote page result cannot be proven. Never automatically retry or override that condition.
+The deploy script generation-fences GitHub Pages publication, Pages health verification, every FaaS operation, the fixed-page switch, and the immutable state commit. It fails closed with `MIAOBI_PAGE_RESULT_UNCERTAIN` when a remote page result cannot be proven. Never automatically retry or override that condition.
 
-Resume data and WebDAV credentials remain in the current browser profile; they are not moved to Miaobi FaaS or TOS. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. The [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) is authoritative for Windows commands, build artifacts, state recovery, deployment order, rollback, and verification limits.
+Resume data and WebDAV credentials remain in the current browser profile; they are not moved to Miaobi FaaS or GitHub Pages. GitHub Pages stores immutable content-addressed releases, so operators must monitor repository growth and remove data only through a separately reviewed retention procedure. The former TOS route was abandoned after publication was blocked; it is not part of the default deployment path. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. The [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) is authoritative for first-publish Pages activation, runtime domains, state recovery, rollback, and verification limits.
 
 ### AI provider networking
 
