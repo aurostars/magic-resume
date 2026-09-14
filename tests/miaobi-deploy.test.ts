@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -198,6 +198,91 @@ async function pagePhaseRecords(root: string, phase: "page-inflight" | "page-con
     .filter((name) => /^[1-9]\d*-[0-9a-f]{32}\.json$/.test(name));
   return Promise.all(files.map(async (name) => JSON.parse(await readFile(join(directory, name), "utf8"))));
 }
+
+test("fails before reserving a generation or invoking the CLI when directory sync is unsupported", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    const probe = await open(root);
+    const prototype = Object.getPrototypeOf(probe) as { sync: typeof probe.sync };
+    const originalSync = prototype.sync;
+    await probe.close();
+    prototype.sync = async function (this: typeof probe): Promise<void> {
+      if ((await this.stat()).isDirectory()) {
+        throw Object.assign(new Error("directory sync unsupported"), { code: "EINVAL" });
+      }
+      await originalSync.call(this);
+    };
+    const events: string[] = [];
+    try {
+      await assert.rejects(
+        deployMiaobi({
+          runner: fakeRunner(events),
+          gitCommit: COMMIT,
+          now: NOW,
+          fetch: async (input) => healthyResponse(input),
+        }),
+        (error: unknown) => (error as { code?: string }).code === "MIAOBI_DURABILITY_UNSUPPORTED",
+      );
+    } finally {
+      prototype.sync = originalSync;
+    }
+
+    assert.deepEqual(events, []);
+    assert.deepEqual(await readdir(join(root, ".miaobi-recovery/generations")), []);
+    assert.deepEqual(await generationFiles(root, ".miaobi-recovery/pending"), []);
+    assert.deepEqual(await pagePhaseRecords(root, "page-inflight"), []);
+    assert.deepEqual(await pagePhaseRecords(root, "page-confirmed"), []);
+    assert.deepEqual(await generationFiles(root, ".miaobi/states"), []);
+  });
+});
+
+test("revalidates directory sync capability after the recovery directory identity changes", { concurrency: false }, async () => {
+  await inFixture(async (root) => {
+    await deployMiaobi({
+      runner: fakeRunner([]),
+      gitCommit: COMMIT,
+      now: NOW,
+      fetch: async (input) => healthyResponse(input),
+    });
+    const statesBefore = await generationFiles(root, ".miaobi/states");
+    await rename(join(root, ".miaobi-recovery"), join(root, ".miaobi-recovery-replaced"));
+    await mkdir(join(root, ".miaobi-recovery"), { mode: 0o700 });
+    const replacement = await stat(join(root, ".miaobi-recovery"));
+
+    const probe = await open(root);
+    const prototype = Object.getPrototypeOf(probe) as { sync: typeof probe.sync };
+    const originalSync = prototype.sync;
+    await probe.close();
+    prototype.sync = async function (this: typeof probe): Promise<void> {
+      const metadata = await this.stat();
+      if (metadata.dev === replacement.dev && metadata.ino === replacement.ino) {
+        throw Object.assign(new Error("replacement directory sync unsupported"), { code: "EINVAL" });
+      }
+      await originalSync.call(this);
+    };
+    const events: string[] = [];
+    const nextNow = new Date("2026-09-13T16:47:00.000Z");
+    try {
+      await assert.rejects(
+        deployMiaobi({
+          runner: fakeRunner(events),
+          gitCommit: COMMIT,
+          now: nextNow,
+          fetch: async (input) => healthyResponse(input, "api-new", "59a06b5c2c12-20260913164700"),
+        }),
+        (error: unknown) => (error as { code?: string }).code === "MIAOBI_DURABILITY_UNSUPPORTED",
+      );
+    } finally {
+      prototype.sync = originalSync;
+    }
+
+    assert.deepEqual(events, []);
+    assert.deepEqual(await readdir(join(root, ".miaobi-recovery/generations")), []);
+    assert.deepEqual(await generationFiles(root, ".miaobi-recovery/pending"), []);
+    assert.deepEqual(await pagePhaseRecords(root, "page-inflight"), []);
+    assert.deepEqual(await pagePhaseRecords(root, "page-confirmed"), []);
+    assert.deepEqual(await generationFiles(root, ".miaobi/states"), statesBefore);
+  });
+});
 
 test("publishes assets, API, Web, checks both URLs, then switches the page and atomically saves state", { concurrency: false }, async () => {
   await inFixture(async (root) => {
