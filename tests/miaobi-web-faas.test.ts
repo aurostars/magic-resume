@@ -1,19 +1,45 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createWebFaasHandler } from "../miaobi/web-entry";
+import { injectMiaobiRuntime } from "../miaobi/runtime-config";
 import { buildWebFaas } from "../scripts/miaobi/build-web-faas";
 
-const HTML = `<!doctype html><html><head><link rel="stylesheet" href="https://tos.example.test/magic-resume/releases/release/app.css"></head><body><a href="https://api.example.test/faas">fallback</a><script>window.__MAGIC_RESUME_RUNTIME__={"apiFunctionUrl":"https://api.example.test/faas","assetBaseUrl":"https://tos.example.test/magic-resume/releases/release/"}</script><script type="module" src="https://tos.example.test/magic-resume/releases/release/app.js"></script></body></html>`;
+const PAGES_ORIGIN = "https://aurostars.github.io";
+const ASSET_BASE = `${PAGES_ORIGIN}/magic-resume/objects/${"1".repeat(64)}/`;
+const API_URL = "https://magic.solutionsuite.cn/api/faas/api-id";
+const SHELL = `<!doctype html><html><head><link rel="stylesheet" href="${ASSET_BASE}assets/app.css"></head><body><img src="${ASSET_BASE}assets/logo.png"><script type="module" src="${ASSET_BASE}assets/app.js"></script></body></html>`;
+const HTML = injectMiaobiRuntime(SHELL, {
+  platform: "miaobi",
+  apiFunctionUrl: API_URL,
+  assetBaseUrl: ASSET_BASE,
+});
 
 function request(method = "GET") {
   return new Request("https://magic.example.test/", { method });
 }
 
-test("GET serves the finalized HTML with no-store security headers and a narrow CSP", async () => {
+test("runtime config is injected before modules only for canonical Pages asset URLs", () => {
+  assert.ok(HTML.indexOf("window.__MAGIC_RESUME_RUNTIME__") < HTML.indexOf('type="module"'));
+  assert.match(HTML, new RegExp(`${PAGES_ORIGIN}/magic-resume/objects/`));
+
+  for (const assetBaseUrl of [
+    "https://tos.example.test/magic-resume/releases/release/",
+    "https://tenant.workers.dev/magic-resume/",
+    "https://aurostars.github.io.evil.example/magic-resume/",
+  ]) {
+    assert.throws(() => injectMiaobiRuntime(SHELL, {
+      platform: "miaobi",
+      apiFunctionUrl: API_URL,
+      assetBaseUrl,
+    }), /MIAOBI_INVALID_PAGES_URL/);
+  }
+});
+
+test("GET serves finalized Pages HTML with no-store headers and CSP for assets, API and HTTPS WebDAV", async () => {
   const response = await createWebFaasHandler(HTML)(request());
 
   assert.equal(response.status, 200);
@@ -24,10 +50,12 @@ test("GET serves the finalized HTML with no-store security headers and a narrow 
   assert.equal(response.headers.get("X-Magic-Resume-Faas"), "magic-resume-web");
   const csp = response.headers.get("Content-Security-Policy") ?? "";
   assert.match(csp, /default-src 'none'/);
-  assert.match(csp, /script-src 'unsafe-inline' https:\/\/tos\.example\.test\/magic-resume\/releases\/release\//);
-  assert.match(csp, /connect-src https:(?:;|$)/);
-  assert.doesNotMatch(csp, /connect-src[^;]*api\.example\.test/);
-  assert.doesNotMatch(csp, /workers\.dev|\*/);
+  for (const directive of ["script-src", "style-src", "font-src", "img-src", "media-src"]) {
+    assert.match(csp, new RegExp(`${directive}[^;]*https:\\/\\/aurostars\\.github\\.io(?:\\s|;|$)`));
+  }
+  assert.match(csp, /connect-src[^;]*https:\/\/magic\.solutionsuite\.cn(?:\/|\s|;)/);
+  assert.match(csp, /connect-src[^;]*https:(?:\s|;|$)/);
+  assert.doesNotMatch(csp, /tos|cloudflare|workers\.dev|\*/i);
 });
 
 test("HEAD returns the same headers without an HTML body", async () => {
@@ -49,7 +77,7 @@ for (const method of ["POST", "PUT", "DELETE"]) {
   });
 }
 
-test("the bundled handler embeds safely serialized finalized HTML before request time", async () => {
+test("the real bundle serves Pages object URLs with runtime config before modules", async () => {
   const directory = await mkdtemp(join(tmpdir(), "magic-resume-web-faas-"));
   const hostileHtml = HTML.replace("</body>", "<p>` \${danger} </script> \\ end</p></body>");
   try {
@@ -65,6 +93,21 @@ test("the bundled handler embeds safely serialized finalized HTML before request
     const body = await response.text();
     assert.equal(body, hostileHtml);
     assert.ok(body.indexOf("window.__MAGIC_RESUME_RUNTIME__") < body.indexOf('type="module"'));
+    assert.match(body, /https:\/\/aurostars\.github\.io\/magic-resume\/objects\/[0-9a-f]{64}\/assets\/app\.js/);
+    assert.match(body, /https:\/\/aurostars\.github\.io\/magic-resume\/objects\/[0-9a-f]{64}\/assets\/app\.css/);
+    assert.match(response.headers.get("Content-Security-Policy") ?? "", /https:\/\/aurostars\.github\.io/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("non-Pages runtime HTML is rejected before a bundle artifact is published", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-resume-web-faas-invalid-"));
+  const invalid = HTML.replaceAll(PAGES_ORIGIN, "https://legacy.workers.dev");
+  const bundlePath = join(directory, "web-faas.cjs");
+  try {
+    await assert.rejects(buildWebFaas(invalid, directory), /MIAOBI_INVALID_PAGES_URL/);
+    await assert.rejects(access(bundlePath));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
