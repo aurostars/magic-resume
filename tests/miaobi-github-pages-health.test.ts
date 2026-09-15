@@ -131,6 +131,54 @@ test("verifies the release manifest, index, and every boot-critical module and s
   ]);
 });
 
+test("ignores inline modules while verifying external module, preload, and stylesheet assets", async () => {
+  const fixture = releaseFixture();
+  const chunk = new TextEncoder().encode("export const chunk = true");
+  const chunkRecord = record("assets/chunk.js", chunk, "application/javascript; charset=utf-8");
+  fixture.publication.manifest.files["assets/chunk.js"] = chunkRecord;
+  fixture.bodies.set(chunkRecord.url, chunk);
+  const html = new TextEncoder().encode(
+    `<!doctype html><link rel="modulepreload" href="${chunkRecord.url}"><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><script type="module" async>globalThis.__booted = true</script><script type="module" src="${OBJECT_BASE}assets/app.js"></script>`,
+  );
+  const index = record("index.html", html, "text/html; charset=utf-8");
+  fixture.publication.manifest.files["index.html"] = index;
+  fixture.bodies.set(index.url, html);
+  refreshManifestBody(fixture);
+  const visited: string[] = [];
+
+  await verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      visited.push(String(input));
+      return fetchUsingManifestMimes(fixture)(input, init);
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(visited, [
+    fixture.publication.releaseManifestUrl,
+    index.url,
+    fixture.publication.manifest.files["assets/app.css"].url,
+    fixture.publication.manifest.files["assets/app.js"].url,
+    chunkRecord.url,
+  ]);
+});
+
+test("rejects boot-critical links without href even when an inline module is present", async () => {
+  const fixture = releaseFixture();
+  const html = new TextEncoder().encode(
+    `<!doctype html><link rel="modulepreload"><script type="module" async>globalThis.__booted = true</script><script type="module" src="${OBJECT_BASE}assets/app.js"></script>`,
+  );
+  const index = record("index.html", html, "text/html; charset=utf-8");
+  fixture.publication.manifest.files["index.html"] = index;
+  fixture.bodies.set(index.url, html);
+  refreshManifestBody(fixture);
+
+  await assert.rejects(verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl: fetchUsingManifestMimes(fixture),
+  }), /MIAOBI_PAGES_HEALTH_FAILED/);
+});
+
 test("rejects malformed manifest URLs before making a request", async () => {
   const { publication } = releaseFixture();
   let called = false;

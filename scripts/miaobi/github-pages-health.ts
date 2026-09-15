@@ -216,7 +216,7 @@ function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole,
   for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
     if (attribute(tag, "type")?.toLowerCase() === "module") {
       const src = attribute(tag, "src");
-      if (!src) healthFailed();
+      if (!src) continue;
       add(src, "script");
     }
   }
