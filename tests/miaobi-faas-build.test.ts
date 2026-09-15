@@ -109,7 +109,8 @@ test("the API bundle loads and serves health without runtime require", async () 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           method: "PROPFIND",
-          path: "magic-resume/manifest.json",
+          pathSegments: ["magic-resume", "manifest.json"],
+          pathTrailingSlash: false,
           username: "account@example.test",
           password: "app-password",
         }),
