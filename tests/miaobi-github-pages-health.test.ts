@@ -163,6 +163,24 @@ test("ignores inline modules while verifying external module, preload, and style
   ]);
 });
 
+for (const src of ["", "   "]) {
+  test(`rejects an external module with an empty src attribute (${JSON.stringify(src)})`, async () => {
+    const fixture = releaseFixture();
+    const html = new TextEncoder().encode(
+      `<!doctype html><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><script type="module" src="${src}"></script>`,
+    );
+    const index = record("index.html", html, "text/html; charset=utf-8");
+    fixture.publication.manifest.files["index.html"] = index;
+    fixture.bodies.set(index.url, html);
+    refreshManifestBody(fixture);
+
+    await assert.rejects(verifyGitHubPagesRelease({
+      publication: fixture.publication,
+      fetchImpl: fetchUsingManifestMimes(fixture),
+    }), /MIAOBI_PAGES_HEALTH_FAILED/);
+  });
+}
+
 test("rejects boot-critical links without href even when an inline module is present", async () => {
   const fixture = releaseFixture();
   const html = new TextEncoder().encode(

@@ -203,7 +203,7 @@ function assertAssetRecord(record: GitHubPagesAssetRecord, relativePath: string,
 }
 
 function attribute(tag: string, name: string): string | undefined {
-  return new RegExp(`\\b${name}\\s*=\\s*["']([^"']+)["']`, "i").exec(tag)?.[1];
+  return new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag)?.[1];
 }
 
 function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole, "index"> }> {
@@ -216,7 +216,8 @@ function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole,
   for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
     if (attribute(tag, "type")?.toLowerCase() === "module") {
       const src = attribute(tag, "src");
-      if (!src) continue;
+      if (src === undefined) continue;
+      if (!src.trim()) healthFailed();
       add(src, "script");
     }
   }
