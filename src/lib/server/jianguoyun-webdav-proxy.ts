@@ -18,6 +18,7 @@ export interface JianguoyunProxyDependencies {
 const JIANGUOYUN_ORIGIN = "https://dav.jianguoyun.com";
 const JIANGUOYUN_ROOT = "/dav/";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_DECODE_PASSES = 8;
 const ALLOWED_METHODS = new Set<JianguoyunWebDavMethod>([
   "OPTIONS", "PROPFIND", "MKCOL", "GET", "PUT", "DELETE", "MOVE",
 ]);
@@ -39,18 +40,72 @@ function invalidRequest(): Response {
   return jsonError(400, "Invalid Jianguoyun WebDAV proxy request", "invalidWebdavProxyRequest");
 }
 
+function requestTooLarge(): Response {
+  return jsonError(413, "Jianguoyun WebDAV proxy request is too large", "webdavProxyRequestTooLarge");
+}
+
 function proxyFailed(): Response {
   return jsonError(502, "Jianguoyun WebDAV proxy failed", "webdavProxyFailed");
+}
+
+async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
+  if (!body) return;
+  try {
+    await body.cancel();
+  } catch {
+    // Cancellation is best-effort; errors must not replace the stable proxy response.
+  }
+}
+
+async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Cancellation is best-effort; errors must not replace the stable size/error response.
+  }
+}
+
+async function readBodyWithLimit(
+  body: ReadableStream<Uint8Array> | null,
+): Promise<Uint8Array | undefined> {
+  if (!body) return new Uint8Array();
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        await cancelReader(reader);
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await cancelReader(reader);
+    throw error;
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  });
+  return bytes;
 }
 
 function decodePathSegment(segment: string): string | undefined {
   let decoded = segment;
   try {
-    for (;;) {
+    for (let pass = 0; pass < MAX_DECODE_PASSES; pass += 1) {
       const next = decodeURIComponent(decoded);
       if (next === decoded) return decoded;
       decoded = next;
     }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -113,6 +168,7 @@ function isProxyRequest(value: unknown): value is JianguoyunProxyRequest {
     && typeof candidate.path === "string"
     && typeof candidate.username === "string"
     && candidate.username.length > 0
+    && !/[:\u0000-\u001F\u007F-\u009F]/.test(candidate.username)
     && typeof candidate.password === "string"
     && candidate.password.length > 0
     && (candidate.body === undefined || typeof candidate.body === "string")
@@ -133,40 +189,45 @@ export async function handleJianguoyunWebDavProxy(
     const length = Number(declaredLength);
     if (!Number.isSafeInteger(length) || length < 0) return invalidRequest();
     if (length > MAX_BODY_BYTES) {
-      return jsonError(413, "Jianguoyun WebDAV proxy request is too large", "webdavProxyRequestTooLarge");
+      await cancelBody(request.body);
+      return requestTooLarge();
     }
   }
 
   let payload: unknown;
   try {
-    const bytes = await request.arrayBuffer();
-    if (bytes.byteLength > MAX_BODY_BYTES) {
-      return jsonError(413, "Jianguoyun WebDAV proxy request is too large", "webdavProxyRequestTooLarge");
-    }
+    const bytes = await readBodyWithLimit(request.body);
+    if (!bytes) return requestTooLarge();
     payload = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
     return invalidRequest();
   }
 
   if (!isProxyRequest(payload)) return invalidRequest();
-  const target = fixedUpstreamUrl(payload.path, payload.username, payload.password);
-  if (!target) return invalidRequest();
 
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(payload.headers ?? {})) {
-    if (REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
-  }
-
-  if (payload.method === "MOVE" && headers.has("Destination")) {
-    const destination = fixedUpstreamUrl(headers.get("Destination"));
-    if (!destination) return invalidRequest();
-    headers.set("Destination", destination.href);
-  }
-  headers.set("Authorization", basicAuthorization(payload.username, payload.password));
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), dependencies.timeoutMs ?? 10_000);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
+    const target = fixedUpstreamUrl(payload.path, payload.username, payload.password);
+    if (!target) return invalidRequest();
+
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(payload.headers ?? {})) {
+      if (REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
+    }
+
+    if (payload.method === "MOVE" && headers.has("Destination")) {
+      const destination = fixedUpstreamUrl(
+        headers.get("Destination"),
+        payload.username,
+        payload.password,
+      );
+      if (!destination) return invalidRequest();
+      headers.set("Destination", destination.href);
+    }
+    headers.set("Authorization", basicAuthorization(payload.username, payload.password));
+
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), dependencies.timeoutMs ?? 10_000);
     const upstream = await (dependencies.fetchImpl ?? fetch)(target, {
       method: payload.method,
       headers,
@@ -174,10 +235,13 @@ export async function handleJianguoyunWebDavProxy(
       redirect: "manual",
       signal: controller.signal,
     });
-    if (upstream.status >= 300 && upstream.status < 400) return proxyFailed();
+    if (upstream.status < 200 || upstream.status >= 300) {
+      await cancelBody(upstream.body);
+      return proxyFailed();
+    }
 
-    const body = await upstream.arrayBuffer();
-    if (body.byteLength > MAX_BODY_BYTES) return proxyFailed();
+    const body = await readBodyWithLimit(upstream.body);
+    if (!body) return proxyFailed();
 
     const responseHeaders = new Headers({ "Cache-Control": "no-store" });
     upstream.headers.forEach((value, name) => {
@@ -191,6 +255,6 @@ export async function handleJianguoyunWebDavProxy(
   } catch {
     return proxyFailed();
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }

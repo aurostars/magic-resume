@@ -161,14 +161,24 @@ test("the proxy forwards only Depth Destination Overwrite If If-Match If-None-Ma
 
 test("the proxy disables redirects", async () => {
   let redirect: RequestRedirect | undefined;
+  let canceled = false;
+  const redirectBody = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(new TextEncoder().encode("redirect target"));
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
   const response = await handleJianguoyunWebDavProxy(proxyRequest(validPayload), {
     fetchImpl: async (_input, init) => {
       redirect = init?.redirect;
-      return new Response("redirect target", { status: 302, headers: { Location: "https://evil.test" } });
+      return new Response(redirectBody, { status: 302, headers: { Location: "https://evil.test" } });
     },
   });
 
   assert.equal(redirect, "manual");
+  assert.equal(canceled, true);
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), {
     error: "Jianguoyun WebDAV proxy failed",
@@ -230,4 +240,167 @@ test("proxy errors never include username password Authorization or upstream bod
     error: "Jianguoyun WebDAV proxy failed",
     code: "webdavProxyFailed",
   });
+});
+
+test("the proxy rejects multi-encoded traversal and decode-limit exhaustion", async () => {
+  for (const path of [
+    "magic-resume/%25252e%25252e/stolen",
+    "magic-resume/%25252525252525252541/manifest.json",
+  ]) {
+    let fetched = false;
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      path,
+    }), { fetchImpl: async () => { fetched = true; return new Response(); } });
+    assert.equal(response.status, 400);
+    assert.equal(fetched, false);
+  }
+});
+
+test("the proxy preserves UTF-8 credentials in Basic authorization", async () => {
+  let authorization: string | null = null;
+  const response = await handleJianguoyunWebDavProxy(proxyRequest({
+    ...validPayload,
+    username: "用户@example.test",
+    password: "密碼",
+  }), {
+    fetchImpl: async (_input, init) => {
+      authorization = new Headers(init?.headers).get("Authorization");
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  assert.equal(response.status, 204);
+  assert.equal(authorization, "Basic 55So5oi3QGV4YW1wbGUudGVzdDrlr4bnorw=");
+});
+
+test("the proxy rejects colon and control characters in usernames before fetch", async () => {
+  for (const username of [
+    "account:admin",
+    "account\nadmin",
+    "account\0admin",
+    "account\u007fadmin",
+    "account\u0085admin",
+  ]) {
+    let fetched = false;
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      username,
+    }), { fetchImpl: async () => { fetched = true; return new Response(); } });
+    assert.equal(response.status, 400);
+    assert.equal(fetched, false);
+  }
+});
+
+test("MOVE rejects credentials embedded in Destination including encoded forms", async () => {
+  for (const destination of [
+    "magic-resume/account@example.test/archive.json",
+    "magic-resume/account%40example.test/archive.json",
+    "magic-resume/account%2540example.test/archive.json",
+    "magic-resume/app-password/archive.json",
+    "magic-resume/app%252Dpassword/archive.json",
+  ]) {
+    let fetched = false;
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      method: "MOVE",
+      headers: { Destination: destination },
+    }), { fetchImpl: async () => { fetched = true; return new Response(); } });
+    assert.equal(response.status, 400);
+    assert.equal(fetched, false);
+  }
+});
+
+test("non-success upstream responses are sanitized and their bodies are canceled", async () => {
+  let canceled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("upstream account@example.test app-password"));
+      setTimeout(() => {
+        if (!canceled) controller.close();
+      }, 10);
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const response = await handleJianguoyunWebDavProxy(proxyRequest(validPayload), {
+    fetchImpl: async () => new Response(body, { status: 401 }),
+  });
+  const text = await response.text();
+
+  assert.equal(response.status, 502);
+  assert.equal(canceled, true);
+  assert.equal(text.includes("account@example.test"), false);
+  assert.equal(text.includes("app-password"), false);
+  assert.deepEqual(JSON.parse(text), {
+    error: "Jianguoyun WebDAV proxy failed",
+    code: "webdavProxyFailed",
+  });
+});
+
+test("invalid forwarded header values return only the stable sanitized proxy error", async () => {
+  const response = await handleJianguoyunWebDavProxy(proxyRequest({
+    ...validPayload,
+    headers: { If: "account@example.test\napp-password" },
+  }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
+  const text = await response.text();
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(JSON.parse(text), {
+    error: "Jianguoyun WebDAV proxy failed",
+    code: "webdavProxyFailed",
+  });
+  assert.equal(text.includes("account@example.test"), false);
+  assert.equal(text.includes("app-password"), false);
+});
+
+test("the proxy streams and cancels an oversized request body promptly", async () => {
+  let canceled = false;
+  let pulls = 0;
+  const requestBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      if (pulls <= 3) controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
+      else controller.close();
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const request = new Request("https://magic.solutionsuite.cn/api/webdav/jianguoyun", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: requestBody,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  const response = await handleJianguoyunWebDavProxy(request, {
+    fetchImpl: async () => { throw new Error("must not fetch"); },
+  });
+
+  assert.equal(response.status, 413);
+  assert.equal(canceled, true);
+  assert.ok(pulls <= 3, `oversized request pulled ${pulls} chunks`);
+});
+
+test("the proxy streams and cancels an oversized response body promptly", async () => {
+  let canceled = false;
+  let pulls = 0;
+  const upstreamBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      if (pulls <= 3) controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
+      else controller.close();
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const response = await handleJianguoyunWebDavProxy(proxyRequest(validPayload), {
+    fetchImpl: async () => new Response(upstreamBody),
+  });
+
+  assert.equal(response.status, 502);
+  assert.equal(canceled, true);
+  assert.ok(pulls <= 3, `oversized response pulled ${pulls} chunks`);
 });
