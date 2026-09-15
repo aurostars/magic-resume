@@ -233,6 +233,94 @@ test("publishes from existing fork/gh-pages and a deduplicated rerun creates no 
   }
 });
 
+test("reuses the canonical release identity across different-time publication retries", async () => {
+  const value = await fixture();
+  try {
+    const first = await publish(value);
+    const second = await publishGitHubPages({
+      ...publicationInput(value),
+      releaseId: "d26c16fcfcec-20260915142200",
+    });
+    assert.equal(second.manifest.releaseId, first.manifest.releaseId);
+    assert.equal(second.manifest.createdAt, first.manifest.createdAt);
+    assert.equal(second.pagesCommit, first.pagesCommit);
+    assert.equal((await command("git", ["--git-dir", value.remote, "rev-list", "--count", "gh-pages"])).stdout.trim(), "1");
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("fences a completed fetch before any push", async () => {
+  const value = await fixture();
+  try {
+    let owned = true;
+    value.runner.before = async (args) => {
+      if (args[0] === "fetch") owned = false;
+    };
+    await assert.rejects(publishGitHubPages({
+      ...publicationInput(value),
+      assertOwnership: async () => {
+        if (!owned) throw new Error("MIAOBI_OWNERSHIP_LOST");
+      },
+    }), { message: "MIAOBI_OWNERSHIP_LOST" });
+    assert.equal(value.runner.calls.some(({ args }) => args[0] === "push"), false);
+    assert.deepEqual(value.admin.calls, []);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("fences a completed push before retry or Pages administration", async () => {
+  for (const pushResult of ["success", "non-fast-forward"] as const) {
+    const value = await fixture();
+    try {
+      let owned = true;
+      value.runner.fail = (args) => {
+        if (args[0] !== "push") return undefined;
+        owned = false;
+        return pushResult === "non-fast-forward"
+          ? Object.assign(new Error("GIT_COMMAND_FAILED"), { kind: "non-fast-forward" })
+          : undefined;
+      };
+      await assert.rejects(publishGitHubPages({
+        ...publicationInput(value),
+        assertOwnership: async () => {
+          if (!owned) throw new Error("MIAOBI_OWNERSHIP_LOST");
+        },
+      }), { message: "MIAOBI_OWNERSHIP_LOST" });
+      assert.equal(value.runner.calls.filter(({ args }) => args[0] === "push").length, 1);
+      assert.deepEqual(value.admin.calls, []);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("fences Pages admin GET and mutation calls independently", async () => {
+  for (const loseDuring of ["GET", "PUT"] as const) {
+    let owned = true;
+    const calls: string[][] = [];
+    const runner: GitCommandRunner = {
+      async run(args) {
+        calls.push([...args]);
+        const method = args[args.indexOf("-X") + 1];
+        if (method === loseDuring) owned = false;
+        return method === "GET"
+          ? { stdout: JSON.stringify({ build_type: "legacy", source: { branch: "main", path: "/docs" } }), stderr: "" }
+          : { stdout: "{}", stderr: "" };
+      },
+    };
+    const admin = createGitHubPagesAdmin(runner, async () => {
+      if (!owned) throw new Error("MIAOBI_OWNERSHIP_LOST");
+    });
+    await assert.rejects(
+      admin.ensureBranchSource({ owner: "aurostars", repo: "magic-resume", branch: "gh-pages", path: "/" }),
+      { message: "MIAOBI_OWNERSHIP_LOST" },
+    );
+    assert.deepEqual(calls.map((args) => args[args.indexOf("-X") + 1]), loseDuring === "GET" ? ["GET"] : ["GET", "PUT"]);
+  }
+});
+
 test("retries a non-fast-forward in a fresh worktree and preserves the competing commit", async () => {
   const value = await fixture();
   try {

@@ -55,8 +55,17 @@ const FORBIDDEN_ASSET_HOSTS = [
   "jsdelivr.net",
   "workers.dev",
   "pages.dev",
+  "cloudflare.com",
   "cloudflareworkers.com",
 ];
+const TOS_HOST_PATTERN = /^(?:tos(?:-s3)?-[a-z0-9-]+\.volces\.com|[^.]+\.tos-[a-z0-9-]+\..+)$/;
+
+export function isForbiddenAssetHostname(value: string): boolean {
+  const hostname = value.toLowerCase().replace(/\.$/, "");
+  return FORBIDDEN_ASSET_HOSTS.some((forbidden) =>
+    hostname === forbidden || hostname.endsWith(`.${forbidden}`)
+  ) || TOS_HOST_PATTERN.test(hostname);
+}
 
 const LOCK_LEASE_MS = 60_000;
 const LOCK_MAX_CLOCK_SKEW_MS = 5_000;
@@ -129,10 +138,7 @@ function hasForbiddenAssetUrl(text: string): boolean {
   return candidates.some((candidate) => {
     try {
       const parsed = new URL(candidate.startsWith("//") ? `https:${candidate}` : candidate);
-      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
-      return FORBIDDEN_ASSET_HOSTS.some((forbidden) =>
-        hostname === forbidden || hostname.endsWith(`.${forbidden}`)
-      ) || hostname.split(".").some((label) => label === "tos" || label.startsWith("tos-"));
+      return isForbiddenAssetHostname(parsed.hostname);
     } catch {
       // Regex literals and operators may resemble protocol-relative URLs after
       // minification; only successfully parsed URL candidates can name a host.
@@ -750,14 +756,20 @@ function createdAtForRelease(releaseId: string): string {
   return `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)}T${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}:${timestamp.slice(12, 14)}.000Z`;
 }
 
-async function existingCreatedAt(path: string, expected: Omit<GitHubPagesManifest, "createdAt">): Promise<string | undefined> {
+async function existingRelease(
+  path: string,
+  expected: Omit<GitHubPagesManifest, "createdAt" | "releaseId">,
+): Promise<Pick<GitHubPagesManifest, "createdAt" | "releaseId"> | undefined> {
   try {
     const current = JSON.parse(await readFile(path, "utf8")) as GitHubPagesManifest;
-    const { createdAt, ...rest } = current;
-    if (JSON.stringify(rest) !== JSON.stringify(expected)) {
-      throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
-    }
-    return createdAt;
+    const { createdAt, releaseId, ...rest } = current;
+    if (
+      JSON.stringify(rest) !== JSON.stringify(expected) ||
+      !RELEASE_ID_PATTERN.test(releaseId) ||
+      !releaseId.startsWith(`${expected.sourceCommit.slice(0, 12)}-`) ||
+      createdAtForRelease(releaseId) !== createdAt
+    ) throw new MaterializationError("MIAOBI_RELEASE_CONFLICT");
+    return { createdAt, releaseId };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     if (error instanceof MaterializationError) throw error;
@@ -812,21 +824,21 @@ export async function materializeGitHubPagesRelease(input: {
 
   const releaseDirectory = join(pagesDirectory, "releases", input.sourceCommit);
   const manifestPath = join(releaseDirectory, "manifest.json");
-  const manifestWithoutTime: Omit<GitHubPagesManifest, "createdAt"> = {
+  const manifestWithoutIdentity: Omit<GitHubPagesManifest, "createdAt" | "releaseId"> = {
     schemaVersion: 1,
     provider: "github-pages",
     sourceCommit: input.sourceCommit,
-    releaseId: input.releaseId,
     baseUrl: `${input.pagesOrigin}${input.pagesBasePath}`,
     files: records,
   };
   const createdObjectPaths: string[] = [];
   const releaseWriter = await acquireWriterLock(pagesDirectory);
   try {
+    const existing = await existingRelease(manifestPath, manifestWithoutIdentity);
     const manifest: GitHubPagesManifest = {
-      ...manifestWithoutTime,
-      createdAt: await existingCreatedAt(manifestPath, manifestWithoutTime) ??
-        createdAtForRelease(input.releaseId),
+      ...manifestWithoutIdentity,
+      releaseId: existing?.releaseId ?? input.releaseId,
+      createdAt: existing?.createdAt ?? createdAtForRelease(input.releaseId),
     };
 
     const graphCreated = await installImmutableGraph(pagesDirectory, graphHash, assets);
@@ -853,7 +865,7 @@ export async function materializeGitHubPagesRelease(input: {
     releases = {
       ...releases,
       [input.sourceCommit]: {
-        releaseId: input.releaseId,
+        releaseId: manifest.releaseId,
         manifest: `releases/${input.sourceCommit}/manifest.json`,
       },
     };

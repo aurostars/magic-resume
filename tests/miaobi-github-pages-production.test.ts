@@ -236,10 +236,10 @@ test("a rerun reuses the identical Pages release while always creating new FaaS 
           return { stdout: JSON.stringify({ id, faas_url: `https://magic.solutionsuite.cn/api/faas/${id}` }), stderr: "" };
         },
       };
-      await deployMiaobi({
+      const state = await deployMiaobi({
         runner,
         gitCommit: COMMIT,
-        now: NOW,
+        now: attempt === 0 ? NOW : new Date("2026-09-15T11:00:00.000Z"),
         fetch: async (input) => {
           const url = String(input);
           if (url.includes("?__path=")) return healthyFaas(input);
@@ -249,8 +249,9 @@ test("a rerun reuses the identical Pages release while always creating new FaaS 
         publishPages: async ({ releaseId }) => { releases.push(releaseId); return publication(); },
         verifyPages: async () => undefined,
       });
+      assert.equal(state.releaseId, RELEASE_ID);
     }
-    assert.deepEqual(releases, [RELEASE_ID, RELEASE_ID]);
+    assert.deepEqual(releases, [RELEASE_ID, "59a06b5c2c12-20260915110000"]);
     assert.deepEqual(faasIds, ["api-1", "web-2", "api-3", "web-4"]);
   });
 });

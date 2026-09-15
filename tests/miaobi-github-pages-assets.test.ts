@@ -312,6 +312,9 @@ test("rejects forbidden asset-service URLs by decoded hostname", async () => {
     "//cdn.jsdelivr.net/npm/package/app.js",
     String.raw`https:\/\/tenant.pages.dev/app.js`,
     String.raw`https:\u002f\u002ftenant.workers.dev/app.js`,
+    "https://cdnjs.cloudflare.com/ajax/libs/app.js",
+    "https://bucket.tos-cn-beijing.volces.com/app.js",
+    "https://tos-s3-cn-beijing.volces.com/bucket/app.js",
   ];
   for (const forbiddenUrl of forbiddenUrls) {
     const { root, clientDirectory, pagesDirectory } = await fixture();
@@ -324,6 +327,16 @@ test("rejects forbidden asset-service URLs by decoded hostname", async () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("minified operators and regex syntax are not mistaken for provider URLs", async () => {
+  const { root, clientDirectory, pagesDirectory } = await fixture();
+  await writeFile(join(clientDirectory, "app.js"), "const ratio=a//b;const protocol=/https?:\\/\\//;const label='tos-example.com';");
+  try {
+    await assert.doesNotReject(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

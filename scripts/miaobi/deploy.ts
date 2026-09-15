@@ -718,8 +718,12 @@ async function commitGenerationState(
   lock: StateLock,
   deployment: MiaobiDeploymentState,
   resolved: { generation: number; ownerToken: string } = lock,
+  hook?: DeploymentTransactionHook,
 ): Promise<string> {
   const path = join(state.states.directory, generationFileName(lock.generation, lock.ownerToken));
+  await lock.assertOwnership();
+  await transactionPoint(hook, "before-state-commit", lock);
+  await lock.assertOwnership();
   await immutableJson(state.states, path, lock.ownerToken, {
     schemaVersion: 1,
     generation: lock.generation,
@@ -728,6 +732,8 @@ async function commitGenerationState(
     resolvedOwnerToken: resolved.ownerToken,
     deployment,
   });
+  await transactionPoint(hook, "after-state-write", lock);
+  await lock.assertOwnership();
   return path;
 }
 
@@ -976,13 +982,13 @@ async function pendingState(
         ? parsePending(external, platformOrigin)
         : await migrate(external);
     const legacyPending = legacy === undefined ? undefined : await migrate(legacy);
+    if (hasAmbiguousLegacyPhase) throw codedError("MIAOBI_PAGE_RESULT_UNCERTAIN");
     if (externalPending?.phase !== undefined && externalPending.phase !== "prepared") {
       throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
     }
     if (externalPending && legacyPending && !samePendingSemantics(externalPending, legacyPending)) {
       throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
     }
-    if (hasAmbiguousLegacyPhase) throw codedError("MIAOBI_PAGE_RESULT_UNCERTAIN");
     const pending = externalPending ?? legacyPending;
     if (pending && !committed.some((record) => sameDeploymentSemantics(record.deployment, pending.deployment))) {
       if (unresolved.length > 0) throw codedError("MIAOBI_PENDING_RECOVERY_REQUIRED");
@@ -1175,7 +1181,7 @@ async function publishPage(runner: MagicBuilderRunner, pagePath: string, platfor
 }
 
 export type DeploymentTransactionEvent = {
-  point: "before-pending-commit" | "before-page-inflight" | "before-page-confirmation" | "before-state-commit" | "before-pending-cleanup";
+  point: "before-pending-commit" | "before-page-inflight" | "before-page-confirmation" | "before-state-commit" | "after-state-write" | "before-pending-cleanup";
   generation: number;
   ownerToken: string;
 };
@@ -1225,13 +1231,10 @@ async function recoverConfirmedPage(
   const record = unresolved[0];
   if (!record) return undefined;
   if (markerCommit(record.pending.apiBuildMarker) !== gitCommit) throw codedError("MIAOBI_PENDING_INVALID");
-  await lock.assertOwnership();
-  await transactionPoint(hook, "before-state-commit", lock);
-  await lock.assertOwnership();
   await commitGenerationState(state, lock, record.pending.deployment, {
     generation: record.resolvedGeneration,
     ownerToken: record.resolvedOwnerToken,
-  });
+  }, hook);
   return record.pending.deployment;
 }
 
@@ -1274,9 +1277,7 @@ async function reconcilePending(
     await lock.assertOwnership();
     await transactionPoint(hook, "before-page-confirmation", lock);
     await publishPagePhase(recovery.pageConfirmed, "page-confirmed", lock, pending, record);
-    await transactionPoint(hook, "before-state-commit", lock);
-    await lock.assertOwnership();
-    await commitGenerationState(state, lock, pending.deployment, record);
+    await commitGenerationState(state, lock, pending.deployment, record, hook);
     await transactionPoint(hook, "before-pending-cleanup", lock);
     await lock.assertOwnership();
     if (!record.legacyAnchor && record.generation === lock.generation && record.ownerToken === lock.ownerToken) {
@@ -1356,14 +1357,17 @@ export async function deployMiaobi(options: {
       releaseId,
       runner: options.gitRunner ?? createGitCommandRunner(),
       admin: options.pagesAdmin,
+      assertOwnership: stateLock.assertOwnership,
     }));
     await fencedOperation(stateLock, async () => (options.verifyPages ?? verifyGitHubPagesRelease)({
       publication,
       fetchImpl: options.fetch,
     }));
+    const canonicalReleaseId = publication.manifest.releaseId;
     if (
       publication.manifest.schemaVersion !== 1 || publication.manifest.provider !== "github-pages" ||
-      publication.manifest.sourceCommit !== options.gitCommit || publication.manifest.releaseId !== releaseId ||
+      publication.manifest.sourceCommit !== options.gitCommit ||
+      releaseCommitPrefix(canonicalReleaseId) !== options.gitCommit.slice(0, 12) ||
       publication.manifest.baseUrl !== publication.pagesBaseUrl ||
       publication.pagesBaseUrl !== deployConfig.githubPages.baseUrl ||
       !/^[0-9a-f]{40}$/.test(publication.pagesCommit) ||
@@ -1408,7 +1412,7 @@ export async function deployMiaobi(options: {
       pagesBaseUrl: publication.pagesBaseUrl,
       releaseManifestUrl: publication.releaseManifestUrl,
       apiBuildMarker: apiMetadata.buildMarker,
-      releaseId,
+      releaseId: canonicalReleaseId,
       apiFaasId: api.id,
       apiFaasUrl: api.url,
       webFaasId: web.id,
@@ -1461,9 +1465,7 @@ export async function deployMiaobi(options: {
       pendingDeployment,
       stateLock,
     );
-    await transactionPoint(options.transactionHook, "before-state-commit", stateLock);
-    await stateLock.assertOwnership();
-    await commitGenerationState(stateStorage, stateLock, deployment);
+    await commitGenerationState(stateStorage, stateLock, deployment, stateLock, options.transactionHook);
     await transactionPoint(options.transactionHook, "before-pending-cleanup", stateLock);
     await stateLock.assertOwnership();
     await safeRemoveStaged(recoveryStorage.pending, pendingPath);

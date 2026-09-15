@@ -14,13 +14,15 @@ const DEFAULT_PUSH_ATTEMPTS = 3;
 const SOURCE_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const RELEASE_ID_PATTERN = /^[0-9a-f]{12}-\d{14}$/;
 
+type OwnershipFence = () => Promise<void>;
+
 export interface GitHubPagesAdmin {
   ensureBranchSource(input: {
     owner: "aurostars";
     repo: "magic-resume";
     branch: "gh-pages";
     path: "/";
-  }): Promise<void>;
+  }, assertOwnership?: OwnershipFence): Promise<void>;
 }
 
 export interface GitHubPagesPublication {
@@ -115,14 +117,30 @@ async function prepareTemporaryParent(repositoryDirectory: string): Promise<stri
   return parent;
 }
 
-async function fetchPages(repositoryDirectory: string, runner: GitCommandRunner): Promise<boolean> {
+async function fencedExternal<T>(assertOwnership: OwnershipFence | undefined, operation: () => Promise<T>): Promise<T> {
+  await assertOwnership?.();
   try {
-    await runner.run([
+    const result = await operation();
+    await assertOwnership?.();
+    return result;
+  } catch (error) {
+    await assertOwnership?.();
+    throw error;
+  }
+}
+
+async function fetchPages(
+  repositoryDirectory: string,
+  runner: GitCommandRunner,
+  assertOwnership?: OwnershipFence,
+): Promise<boolean> {
+  try {
+    await fencedExternal(assertOwnership, () => runner.run([
       "fetch",
       "--no-tags",
       "fork",
       "refs/heads/gh-pages:refs/remotes/fork/gh-pages",
-    ], { cwd: repositoryDirectory });
+    ], { cwd: repositoryDirectory }));
     return true;
   } catch (error) {
     if (isMissingRemoteBranch(error)) return false;
@@ -187,9 +205,10 @@ async function createPublicationAttempt(input: {
   sourceCommit: string;
   releaseId: string;
   runner: GitCommandRunner;
+  assertOwnership?: OwnershipFence;
   signal?: AbortSignal;
 }): Promise<{ manifest: GitHubPagesManifest; pagesCommit: string }> {
-  const branchExists = await fetchPages(input.repositoryDirectory, input.runner);
+  const branchExists = await fetchPages(input.repositoryDirectory, input.runner, input.assertOwnership);
   const parent = await prepareTemporaryParent(input.repositoryDirectory);
   const worktreeDirectory = await mkdtemp(join(parent, "publish-"));
   const orphanBranch = branchExists ? undefined : `miaobi-pages-${randomUUID()}`;
@@ -239,10 +258,10 @@ async function createPublicationAttempt(input: {
       cwd: worktreeDirectory,
       signal: input.signal,
     })).stdout.trim();
-    await input.runner.run(["push", "--porcelain", "fork", "HEAD:gh-pages"], {
+    await fencedExternal(input.assertOwnership, () => input.runner.run(["push", "--porcelain", "fork", "HEAD:gh-pages"], {
       cwd: worktreeDirectory,
       signal: input.signal,
-    });
+    }));
     return { manifest: materialized.manifest, pagesCommit };
   } catch (error) {
     originalError = error;
@@ -285,13 +304,16 @@ function pagesResponse(stdout: string): PagesConfiguration {
   }
 }
 
-export function createGitHubPagesAdmin(runner: GitCommandRunner = createGitHubCliRunner()): GitHubPagesAdmin {
+export function createGitHubPagesAdmin(
+  runner: GitCommandRunner = createGitHubCliRunner(),
+  defaultAssertOwnership?: OwnershipFence,
+): GitHubPagesAdmin {
   return {
-    async ensureBranchSource(input) {
+    async ensureBranchSource(input, assertOwnership = defaultAssertOwnership) {
       const endpoint = `repos/${input.owner}/${input.repo}/pages`;
       let current: PagesConfiguration | undefined;
       try {
-        const response = await runner.run(["api", "-X", "GET", endpoint]);
+        const response = await fencedExternal(assertOwnership, () => runner.run(["api", "-X", "GET", endpoint]));
         current = pagesResponse(response.stdout);
       } catch (error) {
         const notFound = (error as CommandError)?.kind === "not-found" ||
@@ -302,14 +324,14 @@ export function createGitHubPagesAdmin(runner: GitCommandRunner = createGitHubCl
         current?.buildType === "legacy" && current.source?.branch === input.branch &&
         current.source.path === input.path
       ) return;
-      await runner.run([
+      await fencedExternal(assertOwnership, () => runner.run([
         "api",
         "-X", current ? "PUT" : "POST",
         endpoint,
         "-f", "build_type=legacy",
         "-f", `source[branch]=${input.branch}`,
         "-f", `source[path]=${input.path}`,
-      ]);
+      ]));
     },
   };
 }
@@ -322,6 +344,7 @@ export async function publishGitHubPages(input: {
   runner: GitCommandRunner;
   admin?: GitHubPagesAdmin;
   maxPushAttempts?: number;
+  assertOwnership?: OwnershipFence;
   signal?: AbortSignal;
 }): Promise<GitHubPagesPublication> {
   if (
@@ -347,12 +370,12 @@ export async function publishGitHubPages(input: {
   }
   if (!published) throw new Error("MIAOBI_PAGES_PUSH_CONFLICT");
 
-  await (input.admin ?? createGitHubPagesAdmin()).ensureBranchSource({
+  await fencedExternal(input.assertOwnership, () => (input.admin ?? createGitHubPagesAdmin()).ensureBranchSource({
     owner: OWNER,
     repo: REPOSITORY,
     branch: BRANCH,
     path: "/",
-  });
+  }, input.assertOwnership));
   const pagesBaseUrl = `${PAGES_ORIGIN}${PAGES_BASE_PATH}`;
   return {
     ...published,

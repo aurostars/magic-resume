@@ -37,10 +37,15 @@ export default defineConfig({
       generateBundle(_options, bundle) {
         for (const artifact of Object.values(bundle)) {
           if (artifact.type === "chunk") {
-            artifact.code = artifact.code.replaceAll(
-              "PDFNodeStream only supports file:// URLs.",
-              "PDFNodeStream only supports local file URLs.",
-            );
+            artifact.code = artifact.code
+              .replaceAll(
+                "PDFNodeStream only supports file:// URLs.",
+                "PDFNodeStream only supports local file URLs.",
+              )
+              .replaceAll(
+                "https://cdnjs.cloudflare.com/ajax/libs/pdfobject/2.1.1/pdfobject.min.js",
+                "https://github.com/pipwerks/PDFObject",
+              );
           }
         }
       },

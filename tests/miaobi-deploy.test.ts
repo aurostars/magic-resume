@@ -1697,6 +1697,41 @@ test("page success is durably confirmed before state commit", { concurrency: fal
   });
 });
 
+test("state commit reports ownership loss after its immutable write on fresh, reconcile, and confirmed recovery paths", { concurrency: false }, async (context) => {
+  for (const path of ["fresh", "reconcile", "confirmed-recovery"] as const) {
+    await context.test(path, { concurrency: false }, async () => {
+      await inFixture(async (root) => {
+        globalThis.fetch = async (input) => healthyResponse(input);
+        if (path !== "fresh") {
+          await assert.rejects(deployMiaobi({
+            runner: fakeRunner([]),
+            gitCommit: COMMIT,
+            now: NOW,
+            transactionHook: async ({ point }) => {
+              if (point === (path === "reconcile" ? "before-page-inflight" : "before-state-commit")) {
+                throw new Error("prepare recovery path");
+              }
+            },
+          }));
+        }
+
+        await assert.rejects(deployMiaobi({
+          runner: fakeRunner([]),
+          gitCommit: COMMIT,
+          now: NOW,
+          transactionHook: async ({ point }) => {
+            if (point !== "after-state-write") return;
+            const lockPath = join(root, ".miaobi-recovery/deployment.lock");
+            await rm(lockPath);
+            await writeFile(lockPath, JSON.stringify({ token: "b".repeat(32) }), { mode: 0o600 });
+          },
+        }), (error: unknown) => (error as Error).message === "MIAOBI_OWNERSHIP_LOST");
+        assert.equal((await generationFiles(root, ".miaobi/states")).length, 1);
+      });
+    });
+  }
+});
+
 test("a crash after remote page success but before confirmation remains permanently uncertain", { concurrency: false }, async () => {
   await inFixture(async (root) => {
     globalThis.fetch = async (input) => healthyResponse(input);
@@ -1956,7 +1991,7 @@ test("a stale owner paused before cleanup cannot delete a successor pending or o
     let ownerAIdentity: { generation: number; ownerToken: string } | undefined;
     type GenerationDeployOptions = Parameters<typeof deployMiaobi>[0] & {
       transactionHook?: (event: {
-        point: "before-pending-commit" | "before-page-inflight" | "before-page-confirmation" | "before-state-commit" | "before-pending-cleanup";
+        point: "before-pending-commit" | "before-page-inflight" | "before-page-confirmation" | "before-state-commit" | "after-state-write" | "before-pending-cleanup";
         generation: number;
         ownerToken: string;
       }) => Promise<void>;
@@ -2078,7 +2113,7 @@ test("different external and legacy pending records block every page action and 
     let calls = 0;
     await assert.rejects(
       deployMiaobi({ runner: { async run() { calls += 1; throw new Error("must not run"); } }, gitCommit: COMMIT, now: NOW }),
-      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_RECOVERY_REQUIRED",
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
     );
     assert.equal(calls, 0);
     assert.equal(await readFile(externalPath, "utf8"), externalBefore);
@@ -2124,7 +2159,7 @@ test("mixed legacy and Pages anchors remain frozen when their page phase is unkn
         gitCommit: COMMIT,
         now: NOW,
       }),
-      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_RECOVERY_REQUIRED",
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
     );
     assert.equal(calls, 0);
     assert.equal((await readFile(externalPath, "utf8")).length > 0, true);
@@ -2137,7 +2172,7 @@ test("mixed legacy and Pages anchors remain frozen when their page phase is unkn
         gitCommit: COMMIT,
         now: new Date("2026-09-13T16:47:00.000Z"),
       }),
-      (error: unknown) => (error as Error).message === "MIAOBI_PENDING_RECOVERY_REQUIRED",
+      (error: unknown) => (error as Error).message === "MIAOBI_PAGE_RESULT_UNCERTAIN",
     );
     assert.deepEqual(nextEvents, []);
   });

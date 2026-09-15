@@ -18,7 +18,10 @@ import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { materializeGitHubPagesRelease } from "../scripts/miaobi/github-pages-assets";
+import {
+  isForbiddenAssetHostname,
+  materializeGitHubPagesRelease,
+} from "../scripts/miaobi/github-pages-assets";
 
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
@@ -36,7 +39,6 @@ const exactRuntimeOrigins = new Set([
   "https://aurostars.github.io",
   "https://ark.cn-beijing.volces.com",
   "https://bailian.console.aliyun.com",
-  "https://cdnjs.cloudflare.com",
   "https://console.anthropic.com",
   "https://console.volcengine.com",
   "https://dashscope.aliyuncs.com",
@@ -198,6 +200,7 @@ function extractAbsoluteHttpUrls(text: string): string[] {
 function assertAllowedGeneratedUrl(value: string, assetOrigins: ReadonlySet<string>): void {
   const url = new URL(value);
   assert.ok(url.protocol === "http:" || url.protocol === "https:");
+  assert.equal(isForbiddenAssetHostname(url.hostname), false, `forbidden generated URL provider: ${url.hostname}`);
   if (exactEmbeddedDataUrls.has(value)) return;
   assert.equal(url.username, "", `generated URL must not contain a username: ${value}`);
   assert.equal(url.password, "", `generated URL must not contain a password: ${value}`);
@@ -213,6 +216,73 @@ function assertAllowedGeneratedUrl(value: string, assetOrigins: ReadonlySet<stri
     `unexpected generated URL origin: ${url.origin} (${value})`,
   );
 }
+
+async function generatedViolations(paths: string[], assetOrigins: ReadonlySet<string>): Promise<string[]> {
+  const violations: string[] = [];
+  for (const path of paths.filter((candidate) => textExtensions.has(extname(candidate).toLowerCase()))) {
+    const text = await readFile(path, "utf8");
+    const artifact = relative(root, path);
+    for (const forbidden of ["/Users/", "/workspace/", "file://"] as const) {
+      if (text.toLowerCase().includes(forbidden.toLowerCase())) violations.push(`${artifact} contains ${forbidden}`);
+    }
+    if (/sourceMappingURL=(?:file:|\/Users\/|\/workspace\/)/i.test(text)) {
+      violations.push(`${artifact} contains an absolute sourceMappingURL`);
+    }
+    for (const secret of knownTestSecrets) {
+      if (text.includes(secret)) violations.push(`${artifact} contains a known test secret`);
+    }
+    for (const url of extractAbsoluteHttpUrls(text)) {
+      try {
+        assertAllowedGeneratedUrl(url, assetOrigins);
+      } catch (error) {
+        violations.push(`${artifact}: ${(error as Error).message}`);
+      }
+    }
+  }
+  return violations;
+}
+
+test("production provider rules reject exact Cloudflare and TOS hostnames without substring false positives", () => {
+  for (const hostname of [
+    "cloudflare.com",
+    "cdnjs.cloudflare.com",
+    "tenant.cloudflareworkers.com",
+    "tenant.workers.dev",
+    "bucket.tos-cn-beijing.volces.com",
+    "tos-s3-cn-beijing.volces.com",
+    "bucket.tos-cn-beijing.volces.com.",
+  ]) assert.equal(isForbiddenAssetHostname(hostname), true, hostname);
+
+  for (const hostname of [
+    "notcloudflare.com",
+    "workers.dev.example.com",
+    "tos-example.com",
+    "example.com",
+  ]) assert.equal(isForbiddenAssetHostname(hostname), false, hostname);
+
+  assert.deepEqual(extractAbsoluteHttpUrls("const ratio=a//b;const re=/https?:\\/\\//;"), []);
+});
+
+test("production scanning rejects forbidden providers in both Miaobi and Pages trees", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "miaobi-provider-contract-"));
+  try {
+    const miaobi = join(fixture, "dist/miaobi/client");
+    const pages = join(fixture, "dist/gh-pages-staging/objects/hash");
+    await mkdir(miaobi, { recursive: true });
+    await mkdir(pages, { recursive: true });
+    await writeFile(join(miaobi, "runtime.js"), 'fetch("https://tenant.cloudflareworkers.com/app.js")');
+    await writeFile(join(pages, "asset.js"), 'fetch("https://bucket.tos-cn-beijing.volces.com/app.js")');
+    const violations = await generatedViolations([
+      ...await filesRecursively(miaobi),
+      ...await filesRecursively(pages),
+    ], new Set(["https://aurostars.github.io"]));
+    assert.equal(violations.length, 2);
+    assert.match(violations[0], /cloudflareworkers\.com/);
+    assert.match(violations[1], /tos-cn-beijing\.volces\.com/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
 
 test("one-layer lowercase JS escapes cannot hide a disallowed absolute URL", () => {
   const rejected = [
@@ -365,29 +435,7 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       ...await filesRecursively(miaobiDirectory),
       ...await filesRecursively(pagesDirectory),
     ];
-    const violations: string[] = [];
-    for (const path of generatedFiles.filter((candidate) => textExtensions.has(extname(candidate).toLowerCase()))) {
-      const text = await readFile(path, "utf8");
-      const artifact = relative(root, path);
-      for (const forbidden of [
-        "workers.dev", "/Users/", "/workspace/", "file://", "tos.example", "cloudflareworkers.com",
-      ] as const) {
-        if (text.toLowerCase().includes(forbidden.toLowerCase())) violations.push(`${artifact} contains ${forbidden}`);
-      }
-      if (/sourceMappingURL=(?:file:|\/Users\/|\/workspace\/)/i.test(text)) {
-        violations.push(`${artifact} contains an absolute sourceMappingURL`);
-      }
-      for (const secret of knownTestSecrets) {
-        if (text.includes(secret)) violations.push(`${artifact} contains a known test secret`);
-      }
-      for (const url of extractAbsoluteHttpUrls(text)) {
-        try {
-          assertAllowedGeneratedUrl(url, assetOrigins);
-        } catch (error) {
-          violations.push(`${artifact}: ${(error as Error).message}`);
-        }
-      }
-    }
+    const violations = await generatedViolations(generatedFiles, assetOrigins);
     assert.deepEqual(violations, []);
 
     await runScript("build");
