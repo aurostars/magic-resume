@@ -250,6 +250,9 @@ test("production provider rules reject exact Cloudflare and TOS hostnames withou
     "tenant.workers.dev",
     "bucket.tos-cn-beijing.volces.com",
     "tos-s3-cn-beijing.volces.com",
+    "tos-cn-beijing.ivolces.com",
+    "tos-s3-cn-beijing.ivolces.com",
+    "bucket.tos-s3-cn-beijing.ivolces.com",
     "bucket.tos-cn-beijing.volces.com.",
   ]) assert.equal(isForbiddenAssetHostname(hostname), true, hostname);
 
@@ -257,6 +260,9 @@ test("production provider rules reject exact Cloudflare and TOS hostnames withou
     "notcloudflare.com",
     "workers.dev.example.com",
     "tos-example.com",
+    "bucket.tos-cn.example.com",
+    "bucket.tos-s3-cn-beijing.volces.com.example",
+    "nested.bucket.tos-cn-beijing.ivolces.com",
     "example.com",
   ]) assert.equal(isForbiddenAssetHostname(hostname), false, hostname);
 
@@ -270,15 +276,28 @@ test("production scanning rejects forbidden providers in both Miaobi and Pages t
     const pages = join(fixture, "dist/gh-pages-staging/objects/hash");
     await mkdir(miaobi, { recursive: true });
     await mkdir(pages, { recursive: true });
-    await writeFile(join(miaobi, "runtime.js"), 'fetch("https://tenant.cloudflareworkers.com/app.js")');
-    await writeFile(join(pages, "asset.js"), 'fetch("https://bucket.tos-cn-beijing.volces.com/app.js")');
+    await writeFile(
+      join(miaobi, "runtime.js"),
+      'fetch("https://tos-cn-beijing.ivolces.com/app.js");fetch("https://bucket.tos-cn.example.com/app.js")',
+    );
+    await writeFile(
+      join(pages, "asset.js"),
+      'fetch("https://bucket.tos-s3-cn-beijing.volces.com/app.js");fetch("https://bucket.tos-cn-beijing.volces.com.example/app.js")',
+    );
     const violations = await generatedViolations([
       ...await filesRecursively(miaobi),
       ...await filesRecursively(pages),
-    ], new Set(["https://aurostars.github.io"]));
+    ], new Set([
+      "https://aurostars.github.io",
+      "https://bucket.tos-cn.example.com",
+      "https://bucket.tos-cn-beijing.volces.com.example",
+    ]));
     assert.equal(violations.length, 2);
-    assert.match(violations[0], /cloudflareworkers\.com/);
-    assert.match(violations[1], /tos-cn-beijing\.volces\.com/);
+    const details = violations.join("\n");
+    assert.match(details, /tos-cn-beijing\.ivolces\.com/);
+    assert.match(details, /bucket\.tos-s3-cn-beijing\.volces\.com/);
+    assert.doesNotMatch(details, /bucket\.tos-cn\.example\.com/);
+    assert.doesNotMatch(details, /volces\.com\.example/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

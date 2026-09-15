@@ -58,7 +58,7 @@ const FORBIDDEN_ASSET_HOSTS = [
   "cloudflare.com",
   "cloudflareworkers.com",
 ];
-const TOS_HOST_PATTERN = /^(?:tos(?:-s3)?-[a-z0-9-]+\.volces\.com|[^.]+\.tos-[a-z0-9-]+\..+)$/;
+const TOS_HOST_PATTERN = /^(?:[a-z0-9-]+\.)?tos(?:-s3)?-[a-z0-9-]+\.(?:volces|ivolces)\.com$/;
 
 export function isForbiddenAssetHostname(value: string): boolean {
   const hostname = value.toLowerCase().replace(/\.$/, "");

@@ -5,7 +5,10 @@ import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { materializeGitHubPagesRelease } from "../scripts/miaobi/github-pages-assets";
+import {
+  isForbiddenAssetHostname,
+  materializeGitHubPagesRelease,
+} from "../scripts/miaobi/github-pages-assets";
 
 const SOURCE_COMMIT = "d26c16fcfcec3cb7b73d3d6002aebdf212422f21";
 const RELEASE_ID = "d26c16fcfcec-20260914142200";
@@ -214,7 +217,7 @@ test("computes the same graph and objects independent of file creation order", a
 test("rejects unsafe final text and leaves no release metadata", async () => {
   const unsafeValues = [
     "https://legacy.workers.dev/asset.js",
-    "https://bucket.tos-cn.example.com/asset.js",
+    "https://tos-cn-beijing.ivolces.com/asset.js",
     "/Users/private/project/file.js",
     "/workspace/project/file.js",
     "file:///tmp/asset.js",
@@ -304,6 +307,21 @@ test("rejects credential, resume, session and local-state JSON instead of publis
       await rm(root, { recursive: true, force: true });
     }
   }
+});
+
+test("rejects only official TOS endpoint and bucket hostname shapes", () => {
+  for (const hostname of [
+    "tos-cn-beijing.ivolces.com",
+    "tos-s3-cn-beijing.ivolces.com",
+    "bucket.tos-cn-beijing.volces.com",
+    "bucket.tos-s3-cn-beijing.ivolces.com",
+  ]) assert.equal(isForbiddenAssetHostname(hostname), true, hostname);
+
+  for (const hostname of [
+    "bucket.tos-cn.example.com",
+    "bucket.tos-s3-cn-beijing.volces.com.example",
+    "nested.bucket.tos-cn-beijing.volces.com",
+  ]) assert.equal(isForbiddenAssetHostname(hostname), false, hostname);
 });
 
 test("rejects forbidden asset-service URLs by decoded hostname", async () => {
