@@ -8,7 +8,7 @@ import type { GitHubPagesAssetRecord, GitHubPagesManifest } from "./types";
 const PAGES_ORIGIN = "https://aurostars.github.io";
 const PAGES_PREFIX = "/magic-resume/";
 const MANIFEST_LIMIT = 5 * 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 12_000;
 const MAX_REDIRECTS = 5;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;

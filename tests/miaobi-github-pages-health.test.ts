@@ -135,8 +135,9 @@ test("uses a fresh timeout signal for every request instead of one cumulative re
   const { publication, bodies } = releaseFixture();
   const signals: AbortSignal[] = [];
   let signalFactoryCalls = 0;
-  const signalFactory = (_timeoutMs: number): AbortSignal => {
+  const signalFactory = (timeoutMs: number): AbortSignal => {
     signalFactoryCalls += 1;
+    assert.equal(timeoutMs, 12_000);
     const signal = AbortSignal.timeout(30);
     signals.push(signal);
     return signal;
@@ -335,6 +336,7 @@ test("follows same-prefix redirects manually with a fresh signal for every netwo
   let signalFactoryCalls = 0;
   const signalFactory = (timeoutMs: number): AbortSignal => {
     signalFactoryCalls += 1;
+    assert.equal(timeoutMs, 12_000);
     return AbortSignal.timeout(timeoutMs);
   };
   let redirectedBodyCancelled = false;
