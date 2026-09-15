@@ -1017,11 +1017,20 @@ function parseFaasPublishResponse(value: unknown, platformOrigin: string): { id:
     typeof (value as { id?: unknown }).id !== "string" ||
     typeof (value as { faas_url?: unknown }).faas_url !== "string"
   ) throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
-  const id = validateResourceId((value as { id: unknown }).id);
-  return {
-    id,
-    url: validatePublishedUrl((value as { faas_url: string }).faas_url, `/api/faas/${id}`, platformOrigin),
-  };
+  const recordId = validateResourceId((value as { id: unknown }).id);
+  try {
+    const url = new URL((value as { faas_url: string }).faas_url);
+    const path = /^\/api\/faas\/([^/]+)$/.exec(url.pathname);
+    if (
+      url.origin !== platformOrigin || url.username || url.password ||
+      url.search || url.hash || !path
+    ) throw new Error();
+    const id = validateResourceId(path[1]);
+    if (recordId !== id && recordId !== `rec${id}`) throw new Error();
+    return { id, url: url.toString() };
+  } catch {
+    throw new MagicBuilderError("MIAOBI_INVALID_RESPONSE");
+  }
 }
 
 function validatePagePublishResponse(value: unknown, platformOrigin: string): void {

@@ -453,10 +453,42 @@ test("publishes assets, API, Web, checks both URLs, then switches the page and a
   });
 });
 
+test("accepts the magic-builder 1.4.0 record ID while persisting the FaaS ID from faas_url", { concurrency: false }, async () => {
+  await inFixture(async () => {
+    const events: string[] = [];
+    const base = fakeRunner(events);
+    const runner: MagicBuilderRunner = {
+      async run(args) {
+        if (args[0] === "faas" && args.includes("magic-resume-api")) {
+          events.push("api");
+          return {
+            stdout: JSON.stringify({
+              id: "recvvg6U4dOrDU",
+              faas_url: "https://magic.solutionsuite.cn/api/faas/vvg6U4dOrDU",
+            }),
+            stderr: "",
+          };
+        }
+        return base.run(args);
+      },
+    };
+    globalThis.fetch = async (input) => healthyResponse(input, "vvg6U4dOrDU");
+
+    const state = await deployMiaobi({ runner, gitCommit: COMMIT, now: NOW });
+
+    assert.equal(state.apiFaasId, "vvg6U4dOrDU");
+    assert.equal(state.apiFaasUrl, "https://magic.solutionsuite.cn/api/faas/vvg6U4dOrDU");
+  });
+});
+
 test("rejects untrusted or ID-mismatched FaaS publication responses before health checks", { concurrency: false }, async (context) => {
   const invalid = [
     { id: "", faas_url: "https://magic.solutionsuite.cn/api/faas/" },
     { id: "api-new", faas_url: "https://magic.solutionsuite.cn/api/faas/other" },
+    { id: "recwrong", faas_url: "https://magic.solutionsuite.cn/api/faas/api-new" },
+    { id: "recapi-new", faas_url: "https://magic.solutionsuite.cn/api/faas/api-new/extra" },
+    { id: "recapi-new", faas_url: "https://magic.solutionsuite.cn/api/faas/api-new?preview=1" },
+    { id: "recapi-new", faas_url: "https://user:secret" + String.fromCharCode(64) + "magic.solutionsuite.cn/api/faas/api-new" },
     { id: "api-new", faas_url: "https://evil.workers.dev/api/faas/api-new" },
     { id: "api-new", faas_url: "https://127.0.0.1/api/faas/api-new" },
     { id: "api-new", faas_url: "https://10.0.0.1/api/faas/api-new" },
