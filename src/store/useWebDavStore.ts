@@ -208,11 +208,19 @@ export const createWebDavStore = (
         partialize: selectPersistedWebDavState,
         merge: (persistedState, currentState) => {
           const persisted = persistedState as Partial<PersistedWebDavState>;
+          const persistedSettings: Partial<WebDavSettings> = persisted.settings
+            && typeof persisted.settings === "object"
+            && !Array.isArray(persisted.settings)
+            ? persisted.settings
+            : {};
           return {
             ...currentState,
             settings: {
               ...currentState.settings,
-              ...(persisted.settings ?? {}),
+              ...persistedSettings,
+              autoSyncEnabled: typeof persistedSettings.autoSyncEnabled === "boolean"
+                ? persistedSettings.autoSyncEnabled
+                : currentState.settings.autoSyncEnabled,
             },
             deviceId: persisted.deviceId ?? currentState.deviceId,
           };

@@ -57,8 +57,11 @@ function memoryStorage(initial?: StorageValue<PersistedWebDavState>) {
   return { storage, read: () => value };
 }
 
-test("new WebDAV settings enable automatic sync by default", () => {
+test("new WebDAV settings enable automatic sync by default after empty hydration", async () => {
   const store = createWebDavStore(memoryStorage().storage);
+
+  await store.persist.rehydrate();
+
   assert.equal(store.getState().settings.autoSyncEnabled, true);
 });
 
@@ -81,6 +84,38 @@ test("persisted false keeps automatic sync disabled", async () => {
   await store.persist.rehydrate();
 
   assert.equal(store.getState().settings.autoSyncEnabled, false);
+});
+
+test("persisted automatic sync accepts only booleans and otherwise uses the default", async () => {
+  for (const [persistedValue, expected] of [
+    [true, true],
+    [false, false],
+    [undefined, true],
+    [null, true],
+    ["false", true],
+    [0, true],
+    [{ enabled: false }, true],
+  ] as const) {
+    const memory = memoryStorage({
+      state: {
+        settings: {
+          baseUrl: "https://dav.example.test/root",
+          username: "account@example.test",
+          password: "app-password",
+          remoteDirectory: "/legacy/",
+          autoSyncEnabled: persistedValue,
+        },
+        deviceId: "device-legacy",
+      },
+      version: 0,
+    } as unknown as StorageValue<PersistedWebDavState>);
+    const store = createWebDavStore(memory.storage);
+
+    await store.persist.rehydrate();
+
+    assert.equal(store.getState().settings.autoSyncEnabled, expected);
+    assert.equal(store.getState().settings.baseUrl, "https://dav.example.test/root");
+  }
 });
 
 test("persisted settings without the auto-sync field receive the new default", async () => {

@@ -117,14 +117,61 @@ test("English and Chinese expose the complete equivalent WebDAV locale contract"
   }
 });
 
-test("settings exposes labeled DOM controls and protects the password", () => {
-  resetStores();
-  renderLocalized(React.createElement(WebDavSection));
-  assert.equal(screen.getByLabelText("Server URL").tagName, "INPUT");
-  assert.equal(screen.getByLabelText("Username").tagName, "INPUT");
-  assert.equal(screen.getByLabelText("Password").getAttribute("type"), "password");
-  assert.equal(screen.getByLabelText("Remote directory").tagName, "INPUT");
-  assert.equal(screen.getByRole("switch", { name: "Automatically sync changes" }).getAttribute("aria-checked"), "true");
+test("newly hydrated settings expose labeled controls and default automatic sync on", async () => {
+  const originalStorage = useWebDavStore.persist.getOptions().storage;
+  try {
+    useWebDavStore.persist.setOptions({
+      storage: {
+        getItem: () => null,
+        setItem: () => {},
+        removeItem: () => {},
+      },
+    });
+    resetStores();
+    await act(async () => { await useWebDavStore.persist.rehydrate(); });
+
+    renderLocalized(React.createElement(WebDavSection));
+
+    assert.equal(screen.getByLabelText("Server URL").tagName, "INPUT");
+    assert.equal(screen.getByLabelText("Username").tagName, "INPUT");
+    assert.equal(screen.getByLabelText("Password").getAttribute("type"), "password");
+    assert.equal(screen.getByLabelText("Remote directory").tagName, "INPUT");
+    assert.equal(screen.getByRole("switch", { name: "Automatically sync changes" }).getAttribute("aria-checked"), "true");
+  } finally {
+    useWebDavStore.persist.setOptions({ storage: originalStorage });
+  }
+});
+
+test("a hydrated persisted false renders automatic sync disabled", async () => {
+  const originalStorage = useWebDavStore.persist.getOptions().storage;
+  try {
+    useWebDavStore.persist.setOptions({
+      storage: {
+        getItem: () => ({
+          state: {
+            settings: {
+              baseUrl: "https://dav.example.test/root",
+              username: "alice",
+              password: "app-password",
+              remoteDirectory: "/magic-resume/",
+              autoSyncEnabled: false,
+            },
+            deviceId: "hydrated-device",
+          },
+          version: 0,
+        }),
+        setItem: () => {},
+        removeItem: () => {},
+      },
+    });
+    await act(async () => { await useWebDavStore.persist.rehydrate(); });
+
+    renderLocalized(React.createElement(WebDavSection));
+
+    assert.equal(screen.getByRole("switch", { name: "Automatically sync changes" }).getAttribute("aria-checked"), "false");
+  } finally {
+    useWebDavStore.persist.setOptions({ storage: originalStorage });
+  }
 });
 
 test("Test and Sync persist normalized drafts before calling the controller and prevent duplicate actions", async () => {
@@ -178,6 +225,51 @@ test("Test and Sync persist normalized drafts before calling the controller and 
     action: "sync",
     settings: { ...normalized, remoteDirectory: "/next/" },
   });
+});
+
+test("ordinary WebDAV URLs keep legacy trailing-slash normalization in settings", async () => {
+  resetStores();
+  const user = userEvent.setup({ document });
+  const calls: unknown[] = [];
+  const controller = {
+    testConnection: async () => { calls.push(useWebDavStore.getState().settings); },
+    syncNow: async () => {},
+    resolveConflict: async () => {},
+  };
+  renderLocalized(React.createElement(WebDavSection, { controllerProvider: () => controller }));
+
+  await user.type(screen.getByLabelText("Server URL"), "https://dav.example.test/root///");
+  await user.click(screen.getByRole("button", { name: "Test connection" }));
+  await waitFor(() => assert.equal(calls.length, 1));
+
+  assert.equal((calls[0] as { baseUrl: string }).baseUrl, "https://dav.example.test/root");
+});
+
+test("invalid URL normalization reports a safe localized error without calling the controller", async () => {
+  resetStores();
+  const user = userEvent.setup({ document });
+  const unsafeInput = "https://dav.examp\u200cle.test/private-password";
+  let providerCalls = 0;
+  renderLocalized(React.createElement(WebDavSection, {
+    controllerProvider: () => {
+      providerCalls += 1;
+      return {
+        testConnection: async () => {},
+        syncNow: async () => {},
+        resolveConflict: async () => {},
+      };
+    },
+  }));
+
+  await user.type(screen.getByLabelText("Server URL"), unsafeInput);
+  await user.click(screen.getByRole("button", { name: "Test connection" }));
+
+  await waitFor(() => assert.ok(screen.getByRole("alert")));
+  assert.equal(providerCalls, 0);
+  assert.equal(useWebDavStore.getState().settings.baseUrl, "");
+  assert.deepEqual(useWebDavStore.getState().error, { code: "UNKNOWN", status: null });
+  assert.equal(screen.getByRole("alert").textContent, en.dashboard.settings.webdav.unknownError);
+  assert.doesNotMatch(screen.getByRole("alert").textContent ?? "", /private-password/);
 });
 
 test("clear confirmation is a trapped modal, closes with Escape, restores focus, and guards deletion", async () => {

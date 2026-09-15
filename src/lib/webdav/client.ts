@@ -88,9 +88,10 @@ export function normalizeWebDavBaseUrl(value: string): URL {
 
   url.search = "";
   url.hash = "";
+  url.pathname = url.pathname.replace(/\/+$/, "");
   if (
     exactHostname === "dav.jianguoyun.com"
-    && (url.pathname === "/dav" || url.pathname === "/dav/")
+    && url.pathname === "/dav"
   ) {
     url.pathname = "/dav/";
   }

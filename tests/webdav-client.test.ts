@@ -55,6 +55,18 @@ async function expectWebDavError(
   return caught;
 }
 
+test("ordinary WebDAV base URLs remove all trailing slashes before path joining", async () => {
+  assert.equal(
+    normalizeWebDavBaseUrl("https://dav.example.test/root///").toString(),
+    "https://dav.example.test/root",
+  );
+
+  const { calls, fetchImpl } = recordingFetch();
+  const client = clientWith(fetchImpl, { baseUrl: "https://dav.example.test/root///" });
+  await client.options("/folder");
+  assert.equal(calls[0].url, "https://dav.example.test/root/folder");
+});
+
 test("WebDAV base URL removes trailing invisible format characters", () => {
   assert.equal(
     normalizeWebDavBaseUrl(" https://dav.jianguoyun.com/dav\u200c ").toString(),

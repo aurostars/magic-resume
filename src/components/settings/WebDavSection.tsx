@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getWebDavSyncController } from "@/hooks/useWebDavSync";
 import { normalizeWebDavBaseUrl } from "@/lib/webdav/client";
+import { WebDavError } from "@/lib/webdav/errors";
 import type { WebDavSyncController } from "@/lib/webdav/controller";
 import { useLocale, useTranslations } from "@/i18n/compat/client";
 import {
@@ -85,11 +86,23 @@ export const WebDavSection = ({
   };
 
   const run = async (action: "test" | "sync") => {
-    const normalized = normalizeSettings(draft);
-    setDraft(normalized);
-    setSettings(normalized);
     setPendingAction(action);
     try {
+      let normalized: WebDavSettings;
+      try {
+        normalized = normalizeSettings(draft);
+      } catch (caught) {
+        const safeError = caught instanceof WebDavError
+          ? caught
+          : new WebDavError("UNKNOWN");
+        useWebDavStore.getState().setError({
+          code: safeError.code,
+          status: safeError.status,
+        });
+        return;
+      }
+      setDraft(normalized);
+      setSettings(normalized);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       const controller = controllerProvider();
       if (!controller) {
@@ -98,8 +111,14 @@ export const WebDavSection = ({
       }
       if (action === "test") await controller.testConnection();
       else await controller.syncNow("manual");
-    } catch {
-      // The controller has already reduced failures to safe store state.
+    } catch (caught) {
+      if (caught instanceof WebDavError) {
+        useWebDavStore.getState().setError({
+          code: caught.code,
+          status: caught.status,
+        });
+      }
+      // Other controller failures have already been reduced to safe store state.
     } finally {
       setPendingAction(null);
     }
