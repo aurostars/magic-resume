@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getWebDavSyncController } from "@/hooks/useWebDavSync";
+import { normalizeWebDavBaseUrl } from "@/lib/webdav/client";
 import type { WebDavSyncController } from "@/lib/webdav/controller";
 import { useLocale, useTranslations } from "@/i18n/compat/client";
 import {
@@ -39,7 +40,7 @@ const normalizeDirectory = (value: string): string => {
 
 const normalizeSettings = (draft: WebDavSettings): WebDavSettings => ({
   ...draft,
-  baseUrl: draft.baseUrl.trim().replace(/\/+$/, ""),
+  baseUrl: normalizeWebDavBaseUrl(draft.baseUrl).toString(),
   username: draft.username.trim(),
   remoteDirectory: normalizeDirectory(draft.remoteDirectory),
 });

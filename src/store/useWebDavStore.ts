@@ -83,7 +83,7 @@ const defaultSettings = (): WebDavSettings => ({
   username: "",
   password: "",
   remoteDirectory: "/magic-resume/",
-  autoSyncEnabled: false,
+  autoSyncEnabled: true,
 });
 
 export const createDefaultWebDavState = (
@@ -210,7 +210,10 @@ export const createWebDavStore = (
           const persisted = persistedState as Partial<PersistedWebDavState>;
           return {
             ...currentState,
-            settings: persisted.settings ?? currentState.settings,
+            settings: {
+              ...currentState.settings,
+              ...(persisted.settings ?? {}),
+            },
             deviceId: persisted.deviceId ?? currentState.deviceId,
           };
         },

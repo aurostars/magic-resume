@@ -57,7 +57,60 @@ function memoryStorage(initial?: StorageValue<PersistedWebDavState>) {
   return { storage, read: () => value };
 }
 
-test("defaults use the app directory, disable automatic sync, and keep one generated device ID", () => {
+test("new WebDAV settings enable automatic sync by default", () => {
+  const store = createWebDavStore(memoryStorage().storage);
+  assert.equal(store.getState().settings.autoSyncEnabled, true);
+});
+
+test("persisted false keeps automatic sync disabled", async () => {
+  const memory = memoryStorage({
+    state: {
+      settings: {
+        baseUrl: "https://dav.jianguoyun.com/dav/",
+        username: "account@example.test",
+        password: "app-password",
+        remoteDirectory: "/magic-resume/",
+        autoSyncEnabled: false,
+      },
+      deviceId: "device-existing",
+    },
+    version: 0,
+  });
+  const store = createWebDavStore(memory.storage);
+
+  await store.persist.rehydrate();
+
+  assert.equal(store.getState().settings.autoSyncEnabled, false);
+});
+
+test("persisted settings without the auto-sync field receive the new default", async () => {
+  const legacy = memoryStorage({
+    state: {
+      settings: {
+        baseUrl: "https://dav.jianguoyun.com/dav/",
+        username: "account@example.test",
+        password: "app-password",
+        remoteDirectory: "/legacy/",
+      },
+      deviceId: "device-legacy",
+    },
+    version: 0,
+  } as unknown as StorageValue<PersistedWebDavState>);
+  const store = createWebDavStore(legacy.storage);
+
+  await store.persist.rehydrate();
+
+  assert.deepEqual(store.getState().settings, {
+    baseUrl: "https://dav.jianguoyun.com/dav/",
+    username: "account@example.test",
+    password: "app-password",
+    remoteDirectory: "/legacy/",
+    autoSyncEnabled: true,
+  });
+  assert.equal(store.getState().deviceId, "device-legacy");
+});
+
+test("defaults use the app directory and keep one generated device ID", () => {
   const store = createWebDavStore(memoryStorage().storage);
   const originalDeviceId = store.getState().deviceId;
 
@@ -66,12 +119,13 @@ test("defaults use the app directory, disable automatic sync, and keep one gener
     username: "",
     password: "",
     remoteDirectory: "/magic-resume/",
-    autoSyncEnabled: false,
+    autoSyncEnabled: true,
   });
   assert.ok(originalDeviceId.length > 0);
   store.getState().setSettings({ baseUrl: "https://dav.example.test" });
   store.getState().clearCredentials();
   assert.equal(store.getState().deviceId, originalDeviceId);
+  assert.equal(store.getState().settings.autoSyncEnabled, true);
 });
 
 test("credentials, settings, and device ID are persisted and rehydrated without baseline", async () => {

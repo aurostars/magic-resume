@@ -225,7 +225,7 @@
         "syncing": "正在执行 WebDAV 操作…",
         "success": "WebDAV 操作已成功完成。",
         "nonAtomicWarning": "同步已完成，但服务器不支持原子文件替换。请避免同时在其他设备上编辑。",
-        "authError": "身份验证失败，请检查用户名和密码。",
+        "authError": "身份验证失败。密码应使用在坚果云“账户信息 → 安全选项 → 第三方应用管理”中生成的第三方应用密码，不是登录密码。",
         "forbiddenError": "访问被拒绝，请检查账号的目录权限。",
         "networkError": "无法连接 WebDAV 服务器，请检查网络和服务器设置。",
         "timeoutError": "WebDAV 请求超时，请稍后重试。",

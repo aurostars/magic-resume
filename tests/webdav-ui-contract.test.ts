@@ -124,7 +124,7 @@ test("settings exposes labeled DOM controls and protects the password", () => {
   assert.equal(screen.getByLabelText("Username").tagName, "INPUT");
   assert.equal(screen.getByLabelText("Password").getAttribute("type"), "password");
   assert.equal(screen.getByLabelText("Remote directory").tagName, "INPUT");
-  assert.equal(screen.getByRole("switch", { name: "Automatically sync changes" }).getAttribute("aria-checked"), "false");
+  assert.equal(screen.getByRole("switch", { name: "Automatically sync changes" }).getAttribute("aria-checked"), "true");
 });
 
 test("Test and Sync persist normalized drafts before calling the controller and prevent duplicate actions", async () => {
@@ -146,7 +146,9 @@ test("Test and Sync persist normalized drafts before calling the controller and 
   };
   renderLocalized(React.createElement(WebDavSection, { controllerProvider: () => controller }));
 
-  await user.type(screen.getByLabelText("Server URL"), "  https://dav.example.test/root/  ");
+  const serverUrl = screen.getByLabelText("Server URL");
+  await user.click(serverUrl);
+  await user.paste("https://dav.jianguoyun.com/dav\u200c");
   await user.type(screen.getByLabelText("Username"), "  alice  ");
   await user.type(screen.getByLabelText("Password"), " secret ");
   await user.clear(screen.getByLabelText("Remote directory"));
@@ -156,11 +158,11 @@ test("Test and Sync persist normalized drafts before calling the controller and 
   await user.click(screen.getByRole("button", { name: "Test connection" }));
   await waitFor(() => assert.equal(calls.length, 1));
   const normalized = {
-    baseUrl: "https://dav.example.test/root",
+    baseUrl: "https://dav.jianguoyun.com/dav/",
     username: "alice",
     password: " secret ",
     remoteDirectory: "/resumes/",
-    autoSyncEnabled: false,
+    autoSyncEnabled: true,
   };
   assert.deepEqual(calls[0], { action: "test", settings: normalized });
   assert.equal(screen.getByRole("button", { name: "Test connection" }).hasAttribute("disabled"), true);
@@ -266,6 +268,45 @@ test("conflict choices identify the resume and all conflict actions are disabled
   ));
   for (const name of ["Keep local version", "Use cloud version"]) {
     assert.equal(screen.getByRole("button", { name }).hasAttribute("disabled"), true);
+  }
+});
+
+test("authentication guidance names Jianguoyun's third-party app password", () => {
+  useWebDavStore.getState().setError({ code: "AUTH", status: 401 });
+  renderLocalized(React.createElement(WebDavSection));
+
+  assert.equal(
+    screen.getByRole("alert").textContent,
+    "Authentication failed. Use the third-party app password generated under Jianguoyun Account Information → Security Options → Third-party App Management, not your login password.",
+  );
+  assert.match(
+    zh.dashboard.settings.webdav.authError,
+    /坚果云“账户信息 → 安全选项 → 第三方应用管理”.*第三方应用密码.*不是登录密码/,
+  );
+});
+
+test("forbidden, timeout, server, and unknown errors stay sanitized and localized", () => {
+  const secret = "raw-upstream-password-and-url";
+  const cases = [
+    ["FORBIDDEN", en.dashboard.settings.webdav.forbiddenError],
+    ["TIMEOUT", en.dashboard.settings.webdav.timeoutError],
+    ["SERVER", en.dashboard.settings.webdav.networkError],
+    ["UNKNOWN", en.dashboard.settings.webdav.unknownError],
+  ] as const;
+
+  for (const [code, message] of cases) {
+    const unsafeError = {
+      code,
+      status: 500,
+      message: secret,
+      rawError: new Error(secret),
+    };
+    useWebDavStore.getState().setError(unsafeError);
+    const view = renderLocalized(React.createElement(WebDavSection));
+    const alert = screen.getByRole("alert");
+    assert.equal(alert.textContent, message);
+    assert.doesNotMatch(alert.textContent ?? "", new RegExp(secret));
+    view.unmount();
   }
 });
 
