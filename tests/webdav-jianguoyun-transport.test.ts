@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import {
   createJianguoyunProxyFetch,
+  isJianguoyunWebDavUrl,
   WebDavClient,
   type WebDavClientConfig,
 } from "../src/lib/webdav/client";
+import { handleJianguoyunWebDavProxy } from "../src/lib/server/jianguoyun-webdav-proxy";
 
 interface RecordedCall {
   url: string;
@@ -78,6 +80,7 @@ test("Jianguoyun OPTIONS uses the same-origin API endpoint", async () => {
   assert.deepEqual(await payload(calls[0]), {
     method: "OPTIONS",
     path: "magic-resume/",
+    pathEncoding: "url-path",
     username: "account@example.test",
     password: "app-password",
   });
@@ -99,6 +102,7 @@ test("Jianguoyun PROPFIND forwards Depth and XML body through the envelope", asy
   assert.deepEqual(await payload(calls[0]), {
     method: "PROPFIND",
     path: "magic-resume/",
+    pathEncoding: "url-path",
     username: "account@example.test",
     password: "app-password",
     headers: { depth: "1", "content-type": "application/xml" },
@@ -121,6 +125,7 @@ test("Jianguoyun MOVE converts Destination to a relative Jianguoyun path", async
   assert.deepEqual(await payload(calls[0]), {
     method: "MOVE",
     path: "magic-resume/file.tmp",
+    pathEncoding: "url-path",
     username: "account@example.test",
     password: "app-password",
     headers: {
@@ -201,4 +206,87 @@ test("a trailing-dot or lookalike Jianguoyun hostname does not select the proxy"
     assert.equal(calls[0].url.startsWith("https://magic.solutionsuite.cn/"), false);
     assert.equal(new URL(calls[0].url).hostname, new URL(baseUrl).hostname);
   }
+});
+
+test("client envelope and Task 1 handler preserve literal path semantics", async () => {
+  const cases = [
+    ["percent%name", "percent%25name"],
+    ["literal%20name", "literal%2520name"],
+    ["literal%2520name", "literal%252520name"],
+    ["目录", "%E7%9B%AE%E5%BD%95"],
+    ["literal%2Fslash", "literal%252Fslash"],
+  ] as const;
+
+  for (const [literalName, expectedUpstreamName] of cases) {
+    let upstreamUrl = "";
+    const apiFetch: typeof fetch = async (input, init) => {
+      const apiRequest = new Request(String(input), init);
+      return handleJianguoyunWebDavProxy(apiRequest, {
+        fetchImpl: async (upstreamInput) => {
+          upstreamUrl = String(upstreamInput);
+          return new Response("content", { status: 200 });
+        },
+      });
+    };
+    globalThis.fetch = apiFetch;
+
+    assert.equal(await new WebDavClient(config).getText(`/${literalName}`), "content");
+    assert.equal(
+      upstreamUrl,
+      `https://dav.jianguoyun.com/dav/${expectedUpstreamName}`,
+      literalName,
+    );
+  }
+});
+
+test("Jianguoyun proxy fetch applies merged Request method headers body and signal", async () => {
+  const { calls, fetchImpl } = recordingApiFetch();
+  const controller = new AbortController();
+  const request = new Request("https://dav.jianguoyun.com/dav/magic-resume/item.json", {
+    method: "PUT",
+    headers: { "If-Match": '"revision-1"', "Content-Type": "application/json" },
+    body: "request-body",
+    signal: controller.signal,
+  });
+
+  await createJianguoyunProxyFetch(config, fetchImpl)(request);
+
+  assert.deepEqual(await payload(calls[0]), {
+    method: "PUT",
+    path: "magic-resume/item.json",
+    pathEncoding: "url-path",
+    username: "account@example.test",
+    password: "app-password",
+    headers: { "content-type": "application/json", "if-match": '"revision-1"' },
+    body: "request-body",
+  });
+  const forwardedSignal = calls[0].init.signal;
+  assert.ok(forwardedSignal);
+  assert.equal(forwardedSignal.aborted, false);
+  controller.abort();
+  assert.equal(forwardedSignal.aborted, true);
+});
+
+test("Jianguoyun URL detection and public proxy fetch reject HTTP", async () => {
+  const httpUrl = new URL("http://dav.jianguoyun.com/dav/magic-resume/");
+  assert.equal(isJianguoyunWebDavUrl(httpUrl), false);
+  assert.equal(isJianguoyunWebDavUrl(new URL("https://dav.jianguoyun.com:8443/dav/")), false);
+
+  const { calls, fetchImpl } = recordingApiFetch();
+  await assert.rejects(
+    createJianguoyunProxyFetch(config, fetchImpl)(httpUrl, { method: "GET" }),
+    (error: unknown) => error instanceof Error && error.message === "UNKNOWN",
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("default runtime automatically selects the Jianguoyun proxy endpoint", async () => {
+  Reflect.deleteProperty(globalThis, "window");
+  const { calls, fetchImpl } = recordingApiFetch(new Response(null, { status: 204 }));
+  globalThis.fetch = fetchImpl;
+
+  await new WebDavClient(config).options("/magic-resume/");
+
+  assert.equal(calls[0].url, "/api/webdav/jianguoyun");
+  assert.equal((await payload(calls[0])).pathEncoding, "url-path");
 });

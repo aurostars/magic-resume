@@ -480,3 +480,43 @@ test("a never-settling reader cancel cannot block an oversized stream rejection"
   assert.equal(response.status, 502);
   assert.ok(pulls <= 3, `oversized response pulled ${pulls} chunks`);
 });
+
+test("url-path envelopes preserve one encoded layer without weakening path safety", async () => {
+  const upstreamUrls: string[] = [];
+  for (const [path, expected] of [
+    ["literal%2520name", "literal%2520name"],
+    ["percent%25name", "percent%25name"],
+    ["%E7%9B%AE%E5%BD%95", "%E7%9B%AE%E5%BD%95"],
+  ]) {
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      path,
+      pathEncoding: "url-path",
+    }), {
+      fetchImpl: async (input) => {
+        upstreamUrls.push(String(input));
+        return new Response(null, { status: 204 });
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(upstreamUrls.at(-1), `https://dav.jianguoyun.com/dav/${expected}`);
+  }
+
+  for (const path of ["%2e%2e/stolen", "safe/%2Fstolen", "safe/%5Cstolen"]) {
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      path,
+      pathEncoding: "url-path",
+    }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
+    assert.equal(response.status, 400, path);
+  }
+});
+
+test("the proxy rejects unknown path encoding modes", async () => {
+  const response = await handleJianguoyunWebDavProxy(proxyRequest({
+    ...validPayload,
+    pathEncoding: "decode-all",
+  }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
+
+  assert.equal(response.status, 400);
+});

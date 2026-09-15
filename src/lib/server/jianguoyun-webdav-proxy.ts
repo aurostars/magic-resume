@@ -4,6 +4,7 @@ export type JianguoyunWebDavMethod =
 export interface JianguoyunProxyRequest {
   method: JianguoyunWebDavMethod;
   path: string;
+  pathEncoding?: "url-path";
   username: string;
   password: string;
   headers?: Record<string, string>;
@@ -119,10 +120,19 @@ function decodePathSegment(segment: string): string | undefined {
   }
 }
 
+function decodeUrlPathSegment(segment: string): string | undefined {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
 function fixedUpstreamUrl(
   path: unknown,
   username?: string,
   password?: string,
+  pathEncoding?: "url-path",
 ): URL | undefined {
   if (
     typeof path !== "string"
@@ -135,7 +145,9 @@ function fixedUpstreamUrl(
 
   const encodedSegments: string[] = [];
   for (const segment of path.split("/")) {
-    const decoded = decodePathSegment(segment);
+    const decoded = pathEncoding === "url-path"
+      ? decodeUrlPathSegment(segment)
+      : decodePathSegment(segment);
     if (
       decoded === undefined
       || decoded === "."
@@ -174,6 +186,7 @@ function isProxyRequest(value: unknown): value is JianguoyunProxyRequest {
   return typeof candidate.method === "string"
     && ALLOWED_METHODS.has(candidate.method as JianguoyunWebDavMethod)
     && typeof candidate.path === "string"
+    && (candidate.pathEncoding === undefined || candidate.pathEncoding === "url-path")
     && typeof candidate.username === "string"
     && candidate.username.length > 0
     && !/[:\u0000-\u001F\u007F-\u009F]/.test(candidate.username)
@@ -215,7 +228,12 @@ export async function handleJianguoyunWebDavProxy(
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const target = fixedUpstreamUrl(payload.path, payload.username, payload.password);
+    const target = fixedUpstreamUrl(
+      payload.path,
+      payload.username,
+      payload.password,
+      payload.pathEncoding,
+    );
     if (!target) return invalidRequest();
 
     const headers = new Headers();
@@ -228,6 +246,7 @@ export async function handleJianguoyunWebDavProxy(
         headers.get("Destination"),
         payload.username,
         payload.password,
+        payload.pathEncoding,
       );
       if (!destination) return invalidRequest();
       headers.set("Destination", destination.href);

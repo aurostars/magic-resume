@@ -103,7 +103,10 @@ export type WebDavFetch = (
 ) => Promise<Response>;
 
 export function isJianguoyunWebDavUrl(value: URL): boolean {
-  return value.hostname === "dav.jianguoyun.com" && value.pathname.startsWith("/dav/");
+  return value.protocol === "https:"
+    && value.hostname === "dav.jianguoyun.com"
+    && value.port === ""
+    && value.pathname.startsWith("/dav/");
 }
 
 function jianguoyunRelativePath(value: URL): string {
@@ -125,9 +128,15 @@ export function createJianguoyunProxyFetch(
   config: WebDavClientConfig,
   fetchImpl: typeof fetch = fetch,
 ): WebDavFetch {
-  return async (input, init = {}) => {
-    const target = input instanceof Request ? new URL(input.url) : new URL(String(input));
-    const headers = new Headers(init.headers);
+  return async (input, init) => {
+    let request: Request;
+    try {
+      request = new Request(input, init);
+    } catch {
+      throw new WebDavError("UNKNOWN");
+    }
+    const target = new URL(request.url);
+    const headers = new Headers(request.headers);
     const destination = headers.get("Destination");
     if (destination !== null) {
       headers.set("Destination", jianguoyunRelativePath(new URL(destination)));
@@ -138,16 +147,14 @@ export function createJianguoyunProxyFetch(
       if (JIANGUOYUN_REQUEST_HEADERS.has(name)) forwardedHeaders[name] = value;
     });
     const envelope: Record<string, unknown> = {
-      method: init.method ?? "GET",
+      method: request.method,
       path: jianguoyunRelativePath(target),
+      pathEncoding: "url-path",
       username: config.username,
       password: config.password,
     };
     if (Object.keys(forwardedHeaders).length > 0) envelope.headers = forwardedHeaders;
-    if (init.body !== undefined && init.body !== null) {
-      if (typeof init.body !== "string") throw new WebDavError("UNKNOWN");
-      envelope.body = init.body;
-    }
+    if (request.body !== null) envelope.body = await request.text();
 
     return fetchImpl(getApiRequestUrl("/api/webdav/jianguoyun"), {
       method: "POST",
@@ -156,7 +163,7 @@ export function createJianguoyunProxyFetch(
         "Cache-Control": "no-store",
       },
       body: JSON.stringify(envelope),
-      signal: init.signal,
+      signal: request.signal,
     });
   };
 }
