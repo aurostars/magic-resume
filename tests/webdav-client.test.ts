@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WebDavClient } from "../src/lib/webdav/client";
+import {
+  normalizeWebDavBaseUrl,
+  WebDavClient,
+} from "../src/lib/webdav/client";
 import { WebDavError } from "../src/lib/webdav/errors";
 
 type FetchCall = { url: string; init: RequestInit };
@@ -52,6 +55,55 @@ async function expectWebDavError(
   return caught;
 }
 
+test("WebDAV base URL removes trailing invisible format characters", () => {
+  assert.equal(
+    normalizeWebDavBaseUrl(" https://dav.jianguoyun.com/dav\u200c ").toString(),
+    "https://dav.jianguoyun.com/dav/",
+  );
+});
+
+function assertEdgeCharacterIsRemoved(character: string): void {
+  assert.equal(
+    normalizeWebDavBaseUrl(`${character}https://dav.jianguoyun.com/dav${character}`).toString(),
+    "https://dav.jianguoyun.com/dav/",
+  );
+}
+
+test("WebDAV base URL removes U+200B at the edges", () => {
+  assertEdgeCharacterIsRemoved("\u200B");
+});
+
+test("WebDAV base URL removes U+200D at the edges", () => {
+  assertEdgeCharacterIsRemoved("\u200D");
+});
+
+test("WebDAV base URL removes U+2060 at the edges", () => {
+  assertEdgeCharacterIsRemoved("\u2060");
+});
+
+test("WebDAV base URL removes U+FEFF at the edges", () => {
+  assertEdgeCharacterIsRemoved("\uFEFF");
+});
+
+test("WebDAV base URL removes combinations of whitespace and invisible characters at both ends", () => {
+  assert.equal(
+    normalizeWebDavBaseUrl(" \u200B\u200C\u200D\u2060\uFEFFhttps://dav.jianguoyun.com/dav\uFEFF\u2060\u200D\u200C\u200B \n").toString(),
+    "https://dav.jianguoyun.com/dav/",
+  );
+});
+
+test("WebDAV base URL rejects embedded invisible format characters", async () => {
+  for (const value of [
+    "https://dav.jiang\u200Boyun.com/dav",
+    "https://dav.jianguoyun.com/da\u200Cv",
+    "https://dav.jianguoyun.com/dav/ma\u200Dgic-resume",
+    "https://dav.jianguoyun.com/dav/ma\u2060gic-resume",
+    "https://dav.jianguoyun.com/dav/ma\uFEFFgic-resume",
+  ]) {
+    await expectWebDavError(() => normalizeWebDavBaseUrl(value), "UNKNOWN", null);
+  }
+});
+
 test("rejects every non-HTTPS WebDAV base URL at the real client boundary", async () => {
   const { calls, fetchImpl } = recordingFetch();
 
@@ -77,6 +129,7 @@ test("rejects workers.dev and credential-bearing WebDAV base URLs before fetch",
     "https://tenant.workers.dev/root",
     "https://tenant.workers.dev./root",
     "https://alice:secret@dav.example.test/root",
+    "https://dav.example.test:8443/root",
   ]) {
     await expectWebDavError(
       () => clientWith(fetchImpl, { baseUrl }),

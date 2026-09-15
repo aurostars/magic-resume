@@ -1,3 +1,4 @@
+import { getApiRequestUrl } from "../../config/runtime-endpoints";
 import { WebDavError, type WebDavErrorCode } from "./errors";
 
 export interface WebDavClientConfig {
@@ -54,21 +55,19 @@ export interface WebDavClientApi {
 
 type RequestKind = "DEFAULT" | "DIRECTORY" | "MOVE";
 
-function safeBaseUrl(value: string): URL {
+const EDGE_IGNORABLE = /^[\s\u200B\u200C\u200D\u2060\uFEFF]+|[\s\u200B\u200C\u200D\u2060\uFEFF]+$/gu;
+const INVISIBLE_FORMAT_CHARACTER = /[\u200B\u200C\u200D\u2060\uFEFF]/;
+
+export function normalizeWebDavBaseUrl(value: string): URL {
+  const normalizedValue = value.replace(EDGE_IGNORABLE, "");
+  if (INVISIBLE_FORMAT_CHARACTER.test(normalizedValue)) {
+    throw new WebDavError("UNKNOWN");
+  }
+
   let url: URL;
   try {
-    url = new URL(value);
+    url = new URL(normalizedValue);
   } catch {
-    throw new WebDavError("UNKNOWN");
-  }
-
-  if (url.username || url.password) {
-    throw new WebDavError("UNKNOWN");
-  }
-
-  const forbiddenWorkerSuffix = ["workers", "dev"].join(".");
-  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
-  if (hostname === forbiddenWorkerSuffix || hostname.endsWith(`.${forbiddenWorkerSuffix}`)) {
     throw new WebDavError("UNKNOWN");
   }
 
@@ -76,9 +75,90 @@ function safeBaseUrl(value: string): URL {
     throw new WebDavError("HTTPS_REQUIRED");
   }
 
+  if (url.username || url.password || url.port) {
+    throw new WebDavError("UNKNOWN");
+  }
+
+  const forbiddenWorkerSuffix = ["workers", "dev"].join(".");
+  const exactHostname = url.hostname.toLowerCase();
+  const hostname = exactHostname.replace(/\.$/, "");
+  if (hostname === forbiddenWorkerSuffix || hostname.endsWith(`.${forbiddenWorkerSuffix}`)) {
+    throw new WebDavError("UNKNOWN");
+  }
+
   url.search = "";
   url.hash = "";
+  if (
+    exactHostname === "dav.jianguoyun.com"
+    && (url.pathname === "/dav" || url.pathname === "/dav/")
+  ) {
+    url.pathname = "/dav/";
+  }
   return url;
+}
+
+export type WebDavFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export function isJianguoyunWebDavUrl(value: URL): boolean {
+  return value.hostname === "dav.jianguoyun.com" && value.pathname.startsWith("/dav/");
+}
+
+function jianguoyunRelativePath(value: URL): string {
+  if (!isJianguoyunWebDavUrl(value)) throw new WebDavError("UNKNOWN");
+  return value.pathname.slice("/dav/".length);
+}
+
+const JIANGUOYUN_REQUEST_HEADERS = new Set([
+  "depth",
+  "destination",
+  "overwrite",
+  "if",
+  "if-match",
+  "if-none-match",
+  "content-type",
+]);
+
+export function createJianguoyunProxyFetch(
+  config: WebDavClientConfig,
+  fetchImpl: typeof fetch = fetch,
+): WebDavFetch {
+  return async (input, init = {}) => {
+    const target = input instanceof Request ? new URL(input.url) : new URL(String(input));
+    const headers = new Headers(init.headers);
+    const destination = headers.get("Destination");
+    if (destination !== null) {
+      headers.set("Destination", jianguoyunRelativePath(new URL(destination)));
+    }
+
+    const forwardedHeaders: Record<string, string> = {};
+    headers.forEach((value, name) => {
+      if (JIANGUOYUN_REQUEST_HEADERS.has(name)) forwardedHeaders[name] = value;
+    });
+    const envelope: Record<string, unknown> = {
+      method: init.method ?? "GET",
+      path: jianguoyunRelativePath(target),
+      username: config.username,
+      password: config.password,
+    };
+    if (Object.keys(forwardedHeaders).length > 0) envelope.headers = forwardedHeaders;
+    if (init.body !== undefined && init.body !== null) {
+      if (typeof init.body !== "string") throw new WebDavError("UNKNOWN");
+      envelope.body = init.body;
+    }
+
+    return fetchImpl(getApiRequestUrl("/api/webdav/jianguoyun"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+      body: JSON.stringify(envelope),
+      signal: init.signal,
+    });
+  };
 }
 
 function basicAuthorization(username: string, password: string): string {
@@ -253,13 +333,16 @@ const davChild = (element: XmlElement, localName: string): XmlElement | null =>
 export class WebDavClient implements WebDavClientApi {
   private readonly baseUrl: URL;
   private readonly authorization: string;
+  private readonly fetchImpl: WebDavFetch;
 
   constructor(
     private readonly config: WebDavClientConfig,
-    private readonly fetchImpl: typeof fetch = fetch,
+    fetchImpl?: typeof fetch,
   ) {
-    this.baseUrl = safeBaseUrl(config.baseUrl);
+    this.baseUrl = normalizeWebDavBaseUrl(config.baseUrl);
     this.authorization = basicAuthorization(config.username, config.password);
+    this.fetchImpl = fetchImpl
+      ?? (isJianguoyunWebDavUrl(this.baseUrl) ? createJianguoyunProxyFetch(config) : fetch);
   }
 
   async options(path: string, signal?: AbortSignal): Promise<WebDavCapabilities> {
