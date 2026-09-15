@@ -1,0 +1,784 @@
+{
+  "schemaVersion": 1,
+  "provider": "github-pages",
+  "sourceCommit": "16b437536843c1c0b9bae78da8e4ecf7b62b914d",
+  "baseUrl": "https://aurostars.github.io/magic-resume/",
+  "files": {
+    "assets/Combination-Bo8Q2wqd.js": {
+      "relativePath": "assets/Combination-Bo8Q2wqd.js",
+      "contentHash": "f8c867cec82d997d0de09c94ce43e3401f03d5a50032641c72424ff525f329d6",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/Combination-Bo8Q2wqd.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/Combination-Bo8Q2wqd.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/Combination-Bo8Q2wqd.js",
+      "size": 26114
+    },
+    "assets/Logo-C_iyE3bD.js": {
+      "relativePath": "assets/Logo-C_iyE3bD.js",
+      "contentHash": "bebb8fb315f9cd377d5c01b25e3610c33ef55b31ee1c708c49857c6254b2dea7",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/Logo-C_iyE3bD.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/Logo-C_iyE3bD.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/Logo-C_iyE3bD.js",
+      "size": 599
+    },
+    "assets/_id-bpXUIzyb.js": {
+      "relativePath": "assets/_id-bpXUIzyb.js",
+      "contentHash": "c8aa35b88d41b37c1747cd81095062faffc195f79827f9dbce1fbae291ed43cd",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/_id-bpXUIzyb.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/_id-bpXUIzyb.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/_id-bpXUIzyb.js",
+      "size": 1057
+    },
+    "assets/_locale-phseSa_d.js": {
+      "relativePath": "assets/_locale-phseSa_d.js",
+      "contentHash": "6a5b1cfb097e0a7ab8252dd89c1ce0a5f701ee71828a9279fad068fc8e1fa4b5",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/_locale-phseSa_d.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/_locale-phseSa_d.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/_locale-phseSa_d.js",
+      "size": 24804
+    },
+    "assets/accordion-DsXL6bz1.js": {
+      "relativePath": "assets/accordion-DsXL6bz1.js",
+      "contentHash": "9c2d219ebf1b52935a3b9a03c673e033f85ccae92e61420bb3c45c87575ca43d",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/accordion-DsXL6bz1.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/accordion-DsXL6bz1.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/accordion-DsXL6bz1.js",
+      "size": 30996
+    },
+    "assets/ai-CYb41Orl.js": {
+      "relativePath": "assets/ai-CYb41Orl.js",
+      "contentHash": "9e5e24bfa2b304ea70534cfb0515e85a6bffc1dacaacb5cd8d9825690bd3839c",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/ai-CYb41Orl.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/ai-CYb41Orl.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/ai-CYb41Orl.js",
+      "size": 28259
+    },
+    "assets/card-CVmKJONm.js": {
+      "relativePath": "assets/card-CVmKJONm.js",
+      "contentHash": "fc56d21ba895b60afc8b26bcd17146f9a128d5b47158a528deb7c7ade54b1ad2",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/card-CVmKJONm.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/card-CVmKJONm.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/card-CVmKJONm.js",
+      "size": 3119
+    },
+    "assets/dashboard-DW87RVU8.js": {
+      "relativePath": "assets/dashboard-DW87RVU8.js",
+      "contentHash": "4425a65b7c23a78af74cdd3929766a9c8458dd15b00093253d01012520087038",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/dashboard-DW87RVU8.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/dashboard-DW87RVU8.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/dashboard-DW87RVU8.js",
+      "size": 20663
+    },
+    "assets/font-CYnr5l8O.css": {
+      "relativePath": "assets/font-CYnr5l8O.css",
+      "contentHash": "efd8eee21092bce5658be09d5d218ca7e5d5d77df2b36d2b18a379378ba320f9",
+      "contentType": "text/css; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/font-CYnr5l8O.css",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/font-CYnr5l8O.css",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/font-CYnr5l8O.css",
+      "size": 2627
+    },
+    "assets/globals-DjBItQGj.css": {
+      "relativePath": "assets/globals-DjBItQGj.css",
+      "contentHash": "c92dc3c0c72f68a57b8e18cdab0fcbf8ee148de9994933109f589bf53147c67f",
+      "contentType": "text/css; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/globals-DjBItQGj.css",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/globals-DjBItQGj.css",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/globals-DjBItQGj.css",
+      "size": 355868
+    },
+    "assets/highlighted-body-B3W2YXNL-XAoS_Opv.js": {
+      "relativePath": "assets/highlighted-body-B3W2YXNL-XAoS_Opv.js",
+      "contentHash": "60e77a31d761e113f683affd192ed6f589b28c49bf6dd88eea93921ea4cef7cb",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/highlighted-body-B3W2YXNL-XAoS_Opv.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/highlighted-body-B3W2YXNL-XAoS_Opv.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/highlighted-body-B3W2YXNL-XAoS_Opv.js",
+      "size": 1055
+    },
+    "assets/html2canvas.esm-DXEQVQnt.js": {
+      "relativePath": "assets/html2canvas.esm-DXEQVQnt.js",
+      "contentHash": "7b07a9ca175c614e8e7de447198d35b0d161dd50db2c63b5f7fd6ea0e1e876f2",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/html2canvas.esm-DXEQVQnt.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/html2canvas.esm-DXEQVQnt.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/html2canvas.esm-DXEQVQnt.js",
+      "size": 201041
+    },
+    "assets/index-BDVp-4g0.js": {
+      "relativePath": "assets/index-BDVp-4g0.js",
+      "contentHash": "8f7e29652b75a7cc3b04281905e19879cdd79e9e7db1753453f1b747db0ad073",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BDVp-4g0.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BDVp-4g0.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BDVp-4g0.js",
+      "size": 142
+    },
+    "assets/index-BdQq_4o_.js": {
+      "relativePath": "assets/index-BdQq_4o_.js",
+      "contentHash": "302541c92aa7e2402be57fa8241a0d67e3b17496cdf3645c716ff3b239f03e28",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BdQq_4o_.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BdQq_4o_.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BdQq_4o_.js",
+      "size": 64
+    },
+    "assets/index-BfgL9RNu.js": {
+      "relativePath": "assets/index-BfgL9RNu.js",
+      "contentHash": "b4c987b66f15b9cd0f666cdf38645670df03a95c044a7e5227c2521207a096d0",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BfgL9RNu.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BfgL9RNu.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BfgL9RNu.js",
+      "size": 26742
+    },
+    "assets/index-BwRVJ0Xm.js": {
+      "relativePath": "assets/index-BwRVJ0Xm.js",
+      "contentHash": "260849df0b9953b7c9e612b5757a6bfa2c6038e3450422c949000208613262eb",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BwRVJ0Xm.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BwRVJ0Xm.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-BwRVJ0Xm.js",
+      "size": 1192
+    },
+    "assets/index-CQcmOorf.js": {
+      "relativePath": "assets/index-CQcmOorf.js",
+      "contentHash": "f4938e96fe02b8aaf50dd0c096a18cdc63e67d08ef0940f230eee1d3aa725edb",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-CQcmOorf.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-CQcmOorf.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-CQcmOorf.js",
+      "size": 4405
+    },
+    "assets/index-CaVa3lap.js": {
+      "relativePath": "assets/index-CaVa3lap.js",
+      "contentHash": "baf0f3fc236f38a09ea3f1ff71759bebe7f81da7fe1da16fb97b268f998e172e",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-CaVa3lap.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-CaVa3lap.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-CaVa3lap.js",
+      "size": 377
+    },
+    "assets/index-Cav79HKA.js": {
+      "relativePath": "assets/index-Cav79HKA.js",
+      "contentHash": "df350d30caab63358e54e4c1c391b16ac2603531eb9f55a66b692798cee47a8a",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-Cav79HKA.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-Cav79HKA.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-Cav79HKA.js",
+      "size": 5111
+    },
+    "assets/index-D-UHA_DF.js": {
+      "relativePath": "assets/index-D-UHA_DF.js",
+      "contentHash": "7e3f2b371c90959556b60f7cef049394c92b34bf6bf1337a9c6909d7286fcb0c",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-D-UHA_DF.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-D-UHA_DF.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index-D-UHA_DF.js",
+      "size": 2053
+    },
+    "assets/index.es-zoAp9aZ0.js": {
+      "relativePath": "assets/index.es-zoAp9aZ0.js",
+      "contentHash": "6ef136f0aebaf3f91350eb7113f6d4729b6b99b1955728742e1aa4c757e8a64f",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index.es-zoAp9aZ0.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index.es-zoAp9aZ0.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/index.es-zoAp9aZ0.js",
+      "size": 157760
+    },
+    "assets/input-XkNg9skB.js": {
+      "relativePath": "assets/input-XkNg9skB.js",
+      "contentHash": "5ff1eaf36d4bc515fe94a12e1c3b1bff6f960261132b949cdec88f445f9c0ac7",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/input-XkNg9skB.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/input-XkNg9skB.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/input-XkNg9skB.js",
+      "size": 579
+    },
+    "assets/jspdf.es.min-BP3IQ0Cs.js": {
+      "relativePath": "assets/jspdf.es.min-BP3IQ0Cs.js",
+      "contentHash": "de2e6704dbe9d7c4ea163424b6b60347161982a69e9a9ad5109e64b12bd3fff4",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/jspdf.es.min-BP3IQ0Cs.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/jspdf.es.min-BP3IQ0Cs.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/jspdf.es.min-BP3IQ0Cs.js",
+      "size": 352353
+    },
+    "assets/label-Bp4lcVo3.js": {
+      "relativePath": "assets/label-Bp4lcVo3.js",
+      "contentHash": "bb837c2aee2790b8e9648adbfeaad993b9c617496ad06a6e3ce81f70eb998eeb",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/label-Bp4lcVo3.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/label-Bp4lcVo3.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/label-Bp4lcVo3.js",
+      "size": 562
+    },
+    "assets/main-Cw7Veb-9.js": {
+      "relativePath": "assets/main-Cw7Veb-9.js",
+      "contentHash": "1be565d3d995fc49a6529e63e02384a5b156a80bca89791ac98330b8547997f5",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/main-Cw7Veb-9.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/main-Cw7Veb-9.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/main-Cw7Veb-9.js",
+      "size": 1207990
+    },
+    "assets/mermaid-3ZIDBTTL-B4ffGVEb.css": {
+      "relativePath": "assets/mermaid-3ZIDBTTL-B4ffGVEb.css",
+      "contentHash": "c123e719a43f6a72b3b2ddd9196331371feb6d2120f5819183480661d1bfbc03",
+      "contentType": "text/css; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/mermaid-3ZIDBTTL-B4ffGVEb.css",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/mermaid-3ZIDBTTL-B4ffGVEb.css",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/mermaid-3ZIDBTTL-B4ffGVEb.css",
+      "size": 4081
+    },
+    "assets/mermaid-3ZIDBTTL-Cv3cid-a.js": {
+      "relativePath": "assets/mermaid-3ZIDBTTL-Cv3cid-a.js",
+      "contentHash": "e2cc41cc5f2f12c0b73263e6d0d8c8481e0969eb9bd7aad6c00e770e8ddc1d58",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/mermaid-3ZIDBTTL-Cv3cid-a.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/mermaid-3ZIDBTTL-Cv3cid-a.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/mermaid-3ZIDBTTL-Cv3cid-a.js",
+      "size": 1410306
+    },
+    "assets/navigation-Bj0Pmo36.js": {
+      "relativePath": "assets/navigation-Bj0Pmo36.js",
+      "contentHash": "532f0e5b64f04ef46f2359fa62454829824565eb761ed0c00bd06216aa21dd47",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/navigation-Bj0Pmo36.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/navigation-Bj0Pmo36.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/navigation-Bj0Pmo36.js",
+      "size": 337
+    },
+    "assets/pdf-CoaqzUNK.js": {
+      "relativePath": "assets/pdf-CoaqzUNK.js",
+      "contentHash": "e99a65297433b07e02c980e8b19ca54a02540f7af648d0b199cf0726a3c75efd",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf-CoaqzUNK.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf-CoaqzUNK.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf-CoaqzUNK.js",
+      "size": 459505
+    },
+    "assets/pdf-import-client-BBBoi7_N.js": {
+      "relativePath": "assets/pdf-import-client-BBBoi7_N.js",
+      "contentHash": "21378dcde70bad7e4a146398813c2319030433379ceccb2225fa79faa8b77c8a",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf-import-client-BBBoi7_N.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf-import-client-BBBoi7_N.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf-import-client-BBBoi7_N.js",
+      "size": 9093
+    },
+    "assets/pdf.worker.min-Cr_QfRGn.mjs": {
+      "relativePath": "assets/pdf.worker.min-Cr_QfRGn.mjs",
+      "contentHash": "88b29a656ecf0b104c2ef1b620be099c523be2a57f27fbb8a42bdac6b8c9a4c0",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf.worker.min-Cr_QfRGn.mjs",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf.worker.min-Cr_QfRGn.mjs",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/pdf.worker.min-Cr_QfRGn.mjs",
+      "size": 1128591
+    },
+    "assets/purify.es-BpVZ_uCt.js": {
+      "relativePath": "assets/purify.es-BpVZ_uCt.js",
+      "contentHash": "9e4f657e0ab6a51e1f92802201d649babda99b739a52ade6cd4611f9125a749c",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/purify.es-BpVZ_uCt.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/purify.es-BpVZ_uCt.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/purify.es-BpVZ_uCt.js",
+      "size": 21788
+    },
+    "assets/resumes--gbYM6kd.js": {
+      "relativePath": "assets/resumes--gbYM6kd.js",
+      "contentHash": "ad588aeecc00fc56b252619ee2f59ee7ed329e46b960031575c602e923b7ee0e",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/resumes--gbYM6kd.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/resumes--gbYM6kd.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/resumes--gbYM6kd.js",
+      "size": 32983
+    },
+    "assets/scroll-area-BT30YhWm.js": {
+      "relativePath": "assets/scroll-area-BT30YhWm.js",
+      "contentHash": "f4ce1c889e355cbd938e5183aca8c0dd0266b662fd49e24bad26b8f1113fe7d3",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/scroll-area-BT30YhWm.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/scroll-area-BT30YhWm.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/scroll-area-BT30YhWm.js",
+      "size": 12527
+    },
+    "assets/select-MiDByUY1.js": {
+      "relativePath": "assets/select-MiDByUY1.js",
+      "contentHash": "354a85acdacd5d28042947ad5d8fdf870cd54a8789834c6ae86e2be36c3e0637",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/select-MiDByUY1.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/select-MiDByUY1.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/select-MiDByUY1.js",
+      "size": 21532
+    },
+    "assets/settings-BHjQOse8.js": {
+      "relativePath": "assets/settings-BHjQOse8.js",
+      "contentHash": "6f52b6421bef1cf7f649361107fc69b6aa4a02f653e3e09e2c36b535e2742259",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/settings-BHjQOse8.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/settings-BHjQOse8.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/settings-BHjQOse8.js",
+      "size": 12626
+    },
+    "assets/templatePreview-CVcoMBzS.js": {
+      "relativePath": "assets/templatePreview-CVcoMBzS.js",
+      "contentHash": "f2b2db1e7f19c8ab78bf22f8cdd754c0c464f2b99875172dd71554150775e2a4",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/templatePreview-CVcoMBzS.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/templatePreview-CVcoMBzS.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/templatePreview-CVcoMBzS.js",
+      "size": 638
+    },
+    "assets/templates-ukbwlDXL.js": {
+      "relativePath": "assets/templates-ukbwlDXL.js",
+      "contentHash": "ba52ea3ef983206072952e48edf05a028b75520a7efd81aa70538d9e5f529941",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/templates-ukbwlDXL.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/templates-ukbwlDXL.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/templates-ukbwlDXL.js",
+      "size": 7790
+    },
+    "assets/tiptap-CwBfe1aC.css": {
+      "relativePath": "assets/tiptap-CwBfe1aC.css",
+      "contentHash": "105657ea3752eaec4d2b4acd15ba7173ccf3755b1e5f234f20fd8464bec78197",
+      "contentType": "text/css; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/tiptap-CwBfe1aC.css",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/tiptap-CwBfe1aC.css",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/tiptap-CwBfe1aC.css",
+      "size": 3742
+    },
+    "assets/tooltip-BNH_z05g.js": {
+      "relativePath": "assets/tooltip-BNH_z05g.js",
+      "contentHash": "8a2ed69c2305347aece2a4cb80392f5993e4ea5a9662ea466de3df860dc4319c",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/tooltip-BNH_z05g.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/tooltip-BNH_z05g.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/tooltip-BNH_z05g.js",
+      "size": 7883
+    },
+    "assets/useTemplateSnapshots-69QaIPGb.js": {
+      "relativePath": "assets/useTemplateSnapshots-69QaIPGb.js",
+      "contentHash": "c6de34283832f774d980551c8965c94fbec89483f637bdf06f5505614c0a0f92",
+      "contentType": "application/javascript; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/useTemplateSnapshots-69QaIPGb.js",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/useTemplateSnapshots-69QaIPGb.js",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/assets/useTemplateSnapshots-69QaIPGb.js",
+      "size": 8591
+    },
+    "avatar.png": {
+      "relativePath": "avatar.png",
+      "contentHash": "981e8f1b154fe92eb7b2882bdcace84c673424d8845a553ed149842c5d2ef619",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/avatar.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/avatar.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/avatar.png",
+      "size": 1497069
+    },
+    "favicon.ico": {
+      "relativePath": "favicon.ico",
+      "contentHash": "f5fd67e72e8a224eed02b626c3e46473d68b751b7cb79c8cd400a7313ed994a7",
+      "contentType": "image/x-icon",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/favicon.ico",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/favicon.ico",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/favicon.ico",
+      "size": 180638
+    },
+    "features/grammar.png": {
+      "relativePath": "features/grammar.png",
+      "contentHash": "32922c23b4e30134390f9077f0ed8cb501b16b4e09431ff696612ebbd3c49a00",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/grammar.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/grammar.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/grammar.png",
+      "size": 140336
+    },
+    "features/polish.png": {
+      "relativePath": "features/polish.png",
+      "contentHash": "bd9874028cbcdb88b654c90d4ed3d4a05bc8374bd237e8d8e24dbfcf16021d31",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/polish.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/polish.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/polish.png",
+      "size": 219911
+    },
+    "features/svg/export-formats.svg": {
+      "relativePath": "features/svg/export-formats.svg",
+      "contentHash": "57e057022701a97d42982b27bfe590690515a0ab7fa517d69bbb2a4d39669448",
+      "contentType": "image/svg+xml",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/export-formats.svg",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/export-formats.svg",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/export-formats.svg",
+      "size": 3379
+    },
+    "features/svg/grammar.svg": {
+      "relativePath": "features/svg/grammar.svg",
+      "contentHash": "cd8b80359f4df49f47b1f2ec3d108dbb336224558aaf97e32a80ea4d47559720",
+      "contentType": "image/svg+xml",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/grammar.svg",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/grammar.svg",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/grammar.svg",
+      "size": 2318
+    },
+    "features/svg/local-storage.svg": {
+      "relativePath": "features/svg/local-storage.svg",
+      "contentHash": "13d9212952bb995f0bb9bf3698c75ba0c29df3c41addac55b7936d3c6acc38fc",
+      "contentType": "image/svg+xml",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/local-storage.svg",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/local-storage.svg",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/local-storage.svg",
+      "size": 2539
+    },
+    "features/svg/polish.svg": {
+      "relativePath": "features/svg/polish.svg",
+      "contentHash": "5d1d9bdbf3ddd96182830b4e727b22e6f365d339d39ac2eb2edc7733e965d5c6",
+      "contentType": "image/svg+xml",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/polish.svg",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/polish.svg",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/features/svg/polish.svg",
+      "size": 3997
+    },
+    "fonts/AlibabaPuHuiTi-3-55-Regular.ttf": {
+      "relativePath": "fonts/AlibabaPuHuiTi-3-55-Regular.ttf",
+      "contentHash": "be33bc8d45ced30fa5c542f6f056565baf85003d4e079522110d76016f8a04e2",
+      "contentType": "font/ttf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/AlibabaPuHuiTi-3-55-Regular.ttf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/AlibabaPuHuiTi-3-55-Regular.ttf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/AlibabaPuHuiTi-3-55-Regular.ttf",
+      "size": 8532824
+    },
+    "fonts/AlibabaPuHuiTi-3-85-Bold.ttf": {
+      "relativePath": "fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
+      "contentHash": "d50f483fd8d9f95f9edbecdc199aee5fa9ddc5db8027f0d80334c3f502af61c8",
+      "contentType": "font/ttf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
+      "size": 8371268
+    },
+    "fonts/MiSans-Medium.ttf": {
+      "relativePath": "fonts/MiSans-Medium.ttf",
+      "contentHash": "b8b1bdea22256904d05d576aa2e53d8092e5f92ea88ed6d68be6d827a82b402d",
+      "contentType": "font/ttf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/MiSans-Medium.ttf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/MiSans-Medium.ttf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/MiSans-Medium.ttf",
+      "size": 8052924
+    },
+    "fonts/MiSans-Normal.ttf": {
+      "relativePath": "fonts/MiSans-Normal.ttf",
+      "contentHash": "1a5f4112daaa9473747c6834041646cc9b2c338cb40ab5dbb2f0161f8968ca10",
+      "contentType": "font/ttf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/MiSans-Normal.ttf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/MiSans-Normal.ttf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/MiSans-Normal.ttf",
+      "size": 8092724
+    },
+    "fonts/NotoSansSC-Bold.otf": {
+      "relativePath": "fonts/NotoSansSC-Bold.otf",
+      "contentHash": "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Bold.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Bold.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Bold.otf",
+      "size": 17002248
+    },
+    "fonts/NotoSansSC-Medium.otf": {
+      "relativePath": "fonts/NotoSansSC-Medium.otf",
+      "contentHash": "ca094f6b0001fb048ca39ddd797a0cdb0179e1e55c6561e111c49c3e6a61d7b7",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Medium.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Medium.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Medium.otf",
+      "size": 16523632
+    },
+    "fonts/NotoSansSC-Regular.otf": {
+      "relativePath": "fonts/NotoSansSC-Regular.otf",
+      "contentHash": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Regular.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Regular.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC-Regular.otf",
+      "size": 16437364
+    },
+    "fonts/NotoSansSC.ttf": {
+      "relativePath": "fonts/NotoSansSC.ttf",
+      "contentHash": "a0af66489baf1f306732ff16da58d86c342e0b3b4b3674079ee2a9b0aee23258",
+      "contentType": "font/ttf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC.ttf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC.ttf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/NotoSansSC.ttf",
+      "size": 13366032
+    },
+    "fonts/SourceHanSerifSC-Bold.otf": {
+      "relativePath": "fonts/SourceHanSerifSC-Bold.otf",
+      "contentHash": "4ee555ae58b3d22f6a95c2c494f2c36b7cccfc1d2224635f6461a03756f0e3c1",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Bold.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Bold.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Bold.otf",
+      "size": 12094680
+    },
+    "fonts/SourceHanSerifSC-Medium.otf": {
+      "relativePath": "fonts/SourceHanSerifSC-Medium.otf",
+      "contentHash": "f7906890686d17e122980efd2d6097d1caefed76312994baeaf220819e818f3a",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Medium.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Medium.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Medium.otf",
+      "size": 11734704
+    },
+    "fonts/SourceHanSerifSC-Regular.otf": {
+      "relativePath": "fonts/SourceHanSerifSC-Regular.otf",
+      "contentHash": "3754ea669c530e2473354f8f6d9f79680a44d7e26ec7d00eeabee4a7e0753c5d",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Regular.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Regular.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/SourceHanSerifSC-Regular.otf",
+      "size": 11626108
+    },
+    "fonts/Source_Han_Serif_SC_Light_Light.otf": {
+      "relativePath": "fonts/Source_Han_Serif_SC_Light_Light.otf",
+      "contentHash": "0d30bdcb33807298a6bc47c4db030385f44ca8010a21d370d66dee428e9cb032",
+      "contentType": "font/otf",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/Source_Han_Serif_SC_Light_Light.otf",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/Source_Han_Serif_SC_Light_Light.otf",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/fonts/Source_Han_Serif_SC_Light_Light.otf",
+      "size": 24103332
+    },
+    "icon.png": {
+      "relativePath": "icon.png",
+      "contentHash": "ac3073a2bdb32553ec90a2e7a8824a544cb05c4d1af746e4bcc9b609b3c0bf74",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/icon.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/icon.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/icon.png",
+      "size": 5908
+    },
+    "index.html": {
+      "relativePath": "index.html",
+      "contentHash": "f83a0d87fdd800d2be438502f721ceca569d47e713420ee0fe03beb441799be0",
+      "contentType": "text/html; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/index.html",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/index.html",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/index.html",
+      "size": 5604
+    },
+    "logo.svg": {
+      "relativePath": "logo.svg",
+      "contentHash": "5b013bf63122e0e213e823f8d12f475a3d02506fd87b134d1a3f52e7c73c1b69",
+      "contentType": "image/svg+xml",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/logo.svg",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/logo.svg",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/logo.svg",
+      "size": 2441
+    },
+    "robots.txt": {
+      "relativePath": "robots.txt",
+      "contentHash": "0e5a530db30f4349cd42100994fdcacd2238be8fdecf13ec6d8d7a39c6076b83",
+      "contentType": "text/plain; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/robots.txt",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/robots.txt",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/robots.txt",
+      "size": 74
+    },
+    "sitemap.xml": {
+      "relativePath": "sitemap.xml",
+      "contentHash": "240e55571e0718d64a41993d7130259b73b954309d1bb8e1e9876a8c51c327b2",
+      "contentType": "application/xml; charset=utf-8",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/sitemap.xml",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/sitemap.xml",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/sitemap.xml",
+      "size": 879
+    },
+    "template-snapshots/en/classic.png": {
+      "relativePath": "template-snapshots/en/classic.png",
+      "contentHash": "3d5db9f82bb8e09995ddaec741b08172b864db5cc0f40cf4539f2217bc7d2f1e",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/classic.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/classic.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/classic.png",
+      "size": 496867
+    },
+    "template-snapshots/en/creative.png": {
+      "relativePath": "template-snapshots/en/creative.png",
+      "contentHash": "81cc9c14e25027b0eda1e47134c378c23a97883aa394f02870c35b40a6a728a7",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/creative.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/creative.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/creative.png",
+      "size": 450015
+    },
+    "template-snapshots/en/editorial.png": {
+      "relativePath": "template-snapshots/en/editorial.png",
+      "contentHash": "e5e1696a10b8144eff0b0ef564f8b93b9a00ea3dfbad6d31a7a19cc7d0adea8d",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/editorial.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/editorial.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/editorial.png",
+      "size": 373726
+    },
+    "template-snapshots/en/elegant.png": {
+      "relativePath": "template-snapshots/en/elegant.png",
+      "contentHash": "57d51c312af4cf81b2fd25004410654988832e45492a15a486d3df1fb60b1f78",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/elegant.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/elegant.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/elegant.png",
+      "size": 419526
+    },
+    "template-snapshots/en/left-right.png": {
+      "relativePath": "template-snapshots/en/left-right.png",
+      "contentHash": "0c14a6cfd51bb0054ea4918b9984f9df0994e28e39f1e0ba32ee68f7891ab918",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/left-right.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/left-right.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/left-right.png",
+      "size": 481438
+    },
+    "template-snapshots/en/minimalist.png": {
+      "relativePath": "template-snapshots/en/minimalist.png",
+      "contentHash": "b03e6b5472e90b11ab1d3e2c9b7c3c0eaf90996377168ef1b8a07b0b3eb2d636",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/minimalist.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/minimalist.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/minimalist.png",
+      "size": 392250
+    },
+    "template-snapshots/en/modern.png": {
+      "relativePath": "template-snapshots/en/modern.png",
+      "contentHash": "734bd2f99fe9b857c49aaae217a3b1af489229f6a2d11f450c55da597db37925",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/modern.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/modern.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/modern.png",
+      "size": 621150
+    },
+    "template-snapshots/en/swiss.png": {
+      "relativePath": "template-snapshots/en/swiss.png",
+      "contentHash": "b515c2f7eeba1ef64d6e99b3aee9bb368bd166dfbfd5fb5bbe94cb8c00eb91be",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/swiss.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/swiss.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/swiss.png",
+      "size": 383943
+    },
+    "template-snapshots/en/timeline.png": {
+      "relativePath": "template-snapshots/en/timeline.png",
+      "contentHash": "8a02d28d83024fe9e3359c95ff2ff1364ca4811586d6c4d29c88d68397fe31e6",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/timeline.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/timeline.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/en/timeline.png",
+      "size": 508144
+    },
+    "template-snapshots/zh/classic.png": {
+      "relativePath": "template-snapshots/zh/classic.png",
+      "contentHash": "150a5b0c40b763374b65f116585474b3a6371a19c694752072ae25ebba538ab4",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/classic.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/classic.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/classic.png",
+      "size": 667179
+    },
+    "template-snapshots/zh/creative.png": {
+      "relativePath": "template-snapshots/zh/creative.png",
+      "contentHash": "8372f2ecc7c467bd1985e5cfc80ec9898bf845d1ba460d5ea7490f70eb77c318",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/creative.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/creative.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/creative.png",
+      "size": 598104
+    },
+    "template-snapshots/zh/editorial.png": {
+      "relativePath": "template-snapshots/zh/editorial.png",
+      "contentHash": "132334a61785a4823306ceb035feadd597210fba22baf0001dda40ab0478d8a6",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/editorial.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/editorial.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/editorial.png",
+      "size": 484938
+    },
+    "template-snapshots/zh/elegant.png": {
+      "relativePath": "template-snapshots/zh/elegant.png",
+      "contentHash": "00508f26cebaf0f10a3733c5fb54d862cbc7ca3e65ec37af64295d7a92c03687",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/elegant.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/elegant.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/elegant.png",
+      "size": 544988
+    },
+    "template-snapshots/zh/left-right.png": {
+      "relativePath": "template-snapshots/zh/left-right.png",
+      "contentHash": "0c4a52a4c221a2e010668e64966f6ce18cfff9fffc38e8b1648b78d29ed04ab1",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/left-right.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/left-right.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/left-right.png",
+      "size": 631102
+    },
+    "template-snapshots/zh/minimalist.png": {
+      "relativePath": "template-snapshots/zh/minimalist.png",
+      "contentHash": "c38e8c19a704420e0b12b587b6fad8b68e1d2762ffea8a466a6ea9d64975b5da",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/minimalist.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/minimalist.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/minimalist.png",
+      "size": 507004
+    },
+    "template-snapshots/zh/modern.png": {
+      "relativePath": "template-snapshots/zh/modern.png",
+      "contentHash": "9160d832c225d1ae15e0deb1f7aeaf065a47b5eb63d0dc1c7b5525a4ee2e82f1",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/modern.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/modern.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/modern.png",
+      "size": 763095
+    },
+    "template-snapshots/zh/swiss.png": {
+      "relativePath": "template-snapshots/zh/swiss.png",
+      "contentHash": "f5297215da7c34d3d3c53a657643cb5cdf98f68049ce567acccd7fc7e72ec88d",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/swiss.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/swiss.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/swiss.png",
+      "size": 510671
+    },
+    "template-snapshots/zh/timeline.png": {
+      "relativePath": "template-snapshots/zh/timeline.png",
+      "contentHash": "7987c7267a533fa4720e5ba0f2e7f421f6b68460788dcb14bdcdc3c74a38e4d0",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/timeline.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/timeline.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/template-snapshots/zh/timeline.png",
+      "size": 680039
+    },
+    "vercel.svg": {
+      "relativePath": "vercel.svg",
+      "contentHash": "3fa5cd757b418e18afc68ddebad55f443206e410327921ddb2bf1be731658880",
+      "contentType": "image/svg+xml",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/vercel.svg",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/vercel.svg",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/vercel.svg",
+      "size": 629
+    },
+    "web-shot.png": {
+      "relativePath": "web-shot.png",
+      "contentHash": "174796a4e2d2afaff73fdfe17ee994b37754d248f44a5e5af7cdbc0552502169",
+      "contentType": "image/png",
+      "key": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/web-shot.png",
+      "url": "https://aurostars.github.io/magic-resume/objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/web-shot.png",
+      "objectPath": "objects/7dab61983ea10464f2c256360ce5bbd0990dc68bd41c3c12f89080bb0c51234d/web-shot.png",
+      "size": 943315
+    }
+  },
+  "releaseId": "16b437536843-20260915134814",
+  "createdAt": "2026-09-15T13:48:14.000Z"
+}
