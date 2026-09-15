@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { materializeGitHubPagesRelease } from "./github-pages-assets";
+import { graphBaseUrlFromManifest, materializeGitHubPagesRelease } from "./github-pages-assets";
 import { createGitHubCliRunner, type GitCommandRunner } from "./git-runner";
 import type { GitHubPagesManifest } from "./types";
 
@@ -29,6 +29,7 @@ export interface GitHubPagesPublication {
   manifest: GitHubPagesManifest;
   pagesCommit: string;
   pagesBaseUrl: string;
+  graphBaseUrl: string;
   releaseManifestUrl: string;
 }
 
@@ -66,16 +67,21 @@ function parseGitHubRepository(remoteUrl: string): { owner: string; repo: string
 }
 
 async function validateFork(repositoryDirectory: string, runner: GitCommandRunner): Promise<void> {
-  let output: { stdout: string };
-  try {
-    output = await runner.run(["remote", "get-url", "--push", "--all", "fork"], { cwd: repositoryDirectory });
-  } catch {
-    invalidFork();
+  for (const direction of ["fetch", "push"] as const) {
+    let output: { stdout: string };
+    try {
+      const args = direction === "push"
+        ? ["remote", "get-url", "--push", "--all", "fork"]
+        : ["remote", "get-url", "--all", "fork"];
+      output = await runner.run(args, { cwd: repositoryDirectory });
+    } catch {
+      invalidFork();
+    }
+    const destinations = output.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    if (destinations.length !== 1) invalidFork();
+    const repository = parseGitHubRepository(destinations[0]);
+    if (repository?.owner !== OWNER || repository.repo !== REPOSITORY) invalidFork();
   }
-  const destinations = output.stdout.split(/\r?\n/).filter((destination) => destination.length > 0);
-  if (destinations.length !== 1) invalidFork();
-  const repository = parseGitHubRepository(destinations[0]);
-  if (repository?.owner !== OWNER || repository.repo !== REPOSITORY) invalidFork();
 }
 
 function errorText(error: unknown): string {
@@ -377,9 +383,11 @@ export async function publishGitHubPages(input: {
     path: "/",
   }, input.assertOwnership));
   const pagesBaseUrl = `${PAGES_ORIGIN}${PAGES_BASE_PATH}`;
+  const graphBaseUrl = graphBaseUrlFromManifest(published.manifest);
   return {
     ...published,
     pagesBaseUrl,
+    graphBaseUrl,
     releaseManifestUrl: `${pagesBaseUrl}releases/${input.sourceCommit}/manifest.json`,
   };
 }

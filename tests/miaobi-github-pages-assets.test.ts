@@ -42,7 +42,7 @@ function input(clientDirectory: string, pagesDirectory: string) {
   };
 }
 
-test("materializes the complete allowed tree while filtering private, map, server, test and unsupported files", async () => {
+test("materializes the complete allowed tree while filtering private, map, server and test files", async () => {
   const { root, clientDirectory, pagesDirectory } = await fixture();
   await mkdir(join(clientDirectory, "assets"));
   await mkdir(join(clientDirectory, "fonts"));
@@ -59,7 +59,6 @@ test("materializes the complete allowed tree while filtering private, map, serve
   await writeFile(join(clientDirectory, "tests", "fixture.svg"), "<svg/>");
   await writeFile(join(clientDirectory, "entry.server.js"), "server");
   await writeFile(join(clientDirectory, "unit.test.js"), "test");
-  await writeFile(join(clientDirectory, "notes.md"), "unsupported");
 
   try {
     const result = await materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory));
@@ -113,6 +112,22 @@ test("materializes the complete allowed tree while filtering private, map, serve
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when an ordinary build asset has no supported MIME type", async () => {
+  for (const name of ["module.wasm", "preview.webp"]) {
+    const { root, clientDirectory, pagesDirectory } = await fixture();
+    await writeFile(join(clientDirectory, "app.js"), "safe");
+    await writeFile(join(clientDirectory, name), "future build output");
+    try {
+      await assert.rejects(materializeGitHubPagesRelease(input(clientDirectory, pagesDirectory)), {
+        code: "MIAOBI_UNSUPPORTED_ASSET",
+      });
+      assert.equal(await exists(join(pagesDirectory, "releases", SOURCE_COMMIT)), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 

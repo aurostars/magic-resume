@@ -67,6 +67,29 @@ export function isForbiddenAssetHostname(value: string): boolean {
   ) || TOS_HOST_PATTERN.test(hostname);
 }
 
+export function graphBaseUrlFromManifest(manifest: GitHubPagesManifest): string {
+  const baseUrl = "https://aurostars.github.io/magic-resume/";
+  if (manifest.baseUrl !== baseUrl) throw new Error("MIAOBI_INVALID_PAGES_RELEASE");
+  let graphHash: string | undefined;
+  const entries = Object.entries(manifest.files);
+  if (entries.length === 0) throw new Error("MIAOBI_INVALID_PAGES_RELEASE");
+  for (const [relativePath, record] of entries) {
+    const match = /^objects\/([0-9a-f]{64})\/(.+)$/.exec(record.objectPath);
+    const pathSegments = relativePath.split("/");
+    if (
+      !match || match[2] !== relativePath || record.relativePath !== relativePath ||
+      record.key !== record.objectPath || record.url !== `${baseUrl}${record.objectPath}` ||
+      !/^[A-Za-z0-9_./-]+$/.test(relativePath) ||
+      pathSegments.some((segment) => segment === "" || segment === "." || segment === "..")
+    ) throw new Error("MIAOBI_INVALID_PAGES_RELEASE");
+    if (graphHash !== undefined && graphHash !== match[1]) {
+      throw new Error("MIAOBI_INVALID_PAGES_RELEASE");
+    }
+    graphHash = match[1];
+  }
+  return `${baseUrl}objects/${graphHash}/`;
+}
+
 const LOCK_LEASE_MS = 60_000;
 const LOCK_MAX_CLOCK_SKEW_MS = 5_000;
 const LOCK_ACQUIRE_TIMEOUT_MS = 3_000;
@@ -199,18 +222,17 @@ async function collectAssets(clientDirectory: string): Promise<{
         await visit(sourcePath, relativePath);
       } else if (entryMetadata.isFile()) {
         const contentType = contentTypeFor(relativePath);
-        if (contentType) {
-          assets.push({
-            relativePath,
-            sourcePath,
-            sourceDevice: entryMetadata.dev,
-            sourceInode: entryMetadata.ino,
-            sourceSize: entryMetadata.size,
-            sourceMtimeMs: entryMetadata.mtimeMs,
-            sourceCtimeMs: entryMetadata.ctimeMs,
-            contentType,
-          });
-        }
+        if (!contentType) throw new MaterializationError("MIAOBI_UNSUPPORTED_ASSET");
+        assets.push({
+          relativePath,
+          sourcePath,
+          sourceDevice: entryMetadata.dev,
+          sourceInode: entryMetadata.ino,
+          sourceSize: entryMetadata.size,
+          sourceMtimeMs: entryMetadata.mtimeMs,
+          sourceCtimeMs: entryMetadata.ctimeMs,
+          contentType,
+        });
       }
     }
   }

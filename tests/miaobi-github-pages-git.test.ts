@@ -169,6 +169,33 @@ test("rejects a missing or wrong fork before creating worktrees or changing refs
   }
 });
 
+test("rejects a fork whose fetch URL differs from its valid push URL before fetch or mutation", async () => {
+  const value = await fixture();
+  try {
+    await command("git", ["remote", "set-url", "fork", "https://github.com/attacker/magic-resume.git"], value.repository);
+    await command("git", ["remote", "set-url", "--push", "fork", EXPECTED_FORK], value.repository);
+    const runner = createGitCommandRunner();
+    const calls: string[][] = [];
+    const recordingRunner: GitCommandRunner = {
+      async run(args, options) {
+        calls.push([...args]);
+        return runner.run(args, options);
+      },
+    };
+
+    await assert.rejects(publishGitHubPages({
+      ...publicationInput(value),
+      runner: recordingRunner,
+    }), { message: "MIAOBI_INVALID_FORK" });
+    assert.equal(calls.some((args) => args[0] === "fetch"), false);
+    assert.deepEqual(await worktreePaths(value.repository), [value.repository]);
+    assert.equal(await exists(join(value.remote, "refs", "heads", "gh-pages")), false);
+    assert.deepEqual(value.admin.calls, []);
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
 test("accepts normalized GitHub HTTPS and SSH fork URLs only for the exact repository", async () => {
   const accepted = [
     "https://github.com/aurostars/magic-resume",
@@ -204,6 +231,11 @@ test("first publication creates an orphan gh-pages root, materializes assets, an
     assert.deepEqual(JSON.parse(await remoteFile(value.remote, `releases/${SOURCE_COMMIT}/manifest.json`)), result.manifest);
     assert.match(result.pagesCommit, /^[0-9a-f]{40}$/);
     assert.equal(result.releaseManifestUrl, `https://aurostars.github.io/magic-resume/releases/${SOURCE_COMMIT}/manifest.json`);
+    const graphHash = result.manifest.files["app.js"].objectPath.split("/")[1];
+    assert.equal(
+      result.graphBaseUrl,
+      `https://aurostars.github.io/magic-resume/objects/${graphHash}/`,
+    );
     assert.deepEqual(value.admin.calls, [{ owner: "aurostars", repo: "magic-resume", branch: "gh-pages", path: "/" }]);
     const pushes = value.runner.calls.filter(({ args }) => args[0] === "push").map(({ args }) => args);
     assert.deepEqual(pushes, [["push", "--porcelain", "fork", "HEAD:gh-pages"]]);
@@ -528,7 +560,10 @@ test("rejects multiple configured fork push destinations before fetch or worktre
       ...publicationInput(value),
       runner: validationRunner,
     }), { message: "MIAOBI_INVALID_FORK" });
-    assert.deepEqual(calls, [["remote", "get-url", "--push", "--all", "fork"]]);
+    assert.deepEqual(calls, [
+      ["remote", "get-url", "--all", "fork"],
+      ["remote", "get-url", "--push", "--all", "fork"],
+    ]);
     assert.equal(await exists(join(value.remote, "refs", "heads", "gh-pages")), false);
     assert.deepEqual(await worktreePaths(value.repository), [value.repository]);
     await assert.rejects(command("git", ["show-ref", "--verify", "refs/remotes/fork/gh-pages"], value.repository));

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { assertGitHubPagesAssetBaseUrlValue } from "../../miaobi/runtime-config";
+import { graphBaseUrlFromManifest } from "./github-pages-assets";
 import type { GitHubPagesPublication } from "./publish-github-pages";
 import type { GitHubPagesAssetRecord, GitHubPagesManifest } from "./types";
 
@@ -57,6 +58,12 @@ function assertPublication(publication: GitHubPagesPublication): void {
   if (!COMMIT_PATTERN.test(commit) || !COMMIT_PATTERN.test(publication.pagesCommit)) invalidUrl();
   if (assertGitHubPagesAssetBaseUrl(publication.pagesBaseUrl) !== PAGES_ORIGIN + PAGES_PREFIX) invalidUrl();
   if (publication.manifest.baseUrl !== publication.pagesBaseUrl) invalidUrl();
+  try {
+    if (graphBaseUrlFromManifest(publication.manifest) !== publication.graphBaseUrl) invalidUrl();
+    assertGitHubPagesAssetBaseUrl(publication.graphBaseUrl);
+  } catch {
+    invalidUrl();
+  }
   const expectedManifest = `${publication.pagesBaseUrl}releases/${commit}/manifest.json`;
   if (publication.releaseManifestUrl !== expectedManifest) invalidUrl();
   assertPagesUrl(publication.releaseManifestUrl);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,14 +17,17 @@ const BUILD_MARKER = `${COMMIT}.0123456789abcdef0123456789abcdef`;
 const RELEASE_ID = "59a06b5c2c12-20260914100000";
 const NOW = new Date("2026-09-14T10:00:00.000Z");
 const PAGES_BASE = "https://aurostars.github.io/magic-resume/";
+const GRAPH_HASH = "b".repeat(64);
+const GRAPH_BASE = `${PAGES_BASE}objects/${GRAPH_HASH}/`;
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "miaobi-pages-production-"));
   await mkdir(join(root, "dist/miaobi/client/assets"), { recursive: true });
-  const index = '<!doctype html><script type="module" src="https://miaobi.invalid/__ASSET_BASE__/assets/app.js"></script>';
+  const index = '<!doctype html><link rel="stylesheet" href="https://miaobi.invalid/__ASSET_BASE__/assets/app.css"><script type="module" src="https://miaobi.invalid/__ASSET_BASE__/assets/app.js"></script>';
   const app = "console.log('app')";
   await writeFile(join(root, "dist/miaobi/client/index.html"), index);
   await writeFile(join(root, "dist/miaobi/client/assets/app.js"), app);
+  await writeFile(join(root, "dist/miaobi/client/assets/app.css"), "body{}\n");
   const apiBundle = "module.exports=()=>new Response()\n";
   await writeFile(join(root, "dist/miaobi/api-faas.cjs"), apiBundle);
   await writeFile(join(root, "dist/miaobi/api-faas.meta.json"), JSON.stringify({
@@ -36,10 +40,23 @@ async function fixture(): Promise<string> {
 }
 
 function publication(): GitHubPagesPublication {
-  const index = new TextEncoder().encode("index");
+  const record = (relativePath: string, contentType: string, content: string) => {
+    const bytes = new TextEncoder().encode(content);
+    const objectPath = `objects/${GRAPH_HASH}/${relativePath}` as const;
+    return {
+      relativePath,
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+      contentType,
+      key: objectPath,
+      objectPath,
+      size: bytes.byteLength,
+      url: `${PAGES_BASE}${objectPath}`,
+    };
+  };
   return {
     pagesCommit: "a".repeat(40),
     pagesBaseUrl: PAGES_BASE,
+    graphBaseUrl: GRAPH_BASE,
     releaseManifestUrl: `${PAGES_BASE}releases/${COMMIT}/manifest.json`,
     manifest: {
       schemaVersion: 1,
@@ -49,15 +66,9 @@ function publication(): GitHubPagesPublication {
       createdAt: NOW.toISOString(),
       baseUrl: PAGES_BASE,
       files: {
-        "index.html": {
-          relativePath: "index.html",
-          contentHash: createHash("sha256").update(index).digest("hex"),
-          contentType: "text/html; charset=utf-8",
-          key: `objects/${createHash("sha256").update(index).digest("hex")}/index.html`,
-          objectPath: `objects/${createHash("sha256").update(index).digest("hex")}/index.html`,
-          size: index.byteLength,
-          url: `${PAGES_BASE}objects/${createHash("sha256").update(index).digest("hex")}/index.html`,
-        },
+        "index.html": record("index.html", "text/html; charset=utf-8", "index"),
+        "assets/app.js": record("assets/app.js", "application/javascript; charset=utf-8", "console.log('app')"),
+        "assets/app.css": record("assets/app.css", "text/css; charset=utf-8", "body{}\n"),
       },
     },
   };
@@ -109,7 +120,7 @@ function healthyFaas(input: RequestInfo | URL): Response {
   return new Response(`<script>window.__MAGIC_RESUME_RUNTIME__=${JSON.stringify({
     platform: "miaobi",
     apiFunctionUrl: `https://magic.solutionsuite.cn/api/faas/api-${apiId}`,
-    assetBaseUrl: PAGES_BASE,
+    assetBaseUrl: GRAPH_BASE,
   })}</script>`, { headers: { "X-Magic-Resume-Faas": "magic-resume-web" } });
 }
 
@@ -152,6 +163,25 @@ test("publishes and verifies GitHub Pages before creating fresh FaaS, switching 
     };
     assert.deepEqual(state, expected);
     assert.equal((await stateFiles(root)).length, 1);
+
+    const bundlePath = join(root, "dist/miaobi/web-faas.cjs");
+    const require = createRequire(import.meta.url);
+    delete require.cache[require.resolve(bundlePath)];
+    const handler = require(bundlePath) as (request: Request) => Promise<Response>;
+    const response = await handler(new Request("https://magic.solutionsuite.cn/api/faas/web-1"));
+    const body = await response.text();
+    const runtime = JSON.parse(/window\.__MAGIC_RESUME_RUNTIME__=(\{[^<]+\})<\/script>/.exec(body)?.[1] ?? "null") as {
+      assetBaseUrl?: string;
+    };
+    assert.equal(runtime.assetBaseUrl, GRAPH_BASE);
+    const bootUrls = [
+      ...body.matchAll(/<(?:script|link)\b[^>]+(?:src|href)=["']([^"']+)["']/gi),
+    ].map((match) => match[1]).sort();
+    assert.deepEqual(bootUrls, [
+      published.manifest.files["assets/app.css"].url,
+      published.manifest.files["assets/app.js"].url,
+    ].sort());
+    assert.equal(bootUrls.every((url) => url.startsWith(GRAPH_BASE)), true);
   });
 });
 
@@ -244,7 +274,7 @@ test("a rerun reuses the identical Pages release while always creating new FaaS 
           const url = String(input);
           if (url.includes("?__path=")) return healthyFaas(input);
           const apiId = faasIds.filter((id) => id.startsWith("api-")).at(-1)!;
-          return new Response(`<script>window.__MAGIC_RESUME_RUNTIME__=${JSON.stringify({ platform: "miaobi", apiFunctionUrl: `https://magic.solutionsuite.cn/api/faas/${apiId}`, assetBaseUrl: PAGES_BASE })}</script>`, { headers: { "X-Magic-Resume-Faas": "magic-resume-web" } });
+          return new Response(`<script>window.__MAGIC_RESUME_RUNTIME__=${JSON.stringify({ platform: "miaobi", apiFunctionUrl: `https://magic.solutionsuite.cn/api/faas/${apiId}`, assetBaseUrl: GRAPH_BASE })}</script>`, { headers: { "X-Magic-Resume-Faas": "magic-resume-web" } });
         },
         publishPages: async ({ releaseId }) => { releases.push(releaseId); return publication(); },
         verifyPages: async () => undefined,

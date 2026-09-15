@@ -50,6 +50,7 @@ function releaseFixture() {
     manifest,
     pagesCommit: "a".repeat(40),
     pagesBaseUrl: PAGES_BASE,
+    graphBaseUrl: OBJECT_BASE,
     releaseManifestUrl: `${PAGES_BASE}releases/${SOURCE_COMMIT}/manifest.json`,
   };
   return { publication, bodies: new Map([

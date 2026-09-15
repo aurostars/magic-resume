@@ -8,6 +8,7 @@ import { injectMiaobiRuntime } from "../../miaobi/runtime-config";
 import { MIAOBI_ASSET_BASE_PLACEHOLDER } from "../../vite.miaobi.config";
 import { buildWebFaas } from "./build-web-faas";
 import { createGitCommandRunner, type GitCommandRunner } from "./git-runner";
+import { graphBaseUrlFromManifest } from "./github-pages-assets";
 import { verifyGitHubPagesRelease } from "./github-pages-health";
 import {
   createMagicBuilderRunner,
@@ -1364,11 +1365,18 @@ export async function deployMiaobi(options: {
       fetchImpl: options.fetch,
     }));
     const canonicalReleaseId = publication.manifest.releaseId;
+    let graphBaseUrl: string;
+    try {
+      graphBaseUrl = graphBaseUrlFromManifest(publication.manifest);
+    } catch {
+      throw codedError("MIAOBI_INVALID_PAGES_RELEASE");
+    }
     if (
       publication.manifest.schemaVersion !== 1 || publication.manifest.provider !== "github-pages" ||
       publication.manifest.sourceCommit !== options.gitCommit ||
       releaseCommitPrefix(canonicalReleaseId) !== options.gitCommit.slice(0, 12) ||
       publication.manifest.baseUrl !== publication.pagesBaseUrl ||
+      publication.graphBaseUrl !== graphBaseUrl ||
       publication.pagesBaseUrl !== deployConfig.githubPages.baseUrl ||
       !/^[0-9a-f]{40}$/.test(publication.pagesCommit) ||
       publication.releaseManifestUrl !== `${publication.pagesBaseUrl}releases/${options.gitCommit}/manifest.json`
@@ -1380,11 +1388,11 @@ export async function deployMiaobi(options: {
       platformOrigin,
     );
     const shell = (await readFile(resolve(outputDirectory, "client/index.html"), "utf8"))
-      .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, publication.pagesBaseUrl);
+      .replaceAll(MIAOBI_ASSET_BASE_PLACEHOLDER, graphBaseUrl);
     const html = injectMiaobiRuntime(shell, {
       platform: "miaobi",
       apiFunctionUrl: api.url,
-      assetBaseUrl: publication.pagesBaseUrl,
+      assetBaseUrl: graphBaseUrl,
     }, platformOrigin);
     const webBundlePath = await buildWebFaas(html, outputDirectory, "github-pages", platformOrigin);
     const web = await publishFaas(
@@ -1395,7 +1403,7 @@ export async function deployMiaobi(options: {
     );
     const health = {
       apiFaasUrl: api.url,
-      assetBaseUrl: publication.pagesBaseUrl,
+      assetBaseUrl: graphBaseUrl,
       apiBuildMarker: apiMetadata.buildMarker,
       fetch: options.fetch ?? globalThis.fetch,
       timeoutMs: options.healthTimeoutMs ?? 10_000,

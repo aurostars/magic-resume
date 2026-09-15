@@ -18,6 +18,8 @@ const BUILD_MARKER = `${COMMIT}.${BUILD_NONCE}`;
 const NOW = new Date("2026-09-13T16:46:00.000Z");
 const RELEASE_ID = "59a06b5c2c12-20260913164600";
 const PAGES_BASE_URL = "https://aurostars.github.io/magic-resume/";
+const GRAPH_HASH = "c".repeat(64);
+const GRAPH_BASE_URL = `${PAGES_BASE_URL}objects/${GRAPH_HASH}/`;
 const LOCK_LEASE_MS = 120_000;
 
 function deployMiaobi(
@@ -32,10 +34,21 @@ function deployMiaobi(
         releaseId,
         createdAt: options.now.toISOString(),
         baseUrl: PAGES_BASE_URL,
-        files: {},
+        files: {
+          "index.html": {
+            relativePath: "index.html",
+            contentHash: "d".repeat(64),
+            contentType: "text/html; charset=utf-8",
+            key: `objects/${GRAPH_HASH}/index.html`,
+            objectPath: `objects/${GRAPH_HASH}/index.html`,
+            size: 1,
+            url: `${GRAPH_BASE_URL}index.html`,
+          },
+        },
       },
       pagesCommit: "a".repeat(40),
       pagesBaseUrl: PAGES_BASE_URL,
+      graphBaseUrl: GRAPH_BASE_URL,
       releaseManifestUrl: `${PAGES_BASE_URL}releases/${sourceCommit}/manifest.json`,
     }),
     verifyPages: async () => undefined,
@@ -170,7 +183,7 @@ function healthyResponse(
   const runtime = {
     platform: "miaobi",
     apiFunctionUrl: `${platformOrigin}/api/faas/${apiId}`,
-    assetBaseUrl: PAGES_BASE_URL,
+    assetBaseUrl: GRAPH_BASE_URL,
   };
   return new Response(
     `<!doctype html><script>window.__MAGIC_RESUME_RUNTIME__=${JSON.stringify(runtime)}</script>`,
