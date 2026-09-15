@@ -11,7 +11,7 @@
 - 妙笔 Web FaaS，负责提供注入运行时配置后的 HTML；
 - 固定页面 `https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR`，只在所有健康检查成功后切换。
 
-浏览器运行时只允许 GitHub Pages 资源域名与 `https://magic.solutionsuite.cn/api/faas/<id>` FaaS 域名。坚果云 WebDAV 使用固定上游的 API 路由 `POST /api/webdav/jianguoyun`，服务端仅可访问 `https://dav.jianguoyun.com/dav/`；浏览器 CSP 不新增坚果云域名。不得依赖 TOS、Cloudflare 或 `workers.dev`。早期 TOS 方案因生产发布受阻而放弃，仅作为历史背景，不是回滚或默认路径。
+浏览器网络边界按用途分离：静态应用资源只从当前 GitHub Pages graph origin 加载；应用 API 请求固定发送到 `https://magic.solutionsuite.cn/api/faas/<id>` 的当前妙笔 API origin；`connect-src https:` 仅保留非坚果云 WebDAV 的既有浏览器直连能力。坚果云 WebDAV 不直连浏览器，也不单独加入 CSP，而是使用 `POST /api/webdav/jianguoyun`，由服务端固定访问 `https://dav.jianguoyun.com/dav/`。运行时不得依赖 TOS、Cloudflare 或 `workers.dev`。早期 TOS 方案因生产发布受阻而放弃，仅作为历史背景，不是回滚或默认路径。
 
 ## 2. 前置条件
 
@@ -44,7 +44,7 @@ corepack pnpm test:miaobi
 MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)" corepack pnpm build:miaobi
 ```
 
-构建后确认 `dist/miaobi/api-faas.meta.json` 的 `gitCommit` 与当前完整 40 位 HEAD 一致。生产契约还必须证明浏览器 bundle 包含 `/api/webdav/jianguoyun`、不包含直接坚果云请求目标，并能在运行时 `require` 不可用时通过注入的假上游 `fetch` 执行代理请求。
+构建后确认 `dist/miaobi/api-faas.meta.json` 的 `gitCommit` 与当前完整 40 位 HEAD 一致。生产契约必须分别审计客户端与 API bundle：客户端 origin allowlist 不得包含 `dav.jianguoyun.com`，API bundle 仅额外允许固定坚果云 origin。行为测试还会把真实 `WebDavClient` 构建为浏览器产物，在妙笔 runtime 下执行并记录 `fetch`，证明坚果云配置只请求当前妙笔 API 的 `?__path=/api/webdav/jianguoyun`，同时保留 API bundle 固定上游与 runtime `require` 不可用时的执行断言。
 
 `dist/miaobi/` 包含：
 
@@ -54,7 +54,7 @@ MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)" corepack pnpm build:miaobi
 - `page.html`：固定页面发布工件，部署时改写为最终 Web FaaS 跳转；
 - `manifest.json`：schema v2 本地构建清单，声明 `assetProvider: github-pages` 和 Pages base URL。
 
-生产契约会递归检查构建输出与模拟 `gh-pages` staging：禁止已知 secret、本机绝对路径、TOS、Cloudflare Worker 和 `workers.dev` 依赖，并校验所有 URL allowlist。`dist/` 可重建，不是部署事实来源。
+生产契约会递归检查构建输出与模拟 `gh-pages` staging：禁止已知 secret、本机绝对路径、TOS、Cloudflare Worker 和 `workers.dev` 依赖，并按产物边界校验 URL allowlist。客户端与 Pages 产物不允许坚果云 origin；只有 `api-faas.cjs` 允许固定的 `https://dav.jianguoyun.com` 上游。`dist/` 可重建，不是部署事实来源。
 
 凭据无关 smoke 必须在发布前执行：用构建后的 API handler 与注入的假上游 `fetch` 请求 `/api/webdav/jianguoyun`；确认不支持的方法与畸形路径返回文档化、脱敏的 `4xx`，任何响应都不含 `Authorization` 值或提交的密码，且 bundle 在运行时 `require` 抛错时仍可加载。不得发起真实认证的坚果云请求，不得把凭据放入命令、fixture 或日志。
 
@@ -134,7 +134,7 @@ controller 发布后至少核对：
 - Pages manifest、index 和启动资源为 2xx，hash/MIME 匹配；
 - API/Web FaaS marker 与 runtime 指向本次 build 和 Pages base URL；
 - API health 继续对不存在路径返回 `404 notFound`，并携带当前 `X-Magic-Resume-Build` 与 `X-Magic-Resume-Faas: magic-resume-api`；同时以不含凭据的畸形请求检查 `/api/webdav/jianguoyun` 返回脱敏 `4xx`；
-- Web FaaS CSP 的 `connect-src` 保持既有策略，仅允许当前妙笔 API origin 与既有通用 HTTPS 直连能力，不单独加入坚果云或其他任意 WebDAV host；
+- Web FaaS CSP 的静态资源 directive 只允许当前 Pages graph origin，应用 API 固定为当前妙笔 API origin；`connect-src https:` 仅保留非坚果云 WebDAV 的既有直连能力，不单独加入坚果云 host；
 - 固定页面到达新的原生 Web FaaS；
 - 生成物与运行时文本不依赖 TOS、Cloudflare 或 `workers.dev`。
 
@@ -144,4 +144,4 @@ controller 发布后至少核对：
 
 ## English summary
 
-After review, the controller checks `gh auth status`, validates the single `fork` push URL, builds the reviewed commit, and runs the generation-fenced deployment. Jianguoyun users configure `https://dav.jianguoyun.com/dav/`, their account email, and a third-party application password rather than the login password. Jianguoyun traffic uses the fixed-origin `/api/webdav/jianguoyun` API FaaS route because browser CORS is unavailable; credentials remain in browser persistence, are forwarded per request, and are not persisted by FaaS. New configurations enable auto-sync by default while explicit existing settings are preserved. Other WebDAV providers remain browser-direct and require CORS. Before deployment, run credential-free malformed/unsupported proxy checks and verify that neither responses nor logs expose authorization data. The fixed order is GitHub Pages push, Pages health, fresh API FaaS, fresh Web FaaS, FaaS health, fixed-page switch, then immutable schema-v3 state. No Magic CLI call is allowed before Pages health succeeds. v1/v2 states remain read-only rollback inputs and never imply GitHub Pages provenance. Monitor immutable `gh-pages` storage growth and use a separately reviewed retention procedure. Production publication and source-main push are controller-only post-review steps.
+After review, the controller checks `gh auth status`, validates the single `fork` push URL, builds the reviewed commit, and runs the generation-fenced deployment. Static application assets load only from the current GitHub Pages graph origin, and application API requests use the current fixed Miaobi API origin. `connect-src https:` remains for direct non-Jianguoyun WebDAV providers, which still require CORS. Jianguoyun users configure `https://dav.jianguoyun.com/dav/`, their account email, and a third-party application password rather than the login password. Jianguoyun traffic uses the fixed-origin `/api/webdav/jianguoyun` API FaaS route because browser CORS is unavailable; its host is not added separately to CSP. Credentials remain in browser persistence, are forwarded per request, and are not persisted by FaaS. New configurations enable auto-sync by default while explicit existing settings are preserved. Before deployment, run credential-free malformed/unsupported proxy checks and verify that neither responses nor logs expose authorization data. The fixed order is GitHub Pages push, Pages health, fresh API FaaS, fresh Web FaaS, FaaS health, fixed-page switch, then immutable schema-v3 state. No Magic CLI call is allowed before Pages health succeeds. v1/v2 states remain read-only rollback inputs and never imply GitHub Pages provenance. Monitor immutable `gh-pages` storage growth and use a separately reviewed retention procedure. Production publication and source-main push are controller-only post-review steps.

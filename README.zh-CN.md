@@ -83,9 +83,9 @@ pnpm dev
 
 如果本地副本和云端副本自上次成功同步后都发生了变化，应用会报告冲突，并让你明确选择**使用本地版本**（上传本地副本）或**使用云端版本**（替换本地数据）。Magic Resume 不会自动合并单份简历。
 
-使用坚果云时，服务器 URL 填写 `https://dav.jianguoyun.com/dav/`，用户名填写坚果云账号邮箱，密码必须填写**第三方应用密码**（不是账号登录密码）。由于坚果云不允许浏览器直接跨域访问，Magic Resume 会通过固定上游的妙笔 API FaaS 代理转发坚果云流量。凭据仍保存在浏览器中，仅随每次代理请求转发，FaaS 不会持久化凭据。
+使用坚果云时，服务器 URL 填写 `https://dav.jianguoyun.com/dav/`，用户名填写坚果云账号邮箱，密码必须填写**第三方应用密码**（不是账号登录密码）。由于坚果云不允许浏览器直接跨域访问，Magic Resume 会通过固定上游的妙笔 API FaaS 代理转发坚果云流量。凭据仍保存在浏览器中，仅随每次代理请求转发，FaaS 不会持久化凭据；浏览器 CSP 不单独加入坚果云域名。
 
-其他 WebDAV 服务仍由浏览器直接连接，简历数据和凭据不会经过 Magic Resume 应用服务器，因此服务端必须通过 CORS 允许应用使用的 WebDAV 方法和请求头。远程文件是明文 JSON，传输过程由 HTTPS 保护，Magic Resume 不提供静态加密。当应用通过 HTTPS 提供服务时，请使用 HTTPS WebDAV 端点；只有在 localhost 本地开发期间才支持纯 HTTP。
+其他 WebDAV 服务仍由浏览器直接连接，简历数据和凭据不会经过 Magic Resume 应用服务器，因此服务端必须通过 CORS 允许应用使用的 WebDAV 方法和请求头。在妙笔部署中，静态应用资源来自配置的 GitHub Pages graph origin，应用 API 请求固定使用当前妙笔 API origin，`connect-src https:` 则保留给这些非坚果云 WebDAV 的浏览器直连。远程文件是明文 JSON，传输过程由 HTTPS 保护，Magic Resume 不提供静态加密。当应用通过 HTTPS 提供服务时，请使用 HTTPS WebDAV 端点；只有在 localhost 本地开发期间才支持纯 HTTP。
 
 WebDAV 设置和凭据会存储在此浏览器的本地存储中。同一浏览器配置中的其他脚本、扩展程序或用户可能读取这些信息。建议使用仅限所配置目录、遵循最小权限原则的专用 WebDAV 账号，并避免在共享或不受信任的设备上启用同步。清除已保存的凭据只会断开此浏览器的连接，不会删除任何远程文件。
 

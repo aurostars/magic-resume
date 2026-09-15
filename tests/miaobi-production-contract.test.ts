@@ -19,6 +19,7 @@ import { dirname, extname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { build as esbuild } from "esbuild";
 import {
   isForbiddenAssetHostname,
   materializeGitHubPagesRelease,
@@ -218,11 +219,17 @@ function assertAllowedGeneratedUrl(value: string, assetOrigins: ReadonlySet<stri
   );
 }
 
-async function generatedViolations(paths: string[], assetOrigins: ReadonlySet<string>): Promise<string[]> {
+async function generatedViolations(
+  paths: string[],
+  allowedOriginsFor: ReadonlySet<string> | ((path: string) => ReadonlySet<string>),
+): Promise<string[]> {
   const violations: string[] = [];
   for (const path of paths.filter((candidate) => textExtensions.has(extname(candidate).toLowerCase()))) {
     const text = await readFile(path, "utf8");
     const artifact = relative(root, path);
+    const allowedOrigins = typeof allowedOriginsFor === "function"
+      ? allowedOriginsFor(path)
+      : allowedOriginsFor;
     for (const forbidden of ["/Users/", "/workspace/", "file://"] as const) {
       if (text.toLowerCase().includes(forbidden.toLowerCase())) violations.push(`${artifact} contains ${forbidden}`);
     }
@@ -234,13 +241,77 @@ async function generatedViolations(paths: string[], assetOrigins: ReadonlySet<st
     }
     for (const url of extractAbsoluteHttpUrls(text)) {
       try {
-        assertAllowedGeneratedUrl(url, assetOrigins);
+        assertAllowedGeneratedUrl(url, allowedOrigins);
       } catch (error) {
         violations.push(`${artifact}: ${(error as Error).message}`);
       }
     }
   }
   return violations;
+}
+
+async function executeBuiltWebDavClientContract(): Promise<Request[]> {
+  const directory = await mkdtemp(join(tmpdir(), "miaobi-client-webdav-contract-"));
+  try {
+    const bundlePath = join(directory, "webdav-client.js");
+    await esbuild({
+      stdin: {
+        contents: `
+          import { WebDavClient } from "./src/lib/webdav/client";
+          export async function run() {
+            const client = new WebDavClient({
+              baseUrl: "https://dav.jianguoyun.com/dav/",
+              username: "account@example.test",
+              password: "fake-app-password",
+              timeoutMs: 1000,
+            });
+            await client.propfind("/magic-resume/manifest.json");
+          }
+        `,
+        loader: "ts",
+        resolveDir: root,
+      },
+      bundle: true,
+      format: "iife",
+      globalName: "MagicResumeWebDavContract",
+      platform: "browser",
+      target: "es2022",
+      outfile: bundlePath,
+    });
+
+    const requests: Request[] = [];
+    const context: Record<string, unknown> = {
+      AbortController,
+      AbortSignal,
+      DOMException,
+      Headers,
+      Request,
+      Response,
+      URL,
+      TextDecoder,
+      TextEncoder,
+      btoa,
+      clearTimeout,
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(new Request(input, init));
+        return new Response(null, { status: 207 });
+      },
+      setTimeout,
+      window: {
+        __MAGIC_RESUME_RUNTIME__: {
+          platform: "miaobi",
+          apiFunctionUrl: "https://magic.solutionsuite.cn/api/faas/api-contract",
+          assetBaseUrl: "https://aurostars.github.io/magic-resume/objects/contract/",
+        },
+      },
+    };
+    runInNewContext(await readFile(bundlePath, "utf8"), context);
+    const contract = context.MagicResumeWebDavContract as { run(): Promise<void> };
+    await contract.run();
+    return requests;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 test("production provider rules reject exact Cloudflare and TOS hostnames without substring false positives", () => {
@@ -299,6 +370,27 @@ test("production scanning rejects forbidden providers in both Miaobi and Pages t
     assert.match(details, /bucket\.tos-s3-cn-beijing\.volces\.com/);
     assert.doesNotMatch(details, /bucket\.tos-cn\.example\.com/);
     assert.doesNotMatch(details, /volces\.com\.example/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("client and API URL audits keep Jianguoyun out of the browser allowlist", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "miaobi-origin-boundary-contract-"));
+  try {
+    const clientArtifact = join(fixture, "client.js");
+    const apiArtifact = join(fixture, "api-faas.cjs");
+    await writeFile(clientArtifact, 'fetch("https://dav.jianguoyun.com/dav/browser-must-not-fetch")');
+    await writeFile(apiArtifact, 'fetch("https://dav.jianguoyun.com/dav/server-fixed-origin")');
+
+    const clientOrigins = new Set(["https://aurostars.github.io"]);
+    const apiOrigins = new Set(["https://aurostars.github.io", "https://dav.jianguoyun.com"]);
+    const violations = await generatedViolations(
+      [clientArtifact, apiArtifact],
+      (path) => path === apiArtifact ? apiOrigins : clientOrigins,
+    );
+    assert.equal(violations.length, 1);
+    assert.match(violations[0], /client\.js.*unexpected generated URL origin: https:\/\/dav\.jianguoyun\.com/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -429,11 +521,21 @@ test("production builds emit isolated complete artifacts with only audited URLs 
         .map((path) => readFile(path, "utf8")),
     )).join("\n"));
     assert.match(builtClient, /\/api\/webdav\/jianguoyun/);
-    assert.doesNotMatch(
-      builtClient,
-      /https:\/\/dav\.jianguoyun\.com\/dav\//,
-      "the browser build must not contain a direct Jianguoyun fetch target",
-    );
+
+    const browserRequests = await executeBuiltWebDavClientContract();
+    assert.equal(browserRequests.length, 1);
+    const browserRequestUrl = new URL(browserRequests[0].url);
+    assert.equal(browserRequestUrl.origin, "https://magic.solutionsuite.cn");
+    assert.equal(browserRequestUrl.pathname, "/api/faas/api-contract");
+    assert.equal(browserRequestUrl.searchParams.get("__path"), "/api/webdav/jianguoyun");
+    assert.equal(browserRequests[0].method, "POST");
+    assert.equal(browserRequests.some((request) => request.url.startsWith("https://dav.jianguoyun.com/")), false);
+    const browserEnvelope = JSON.parse(await browserRequests[0].text()) as {
+      method?: string;
+      pathSegments?: string[];
+    };
+    assert.equal(browserEnvelope.method, "PROPFIND");
+    assert.deepEqual(browserEnvelope.pathSegments, ["magic-resume", "manifest.json"]);
 
     const apiModule = { exports: undefined as unknown };
     const upstreamRequests: Request[] = [];
@@ -551,8 +653,11 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       webFaas: "web-faas.cjs",
     });
 
-    const assetOrigins = new Set([
+    const browserAllowedOrigins = new Set([
       "https://aurostars.github.io",
+    ]);
+    const apiAllowedOrigins = new Set([
+      ...browserAllowedOrigins,
       "https://dav.jianguoyun.com",
     ]);
     const pagesDirectory = join(distDirectory, "gh-pages-staging");
@@ -568,7 +673,12 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       ...await filesRecursively(miaobiDirectory),
       ...await filesRecursively(pagesDirectory),
     ];
-    const violations = await generatedViolations(generatedFiles, assetOrigins);
+    const violations = await generatedViolations(
+      generatedFiles,
+      (path) => path === join(miaobiDirectory, "api-faas.cjs")
+        ? apiAllowedOrigins
+        : browserAllowedOrigins,
+    );
     assert.deepEqual(violations, []);
 
     await runScript("build");
