@@ -1,0 +1,1 @@
+import{u as t,b as r}from"./main-B9R9Z-Et.js";function s(){const a=t(),e=o=>typeof o=="string"?{to:o}:o;return{push:o=>a(e(o)),replace:o=>a({...e(o),replace:!0}),back:()=>window.history.back(),forward:()=>window.history.forward(),refresh:()=>window.location.reload()}}function i(){return r({select:a=>a.pathname})}export{i as a,s as u};
