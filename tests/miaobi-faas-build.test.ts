@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { buildApiFaas } from "../scripts/miaobi/build-faas";
 
 const require = createRequire(import.meta.url);
@@ -52,6 +53,43 @@ test("the API build emits a standalone CommonJS FaaS handler", async () => {
       error: "Method not allowed",
       code: "methodNotAllowed",
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the API bundle loads and serves health without runtime require", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-resume-faas-runtime-"));
+  try {
+    const bundlePath = await buildApiFaas(directory, {
+      gitCommit: "59a06b5c2c127d287d01016e5be4d781e310fe2e",
+      nonce: "0123456789abcdef0123456789abcdef",
+    });
+    const module = { exports: undefined as unknown };
+    runInNewContext(await readFile(bundlePath, "utf8"), {
+      module,
+      require: (specifier: string) => {
+        throw new Error(`runtime require is unavailable: ${specifier}`);
+      },
+      AbortController,
+      AbortSignal,
+      DOMException,
+      Headers,
+      Request,
+      Response,
+      URL,
+      clearTimeout,
+      fetch,
+      setTimeout,
+    });
+
+    const handler = module.exports as (request: Request) => Promise<Response>;
+    const response = await handler(new Request(
+      "https://magic.solutionsuite.cn/api/faas/id?__path=%2F__miaobi_health__",
+    ));
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get("X-Magic-Resume-Faas"), "magic-resume-api");
+    assert.deepEqual(await response.json(), { error: "Not found", code: "notFound" });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

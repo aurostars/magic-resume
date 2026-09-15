@@ -4,7 +4,6 @@ import {
   handleApiRequest,
 } from "../src/lib/server/api-router";
 import { handleImageProxy, type ImageProxyTransport } from "../src/lib/server/image-proxy";
-import { createNodeImageProxyTransport } from "../src/lib/server/node-image-transport";
 
 declare const __MIAOBI_API_BUILD_MARKER__: string;
 const API_BUILD_MARKER = typeof __MIAOBI_API_BUILD_MARKER__ === "string"
@@ -13,15 +12,13 @@ const API_BUILD_MARKER = typeof __MIAOBI_API_BUILD_MARKER__ === "string"
 
 export interface MiaobiFaasRequest extends Request {}
 
-export function createMiaobiApiHandler(
-  imageTransport: ImageProxyTransport = createNodeImageProxyTransport(),
-) {
+export function createMiaobiApiHandler(imageTransport?: ImageProxyTransport) {
   return createMiaobiFaasAdapter((request, logicalPath) =>
     handleApiRequest(request, logicalPath, {
       ...defaultApiRouterDependencies,
-      imageProxy: (imageRequest) => handleImageProxy(imageRequest, {
-        transport: imageTransport,
-      }),
+      imageProxy: (imageRequest) => imageTransport
+        ? handleImageProxy(imageRequest, { transport: imageTransport })
+        : handleImageProxy(imageRequest),
     }));
 }
 
