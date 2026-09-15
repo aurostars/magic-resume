@@ -67,7 +67,7 @@ pnpm dev
 
 ## ☁️ WebDAV 同步
 
-打开**设置 → WebDAV 同步**，填写 WebDAV 服务器 URL、用户名和密码。远程目录可配置，默认为 `/magic-resume/`。选择**立即同步**可手动同步，也可启用可选的自动同步，在本地内容变更后以及应用回到前台时进行同步。
+打开**设置 → WebDAV 同步**，填写 WebDAV 服务器 URL、用户名和密码。远程目录可配置，默认为 `/magic-resume/`。选择**立即同步**可手动同步。新建 WebDAV 配置默认开启自动同步；已有配置中明确保存的开关值会原样保留。
 
 每份简历分别存储在配置的远程根目录下：
 
@@ -83,7 +83,9 @@ pnpm dev
 
 如果本地副本和云端副本自上次成功同步后都发生了变化，应用会报告冲突，并让你明确选择**使用本地版本**（上传本地副本）或**使用云端版本**（替换本地数据）。Magic Resume 不会自动合并单份简历。
 
-浏览器会直接连接 WebDAV 服务器；简历数据和凭据不会经过 Magic Resume 应用服务器。远程文件是明文 JSON，传输过程由 HTTPS 保护，Magic Resume 不提供静态加密。因此，WebDAV 服务器必须通过 CORS 允许来自 Magic Resume 来源的浏览器请求，包括应用使用的 WebDAV 方法和请求头。当应用通过 HTTPS 提供服务时，请使用 HTTPS WebDAV 端点；只有在 localhost 本地开发期间才支持纯 HTTP。
+使用坚果云时，服务器 URL 填写 `https://dav.jianguoyun.com/dav/`，用户名填写坚果云账号邮箱，密码必须填写**第三方应用密码**（不是账号登录密码）。由于坚果云不允许浏览器直接跨域访问，Magic Resume 会通过固定上游的妙笔 API FaaS 代理转发坚果云流量。凭据仍保存在浏览器中，仅随每次代理请求转发，FaaS 不会持久化凭据。
+
+其他 WebDAV 服务仍由浏览器直接连接，简历数据和凭据不会经过 Magic Resume 应用服务器，因此服务端必须通过 CORS 允许应用使用的 WebDAV 方法和请求头。远程文件是明文 JSON，传输过程由 HTTPS 保护，Magic Resume 不提供静态加密。当应用通过 HTTPS 提供服务时，请使用 HTTPS WebDAV 端点；只有在 localhost 本地开发期间才支持纯 HTTP。
 
 WebDAV 设置和凭据会存储在此浏览器的本地存储中。同一浏览器配置中的其他脚本、扩展程序或用户可能读取这些信息。建议使用仅限所配置目录、遵循最小权限原则的专用 WebDAV 账号，并避免在共享或不受信任的设备上启用同步。清除已保存的凭据只会断开此浏览器的连接，不会删除任何远程文件。
 
@@ -107,7 +109,7 @@ corepack pnpm deploy:miaobi
 
 部署会对 GitHub Pages 发布、Pages 健康检查、每次 FaaS 操作、固定页面切换和不可变状态提交执行 generation fencing；远端页面结果无法确认时以 `MIAOBI_PAGE_RESULT_UNCERTAIN` 关闭失败，绝不能自动重试或覆盖。
 
-简历与 WebDAV 凭据仍位于当前浏览器 profile，不会迁入妙笔 FaaS 或 GitHub Pages。Pages 使用不可变、内容寻址 release，运维需监控仓库存储增长，清理只能走单独评审的保留策略。此前因发布受阻而放弃的 TOS 路径仅保留历史说明，不属于默认部署。Cloudflare 仅作为人工回滚路径保留，不参与妙笔运行时。[妙笔原生部署指南（中文为主 / English summary）](docs/miaobi-deployment.md)是首次 Pages 启用、运行时域名、状态恢复、回滚与验证限制的权威说明。
+简历和 WebDAV 凭据仍位于当前浏览器 profile。坚果云凭据仅随每次请求通过固定上游的 API FaaS 转发，FaaS 永不持久化；其他 WebDAV 服务仍由浏览器直连。凭据不会迁入 GitHub Pages。Pages 使用不可变、内容寻址 release，运维需监控仓库存储增长，清理只能走单独评审的保留策略。此前因发布受阻而放弃的 TOS 路径仅保留历史说明，不属于默认部署。Cloudflare 仅作为人工回滚路径保留，不参与妙笔运行时。[妙笔原生部署指南（中文为主 / English summary）](docs/miaobi-deployment.md)是首次 Pages 启用、运行时域名、状态恢复、回滚与验证限制的权威说明。
 
 ### AI 厂商网络配置
 

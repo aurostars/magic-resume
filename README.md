@@ -67,7 +67,7 @@ pnpm dev
 
 ## ☁️ WebDAV synchronization
 
-Open **Settings → WebDAV Sync** and enter your WebDAV server URL, username, and password. The remote directory is configurable and defaults to `/magic-resume/`. Select **Sync Now** for a manual sync, or enable optional automatic sync to synchronize after local changes and when the app returns to the foreground.
+Open **Settings → WebDAV Sync** and enter your WebDAV server URL, username, and password. The remote directory is configurable and defaults to `/magic-resume/`. Select **Sync Now** for a manual sync. New WebDAV configurations enable automatic sync by default; an explicitly saved setting from an existing configuration is preserved.
 
 Each resume is stored separately under the configured remote root:
 
@@ -83,7 +83,9 @@ Files in `resumes/` and `trash/` match the manual export format and can be impor
 
 If both the local and cloud copies changed since the last successful sync, the app reports a conflict and lets you explicitly choose **Use Local** (upload the local copy) or **Use Cloud** (replace local data). Magic Resume does not merge individual resumes automatically.
 
-The browser connects directly to your WebDAV server; resume data and credentials do not pass through a Magic Resume application server. Remote files are plaintext JSON protected in transit by HTTPS, not encrypted at rest by Magic Resume. Your WebDAV server must allow browser requests from the Magic Resume origin with CORS, including the WebDAV methods and headers it uses. Use an HTTPS WebDAV endpoint when the app is served over HTTPS; plain HTTP is supported only during localhost development.
+For Jianguoyun, use server URL `https://dav.jianguoyun.com/dav/`, your Jianguoyun account email as the username, and a **third-party application password** (not the account login password). Because Jianguoyun does not allow direct browser CORS, Magic Resume sends Jianguoyun traffic through the fixed-origin Miaobi API FaaS proxy. The credentials remain in browser persistence and are forwarded with each proxy request; the FaaS does not persist them.
+
+Other WebDAV services continue to connect directly from the browser. Resume data and credentials for those services do not pass through a Magic Resume application server, and the server must support browser CORS for the WebDAV methods and headers used by the app. Remote files are plaintext JSON protected in transit by HTTPS, not encrypted at rest by Magic Resume. Use an HTTPS WebDAV endpoint when the app is served over HTTPS; plain HTTP is supported only during localhost development.
 
 WebDAV settings and credentials are stored in this browser's local storage. Other scripts, extensions, or users with access to the same browser profile may be able to read them. Prefer a dedicated, least-privilege WebDAV account limited to the configured directory, and avoid enabling sync on a shared or untrusted device. Clearing the saved credentials disconnects this browser but does not remove any remote files.
 
@@ -107,7 +109,7 @@ corepack pnpm deploy:miaobi
 
 The deploy script generation-fences GitHub Pages publication, Pages health verification, every FaaS operation, the fixed-page switch, and the immutable state commit. It fails closed with `MIAOBI_PAGE_RESULT_UNCERTAIN` when a remote page result cannot be proven. Never automatically retry or override that condition.
 
-Resume data and WebDAV credentials remain in the current browser profile; they are not moved to Miaobi FaaS or GitHub Pages. GitHub Pages stores immutable content-addressed releases, so operators must monitor repository growth and remove data only through a separately reviewed retention procedure. The former TOS route was abandoned after publication was blocked; it is not part of the default deployment path. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. The [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) is authoritative for first-publish Pages activation, runtime domains, state recovery, rollback, and verification limits.
+Resume data and WebDAV credentials remain in the current browser profile. Jianguoyun credentials are forwarded per request through the fixed-origin API FaaS and are never persisted by FaaS; other WebDAV services remain browser-direct. Credentials are not moved to GitHub Pages. GitHub Pages stores immutable content-addressed releases, so operators must monitor repository growth and remove data only through a separately reviewed retention procedure. The former TOS route was abandoned after publication was blocked; it is not part of the default deployment path. Cloudflare is retained only as a manual rollback path and is not used by the Miaobi runtime. The [Miaobi native deployment guide (中文为主 / English summary)](docs/miaobi-deployment.md) is authoritative for first-publish Pages activation, runtime domains, state recovery, rollback, and verification limits.
 
 ### AI provider networking
 

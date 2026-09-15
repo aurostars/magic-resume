@@ -11,7 +11,7 @@
 - 妙笔 Web FaaS，负责提供注入运行时配置后的 HTML；
 - 固定页面 `https://magic.solutionsuite.cn/html-box/vv6BtLE8MTR`，只在所有健康检查成功后切换。
 
-浏览器运行时只允许 GitHub Pages 资源域名与 `https://magic.solutionsuite.cn/api/faas/<id>` FaaS 域名。不得依赖 TOS、Cloudflare 或 `workers.dev`。早期 TOS 方案因生产发布受阻而放弃，仅作为历史背景，不是回滚或默认路径。
+浏览器运行时只允许 GitHub Pages 资源域名与 `https://magic.solutionsuite.cn/api/faas/<id>` FaaS 域名。坚果云 WebDAV 使用固定上游的 API 路由 `POST /api/webdav/jianguoyun`，服务端仅可访问 `https://dav.jianguoyun.com/dav/`；浏览器 CSP 不新增坚果云域名。不得依赖 TOS、Cloudflare 或 `workers.dev`。早期 TOS 方案因生产发布受阻而放弃，仅作为历史背景，不是回滚或默认路径。
 
 ## 2. 前置条件
 
@@ -35,9 +35,16 @@ magic-builder --version
 ## 3. 构建与本地契约检查
 
 ```bash
-corepack pnpm exec tsx --test tests/miaobi-production-contract.test.ts
-corepack pnpm build:miaobi
+corepack pnpm exec tsx --test \
+  tests/miaobi-production-contract.test.ts \
+  tests/miaobi-github-pages-production.test.ts \
+  tests/miaobi-faas-build.test.ts
+corepack pnpm test:webdav
+corepack pnpm test:miaobi
+MIAOBI_GIT_COMMIT="$(git rev-parse HEAD)" corepack pnpm build:miaobi
 ```
+
+构建后确认 `dist/miaobi/api-faas.meta.json` 的 `gitCommit` 与当前完整 40 位 HEAD 一致。生产契约还必须证明浏览器 bundle 包含 `/api/webdav/jianguoyun`、不包含直接坚果云请求目标，并能在运行时 `require` 不可用时通过注入的假上游 `fetch` 执行代理请求。
 
 `dist/miaobi/` 包含：
 
@@ -48,6 +55,8 @@ corepack pnpm build:miaobi
 - `manifest.json`：schema v2 本地构建清单，声明 `assetProvider: github-pages` 和 Pages base URL。
 
 生产契约会递归检查构建输出与模拟 `gh-pages` staging：禁止已知 secret、本机绝对路径、TOS、Cloudflare Worker 和 `workers.dev` 依赖，并校验所有 URL allowlist。`dist/` 可重建，不是部署事实来源。
+
+凭据无关 smoke 必须在发布前执行：用构建后的 API handler 与注入的假上游 `fetch` 请求 `/api/webdav/jianguoyun`；确认不支持的方法与畸形路径返回文档化、脱敏的 `4xx`，任何响应都不含 `Authorization` 值或提交的密码，且 bundle 在运行时 `require` 抛错时仍可加载。不得发起真实认证的坚果云请求，不得把凭据放入命令、fixture 或日志。
 
 ## 4. 生产部署
 
@@ -124,6 +133,8 @@ controller 发布后至少核对：
 - `fork/gh-pages` manifest 的 source commit 与目标 HEAD 相同；
 - Pages manifest、index 和启动资源为 2xx，hash/MIME 匹配；
 - API/Web FaaS marker 与 runtime 指向本次 build 和 Pages base URL；
+- API health 继续对不存在路径返回 `404 notFound`，并携带当前 `X-Magic-Resume-Build` 与 `X-Magic-Resume-Faas: magic-resume-api`；同时以不含凭据的畸形请求检查 `/api/webdav/jianguoyun` 返回脱敏 `4xx`；
+- Web FaaS CSP 的 `connect-src` 保持既有策略，仅允许当前妙笔 API origin 与既有通用 HTTPS 直连能力，不单独加入坚果云或其他任意 WebDAV host；
 - 固定页面到达新的原生 Web FaaS；
 - 生成物与运行时文本不依赖 TOS、Cloudflare 或 `workers.dev`。
 
@@ -133,4 +144,4 @@ controller 发布后至少核对：
 
 ## English summary
 
-After review, the controller checks `gh auth status`, validates the single `fork` push URL, builds the reviewed commit, and runs the generation-fenced deployment. The fixed order is GitHub Pages push, Pages health, fresh API FaaS, fresh Web FaaS, FaaS health, fixed-page switch, then immutable schema-v3 state. No Magic CLI call is allowed before Pages health succeeds. v1/v2 states remain read-only rollback inputs and never imply GitHub Pages provenance. Monitor immutable `gh-pages` storage growth and use a separately reviewed retention procedure. Production publication and source-main push are controller-only post-review steps.
+After review, the controller checks `gh auth status`, validates the single `fork` push URL, builds the reviewed commit, and runs the generation-fenced deployment. Jianguoyun users configure `https://dav.jianguoyun.com/dav/`, their account email, and a third-party application password rather than the login password. Jianguoyun traffic uses the fixed-origin `/api/webdav/jianguoyun` API FaaS route because browser CORS is unavailable; credentials remain in browser persistence, are forwarded per request, and are not persisted by FaaS. New configurations enable auto-sync by default while explicit existing settings are preserved. Other WebDAV providers remain browser-direct and require CORS. Before deployment, run credential-free malformed/unsupported proxy checks and verify that neither responses nor logs expose authorization data. The fixed order is GitHub Pages push, Pages health, fresh API FaaS, fresh Web FaaS, FaaS health, fixed-page switch, then immutable schema-v3 state. No Magic CLI call is allowed before Pages health succeeds. v1/v2 states remain read-only rollback inputs and never imply GitHub Pages provenance. Monitor immutable `gh-pages` storage growth and use a separately reviewed retention procedure. Production publication and source-main push are controller-only post-review steps.

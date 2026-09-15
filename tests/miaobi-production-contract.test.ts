@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import {
   isForbiddenAssetHostname,
   materializeGitHubPagesRelease,
@@ -418,8 +419,118 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       "client/index.html",
     ]) await access(join(miaobiDirectory, artifact));
 
-    const assets = await filesRecursively(join(miaobiDirectory, "client/assets"));
+    const clientFiles = await filesRecursively(join(miaobiDirectory, "client"));
+    const assets = clientFiles.filter((path) => path.includes(`${join("client", "assets")}`));
     assert.ok(assets.length > 0, "Miaobi client assets must not be empty");
+
+    const builtClient = normalizeEscapedUrlSyntax((await Promise.all(
+      clientFiles
+        .filter((path) => textExtensions.has(extname(path).toLowerCase()))
+        .map((path) => readFile(path, "utf8")),
+    )).join("\n"));
+    assert.match(builtClient, /\/api\/webdav\/jianguoyun/);
+    assert.doesNotMatch(
+      builtClient,
+      /https:\/\/dav\.jianguoyun\.com\/dav\//,
+      "the browser build must not contain a direct Jianguoyun fetch target",
+    );
+
+    const apiModule = { exports: undefined as unknown };
+    const upstreamRequests: Request[] = [];
+    runInNewContext(await readFile(join(miaobiDirectory, "api-faas.cjs"), "utf8"), {
+      module: apiModule,
+      require: (specifier: string) => {
+        throw new Error(`runtime require is unavailable: ${specifier}`);
+      },
+      AbortController,
+      AbortSignal,
+      DOMException,
+      Headers,
+      Request,
+      Response,
+      URL,
+      TextDecoder,
+      TextEncoder,
+      btoa,
+      clearTimeout,
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        upstreamRequests.push(new Request(input, init));
+        return new Response("<multistatus/>", {
+          status: 207,
+          headers: { "Content-Type": "application/xml" },
+        });
+      },
+      setTimeout,
+    });
+    const apiHandler = apiModule.exports as (request: Request) => Promise<Response>;
+    const proxyResponse = await apiHandler(new Request(
+      "https://magic.solutionsuite.cn/api/faas/build-only?__path=%2Fapi%2Fwebdav%2Fjianguoyun",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "PROPFIND",
+          pathSegments: ["magic-resume", "manifest.json"],
+          pathTrailingSlash: false,
+          username: "account@example.test",
+          password: "fake-app-password",
+        }),
+      },
+    ));
+    assert.equal(proxyResponse.status, 207);
+    assert.equal(await proxyResponse.text(), "<multistatus/>");
+    assert.equal(upstreamRequests.length, 1);
+    assert.equal(upstreamRequests[0].url, "https://dav.jianguoyun.com/dav/magic-resume/manifest.json");
+
+    for (const payload of [
+      {
+        method: "PATCH",
+        pathSegments: ["magic-resume"],
+        pathTrailingSlash: true,
+        username: "account@example.test",
+        password: "fake-app-password",
+      },
+      {
+        method: "PROPFIND",
+        pathSegments: [".."],
+        pathTrailingSlash: false,
+        username: "account@example.test",
+        password: "fake-app-password",
+      },
+    ]) {
+      const rejected = await apiHandler(new Request(
+        "https://magic.solutionsuite.cn/api/faas/build-only?__path=%2Fapi%2Fwebdav%2Fjianguoyun",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      ));
+      const rejectedBody = await rejected.text();
+      assert.equal(rejected.status, 400);
+      assert.match(rejectedBody, /invalidWebdavProxyRequest/);
+      assert.doesNotMatch(rejectedBody, /Authorization|fake-app-password|account@example\.test/i);
+    }
+    assert.equal(upstreamRequests.length, 1, "invalid requests must be rejected before upstream fetch");
+
+    const webModule = { exports: undefined as unknown };
+    runInNewContext(await readFile(join(miaobiDirectory, "web-faas.cjs"), "utf8"), {
+      module: webModule,
+      require: (specifier: string) => {
+        throw new Error(`runtime require is unavailable: ${specifier}`);
+      },
+      Headers,
+      Request,
+      Response,
+      URL,
+    });
+    const webHandler = webModule.exports as (request: Request) => Promise<Response>;
+    const webResponse = await webHandler(new Request("https://magic.solutionsuite.cn/"));
+    const csp = webResponse.headers.get("Content-Security-Policy") ?? "";
+    const connectSrc = csp.split(";").map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("connect-src "));
+    assert.equal(connectSrc, "connect-src https://magic.solutionsuite.cn https:");
+    assert.doesNotMatch(connectSrc ?? "", /dav\.jianguoyun\.com|\*/i);
 
     const manifest = JSON.parse(await readFile(join(miaobiDirectory, "manifest.json"), "utf8")) as {
       schemaVersion: number;
