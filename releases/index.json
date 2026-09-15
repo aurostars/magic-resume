@@ -20,6 +20,10 @@
     "d26c16fcfcec3cb7b73d3d6002aebdf212422f21": {
       "releaseId": "d26c16fcfcec-20260914142200",
       "manifest": "releases/d26c16fcfcec3cb7b73d3d6002aebdf212422f21/manifest.json"
+    },
+    "f0df662b1d20755be10533e61a69a6651230b0ef": {
+      "releaseId": "f0df662b1d20-20260915104508",
+      "manifest": "releases/f0df662b1d20755be10533e61a69a6651230b0ef/manifest.json"
     }
   }
 }
