@@ -15,11 +15,11 @@ import { Label } from "@/components/ui/label";
 import { getWebDavSyncController } from "@/hooks/useWebDavSync";
 import { isJianguoyunWebDavUrl, normalizeWebDavBaseUrl } from "@/lib/webdav/client";
 import { WebDavError } from "@/lib/webdav/errors";
+import { getWebDavDiagnostic } from "@/lib/webdav/diagnostics";
 import type { WebDavSyncController } from "@/lib/webdav/controller";
 import { useLocale, useTranslations } from "@/i18n/compat/client";
 import {
   useWebDavStore,
-  type WebDavSafeError,
   type WebDavSettings,
 } from "@/store/useWebDavStore";
 import { WebDavConflictDialog } from "./WebDavConflictDialog";
@@ -45,23 +45,6 @@ const normalizeSettings = (draft: WebDavSettings): WebDavSettings => ({
   username: draft.username.trim(),
   remoteDirectory: normalizeDirectory(draft.remoteDirectory),
 });
-
-const errorKey = (code: WebDavSafeError["code"], jianguoyun: boolean): string => {
-  switch (code) {
-    case "SNAPSHOT_VERSION": return "newerSnapshotError";
-    case "SNAPSHOT_JSON":
-    case "SNAPSHOT_SHAPE":
-    case "SNAPSHOT_RESUME":
-    case "SNAPSHOT_HASH": return "corruptSnapshotError";
-    case "AUTH": return jianguoyun ? "jianguoyunAuthError" : "authError";
-    case "FORBIDDEN": return "forbiddenError";
-    case "NETWORK": case "SERVER": return "networkError";
-    case "TIMEOUT": return "timeoutError";
-    case "DIRECTORY": case "NOT_FOUND": return "directoryError";
-    case "QUOTA": return "quotaError";
-    default: return "unknownError";
-  }
-};
 
 export const WebDavSection = ({
   controllerProvider = getWebDavSyncController,
@@ -145,8 +128,9 @@ export const WebDavSection = ({
   } catch {
     // Invalid drafts must retain generic, sanitized error guidance.
   }
-  const statusMessage = error
-    ? t(errorKey(error.code, jianguoyun))
+  const diagnostic = error ? getWebDavDiagnostic(error, jianguoyun) : null;
+  const statusMessage = diagnostic
+    ? t(diagnostic.messageKey)
     : warning
       ? t("nonAtomicWarning")
       : status === "syncing" || status === "testing" || busy
@@ -231,9 +215,17 @@ export const WebDavSection = ({
             </p>
           </div>
           {statusMessage && (
-            <p role={error ? "alert" : "status"} className={error ? "text-sm text-red-600" : "text-sm text-gray-600 dark:text-gray-300"}>
-              {statusMessage}
-            </p>
+            <div role={error ? "alert" : "status"} className={error ? "text-sm text-red-600" : "text-sm text-gray-600 dark:text-gray-300"}>
+              <p>{statusMessage}</p>
+              {diagnostic && (
+                <p className="mt-1 text-xs">
+                  {t("diagnosticLabel", { code: diagnostic.diagnosticCode })}
+                  {diagnostic.httpStatus === null
+                    ? null
+                    : ` · ${t("httpStatusLabel", { status: diagnostic.httpStatus })}`}
+                </p>
+              )}
+            </div>
           )}
 
           <div className="flex flex-wrap gap-3">

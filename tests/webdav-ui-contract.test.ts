@@ -79,7 +79,7 @@ const requiredKeys = [
   "autoSync", "testConnection", "syncNow", "clearCredentials", "clearConfirmTitle",
   "clearConfirmBody", "cancel", "confirm", "localStorageWarning", "dedicatedAccountHint",
   "lastSyncedAt", "neverSynced", "syncing", "success", "nonAtomicWarning", "authError",
-  "jianguoyunAuthError",
+  "jianguoyunAuthError", "proxyProtocolError", "diagnosticLabel", "httpStatusLabel",
   "forbiddenError", "networkError", "timeoutError", "directoryError", "quotaError",
   "corruptSnapshotError", "newerSnapshotError", "unknownError", "perResumeJsonDescription",
   "credentialsLocalDescription", "clearKeepsFilesDescription", "syncedResumeCount", "conflictTitle",
@@ -269,8 +269,8 @@ test("invalid URL normalization reports a safe localized error without calling t
   assert.equal(providerCalls, 0);
   assert.equal(useWebDavStore.getState().settings.baseUrl, "");
   assert.deepEqual(useWebDavStore.getState().error, { code: "UNKNOWN", status: null });
-  assert.equal(screen.getByRole("alert").textContent, en.dashboard.settings.webdav.unknownError);
-  assert.doesNotMatch(screen.getByRole("alert").textContent ?? "", /private-password/);
+  assert.match(screen.getByRole("alert").textContent ?? "", /The WebDAV operation failed.*Diagnostic code: WD-CLIENT-UNKNOWN/);
+  assert.doesNotMatch(screen.getByRole("alert").textContent ?? "", /private-password|HTTP/);
 });
 
 test("clear confirmation is a trapped modal, closes with Escape, restores focus, and guards deletion", async () => {
@@ -364,15 +364,24 @@ test("conflict choices identify the resume and all conflict actions are disabled
   }
 });
 
+test("Jianguoyun proxy failures render localized safe diagnostics", () => {
+  useWebDavStore.getState().setSettings({ baseUrl: "https://dav.jianguoyun.com/dav/" });
+  useWebDavStore.getState().setError({ code: "UNKNOWN", status: 400 });
+  renderLocalized(React.createElement(WebDavSection), zh);
+
+  const alert = screen.getByRole("alert");
+  assert.match(alert.textContent ?? "", /请强制刷新页面/);
+  assert.match(alert.textContent ?? "", /诊断码：WD-PROXY-400/);
+  assert.match(alert.textContent ?? "", /HTTP 400/);
+});
+
 test("authentication guidance names Jianguoyun's third-party app password only for the exact provider", () => {
   useWebDavStore.getState().setSettings({ baseUrl: "https://dav.jianguoyun.com/dav" });
   useWebDavStore.getState().setError({ code: "AUTH", status: 401 });
   const jianguoyun = renderLocalized(React.createElement(WebDavSection));
 
-  assert.equal(
-    screen.getByRole("alert").textContent,
-    en.dashboard.settings.webdav.jianguoyunAuthError,
-  );
+  const jianguoyunAlert = screen.getByRole("alert").textContent ?? "";
+  assert.match(jianguoyunAlert, /third-party app password.*Jianguoyun.*Diagnostic code: WD-AUTH-401.*HTTP 401/);
   assert.match(
     zh.dashboard.settings.webdav.jianguoyunAuthError,
     /坚果云“账户信息 → 安全选项 → 第三方应用管理”.*第三方应用密码.*不是登录密码/,
@@ -382,31 +391,46 @@ test("authentication guidance names Jianguoyun's third-party app password only f
   useWebDavStore.getState().setSettings({ baseUrl: "https://dav.example.test/root" });
   useWebDavStore.getState().setError({ code: "AUTH", status: 401 });
   renderLocalized(React.createElement(WebDavSection));
-  assert.equal(screen.getByRole("alert").textContent, en.dashboard.settings.webdav.authError);
-  assert.doesNotMatch(screen.getByRole("alert").textContent ?? "", /Jianguoyun|third-party/);
+  const genericAlert = screen.getByRole("alert").textContent ?? "";
+  assert.match(genericAlert, /Authentication failed.*Diagnostic code: WD-AUTH-401.*HTTP 401/);
+  assert.doesNotMatch(genericAlert, /Jianguoyun|third-party/);
 });
 
-test("forbidden, timeout, server, and unknown errors stay sanitized and localized", () => {
-  const secret = "raw-upstream-password-and-url";
+test("diagnostic alerts expose only allowlisted metadata", () => {
+  const unsafeValues = [
+    "private-user-marker",
+    "submitted-password-marker",
+    "Bearer authorization-marker",
+    "request-body-marker",
+    "upstream-response-marker",
+    "query-secret-marker",
+    "raw-exception-marker",
+  ];
   const cases = [
-    ["FORBIDDEN", en.dashboard.settings.webdav.forbiddenError],
-    ["TIMEOUT", en.dashboard.settings.webdav.timeoutError],
-    ["SERVER", en.dashboard.settings.webdav.networkError],
-    ["UNKNOWN", en.dashboard.settings.webdav.unknownError],
+    { code: "AUTH", status: 401, diagnosticCode: "WD-AUTH-401", http: "HTTP 401" },
+    { code: "SERVER", status: 502, diagnosticCode: "WD-UPSTREAM-502", http: "HTTP 502" },
+    { code: "UNKNOWN", status: null, diagnosticCode: "WD-CLIENT-UNKNOWN", http: null },
   ] as const;
 
-  for (const [code, message] of cases) {
-    const unsafeError = {
+  for (const { code, status, diagnosticCode, http } of cases) {
+    useWebDavStore.getState().setError({
       code,
-      status: 500,
-      message: secret,
-      rawError: new Error(secret),
-    };
-    useWebDavStore.getState().setError(unsafeError);
+      status,
+      username: unsafeValues[0],
+      password: unsafeValues[1],
+      Authorization: unsafeValues[2],
+      requestBody: unsafeValues[3],
+      responseBody: unsafeValues[4],
+      url: `https://dav.example.test/root?token=${unsafeValues[5]}`,
+      rawError: new Error(unsafeValues[6]),
+    });
     const view = renderLocalized(React.createElement(WebDavSection));
-    const alert = screen.getByRole("alert");
-    assert.equal(alert.textContent, message);
-    assert.doesNotMatch(alert.textContent ?? "", new RegExp(secret));
+    const text = screen.getByRole("alert").textContent ?? "";
+    assert.match(text, new RegExp(`Diagnostic code: ${diagnosticCode}`));
+    if (http) assert.match(text, new RegExp(http));
+    else assert.doesNotMatch(text, /HTTP/);
+    assert.doesNotMatch(text, /Authorization/);
+    for (const unsafeValue of unsafeValues) assert.doesNotMatch(text, new RegExp(unsafeValue));
     view.unmount();
   }
 });
@@ -414,16 +438,16 @@ test("forbidden, timeout, server, and unknown errors stay sanitized and localize
 test("snapshot validation errors render only their localized safe messages", () => {
   const secret = "raw-server-body-password-and-url";
   const cases = [
-    ["SNAPSHOT_VERSION", en.dashboard.settings.webdav.newerSnapshotError],
-    ["SNAPSHOT_RESUME", en.dashboard.settings.webdav.corruptSnapshotError],
-    ["SNAPSHOT_HASH", en.dashboard.settings.webdav.corruptSnapshotError],
+    ["SNAPSHOT_VERSION", en.dashboard.settings.webdav.newerSnapshotError, "WD-SNAPSHOT-VERSION"],
+    ["SNAPSHOT_RESUME", en.dashboard.settings.webdav.corruptSnapshotError, "WD-SNAPSHOT-CORRUPT"],
+    ["SNAPSHOT_HASH", en.dashboard.settings.webdav.corruptSnapshotError, "WD-SNAPSHOT-CORRUPT"],
   ] as const;
-  for (const [code, message] of cases) {
+  for (const [code, message, diagnosticCode] of cases) {
     useWebDavStore.getState().setError({ code, status: null });
     const view = renderLocalized(React.createElement(WebDavSection));
-    const alert = screen.getByRole("alert");
-    assert.equal(alert.textContent, message);
-    assert.doesNotMatch(alert.textContent ?? "", new RegExp(secret));
+    const text = screen.getByRole("alert").textContent ?? "";
+    assert.match(text, new RegExp(`${message}Diagnostic code: ${diagnosticCode}`));
+    assert.doesNotMatch(text, new RegExp(`${secret}|HTTP`));
     view.unmount();
   }
 });
