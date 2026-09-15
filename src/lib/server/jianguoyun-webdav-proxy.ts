@@ -48,21 +48,29 @@ function proxyFailed(): Response {
   return jsonError(502, "Jianguoyun WebDAV proxy failed", "webdavProxyFailed");
 }
 
-async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
+function cancelBody(body: ReadableStream<Uint8Array> | null): void {
   if (!body) return;
   try {
-    await body.cancel();
+    void body.cancel().catch(() => {});
   } catch {
     // Cancellation is best-effort; errors must not replace the stable proxy response.
   }
 }
 
-async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
   try {
-    await reader.cancel();
+    void reader.cancel().catch(() => {});
   } catch {
     // Cancellation is best-effort; errors must not replace the stable size/error response.
   }
+}
+
+function responseHeaders(upstream: Response): Headers {
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  upstream.headers.forEach((value, name) => {
+    if (RESPONSE_HEADERS.has(name.toLowerCase())) headers.set(name, value);
+  });
+  return headers;
 }
 
 async function readBodyWithLimit(
@@ -78,13 +86,13 @@ async function readBodyWithLimit(
       if (done) break;
       total += value.byteLength;
       if (total > MAX_BODY_BYTES) {
-        await cancelReader(reader);
+        cancelReader(reader);
         return undefined;
       }
       chunks.push(value);
     }
   } catch (error) {
-    await cancelReader(reader);
+    cancelReader(reader);
     throw error;
   }
 
@@ -189,7 +197,7 @@ export async function handleJianguoyunWebDavProxy(
     const length = Number(declaredLength);
     if (!Number.isSafeInteger(length) || length < 0) return invalidRequest();
     if (length > MAX_BODY_BYTES) {
-      await cancelBody(request.body);
+      cancelBody(request.body);
       return requestTooLarge();
     }
   }
@@ -235,22 +243,30 @@ export async function handleJianguoyunWebDavProxy(
       redirect: "manual",
       signal: controller.signal,
     });
-    if (upstream.status < 200 || upstream.status >= 300) {
-      await cancelBody(upstream.body);
+    if (upstream.status >= 300 && upstream.status < 400) {
+      cancelBody(upstream.body);
       return proxyFailed();
+    }
+    if (upstream.status < 200) {
+      cancelBody(upstream.body);
+      return proxyFailed();
+    }
+    if (upstream.status >= 400) {
+      cancelBody(upstream.body);
+      return new Response(null, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: responseHeaders(upstream),
+      });
     }
 
     const body = await readBodyWithLimit(upstream.body);
     if (!body) return proxyFailed();
 
-    const responseHeaders = new Headers({ "Cache-Control": "no-store" });
-    upstream.headers.forEach((value, name) => {
-      if (RESPONSE_HEADERS.has(name.toLowerCase())) responseHeaders.set(name, value);
-    });
     return new Response(body.byteLength === 0 ? null : body, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: responseHeaders,
+      headers: responseHeaders(upstream),
     });
   } catch {
     return proxyFailed();
