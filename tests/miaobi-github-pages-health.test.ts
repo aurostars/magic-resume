@@ -219,6 +219,36 @@ test("verifies an unquoted module src as a boot-critical asset", async () => {
   assert.ok(visited.includes(fixture.publication.manifest.files["assets/app.js"].url));
 });
 
+test("preserves equals signs in an unquoted module src before URL validation", async () => {
+  const scriptUrl = `${OBJECT_BASE}assets/app.js`;
+  for (const unquotedSrc of [
+    `${scriptUrl}=token`,
+    `${scriptUrl}=token=a=b`,
+    `${scriptUrl}?token=a=b`,
+    `${scriptUrl}?token=a=b&sig=c=d`,
+  ]) {
+    const fixture = releaseFixture();
+    const html = new TextEncoder().encode(
+      `<!doctype html><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><script type=module src=${unquotedSrc}></script>`,
+    );
+    const index = record("index.html", html, "text/html; charset=utf-8");
+    fixture.publication.manifest.files["index.html"] = index;
+    fixture.bodies.set(index.url, html);
+    refreshManifestBody(fixture);
+    const visited: string[] = [];
+
+    await assert.rejects(verifyGitHubPagesRelease({
+      publication: fixture.publication,
+      fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+        visited.push(String(input));
+        return fetchUsingManifestMimes(fixture)(input, init);
+      }) as typeof fetch,
+    }), /MIAOBI_PAGES_HEALTH_FAILED/);
+
+    assert.equal(visited.includes(scriptUrl), false, `truncated and fetched ${unquotedSrc}`);
+  }
+});
+
 test("does not treat data-src on an inline module as src", async () => {
   const fixture = releaseFixture();
   const dataSrc = "https://evil.example/not-a-module.js";

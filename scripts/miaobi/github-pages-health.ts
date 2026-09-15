@@ -211,7 +211,7 @@ function attribute(tag: string, name: string): ParsedAttribute {
   const openingTag = /^<[^\s>]+/.exec(tag);
   if (!openingTag) return { present: false };
   const attributes = tag.slice(openingTag[0].length);
-  const pattern = /(?:^|\s+)([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  const pattern = /(?:^|\s+)([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+)))?/g;
   for (const match of attributes.matchAll(pattern)) {
     if (match[1].toLowerCase() === name.toLowerCase()) {
       return { present: true, value: match[2] ?? match[3] ?? match[4] };
