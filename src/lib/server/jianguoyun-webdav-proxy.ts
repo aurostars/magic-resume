@@ -10,7 +10,7 @@ export interface JianguoyunProxyRequest {
   username: string;
   password: string;
   headers?: Record<string, string>;
-  body?: string;
+  bodyBase64?: string;
 }
 
 export interface JianguoyunProxyDependencies {
@@ -21,6 +21,12 @@ export interface JianguoyunProxyDependencies {
 const JIANGUOYUN_ORIGIN = "https://dav.jianguoyun.com";
 const JIANGUOYUN_ROOT = "/dav/";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_ENVELOPE_BYTES = 11_200_000;
+const MAX_USERNAME_LENGTH = 1024;
+const MAX_PASSWORD_LENGTH = 4096;
+const MAX_HEADER_COUNT = 16;
+const MAX_HEADER_NAME_LENGTH = 64;
+const MAX_HEADER_VALUE_LENGTH = 8192;
 const MAX_PATH_SEGMENTS = 256;
 const MAX_PATH_SEGMENT_LENGTH = 1024;
 const ALLOWED_METHODS = new Set<JianguoyunWebDavMethod>([
@@ -79,6 +85,7 @@ function responseHeaders(upstream: Response): Headers {
 
 async function readBodyWithLimit(
   body: ReadableStream<Uint8Array> | null,
+  limit = MAX_BODY_BYTES,
 ): Promise<Uint8Array | undefined> {
   if (!body) return new Uint8Array();
   const reader = body.getReader();
@@ -89,7 +96,7 @@ async function readBodyWithLimit(
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_BODY_BYTES) {
+      if (total > limit) {
         cancelReader(reader);
         return undefined;
       }
@@ -188,17 +195,40 @@ function isProxyRequest(value: unknown): value is JianguoyunProxyRequest {
     )
     && typeof candidate.username === "string"
     && candidate.username.length > 0
+    && candidate.username.length <= MAX_USERNAME_LENGTH
     && !/[:\u0000-\u001F\u007F-\u009F]/.test(candidate.username)
     && typeof candidate.password === "string"
     && candidate.password.length > 0
-    && (candidate.body === undefined || typeof candidate.body === "string")
+    && candidate.password.length <= MAX_PASSWORD_LENGTH
+    && !("body" in candidate)
+    && (candidate.bodyBase64 === undefined || typeof candidate.bodyBase64 === "string")
     && (candidate.headers === undefined || (
       candidate.headers !== null
       && typeof candidate.headers === "object"
       && !Array.isArray(candidate.headers)
-      && Object.values(candidate.headers).every((header) => typeof header === "string")
+      && Object.keys(candidate.headers).length <= MAX_HEADER_COUNT
+      && Object.entries(candidate.headers).every(([name, header]) => (
+        name.length <= MAX_HEADER_NAME_LENGTH
+        && typeof header === "string"
+        && header.length <= MAX_HEADER_VALUE_LENGTH
+      ))
       && !Object.keys(candidate.headers).some((name) => name.toLowerCase() === "destination")
     ));
+}
+
+function decodeBodyBase64(value: string | undefined): Uint8Array | null | undefined {
+  if (value === undefined) return undefined;
+  if (value.length > Math.ceil(MAX_BODY_BYTES / 3) * 4) return null;
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  if (value.slice(0, -padding || undefined).includes("=")) return null;
+  try {
+    const binary = atob(value);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return bytes.byteLength <= MAX_BODY_BYTES ? bytes : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function handleJianguoyunWebDavProxy(
@@ -209,7 +239,7 @@ export async function handleJianguoyunWebDavProxy(
   if (declaredLength !== null) {
     const length = Number(declaredLength);
     if (!Number.isSafeInteger(length) || length < 0) return invalidRequest();
-    if (length > MAX_BODY_BYTES) {
+    if (length > MAX_ENVELOPE_BYTES) {
       cancelBody(request.body);
       return requestTooLarge();
     }
@@ -217,7 +247,7 @@ export async function handleJianguoyunWebDavProxy(
 
   let payload: unknown;
   try {
-    const bytes = await readBodyWithLimit(request.body);
+    const bytes = await readBodyWithLimit(request.body, MAX_ENVELOPE_BYTES);
     if (!bytes) return requestTooLarge();
     payload = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
@@ -225,6 +255,8 @@ export async function handleJianguoyunWebDavProxy(
   }
 
   if (!isProxyRequest(payload)) return invalidRequest();
+  const requestBody = decodeBodyBase64(payload.bodyBase64);
+  if (requestBody === null) return requestTooLarge();
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -258,7 +290,7 @@ export async function handleJianguoyunWebDavProxy(
     const upstream = await (dependencies.fetchImpl ?? fetch)(target, {
       method: payload.method,
       headers,
-      body: payload.body,
+      body: requestBody,
       redirect: "manual",
       signal: controller.signal,
     });
@@ -274,7 +306,6 @@ export async function handleJianguoyunWebDavProxy(
       cancelBody(upstream.body);
       return new Response(null, {
         status: upstream.status,
-        statusText: upstream.statusText,
         headers: responseHeaders(upstream),
       });
     }
@@ -284,7 +315,6 @@ export async function handleJianguoyunWebDavProxy(
 
     return new Response(body.byteLength === 0 ? null : body, {
       status: upstream.status,
-      statusText: upstream.statusText,
       headers: responseHeaders(upstream),
     });
   } catch {

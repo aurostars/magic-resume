@@ -3,6 +3,7 @@ import test from "node:test";
 import { handleJianguoyunWebDavProxy } from "../src/lib/server/jianguoyun-webdav-proxy";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_ENVELOPE_BYTES = 11_200_000;
 
 async function resolvesWithin<T>(promise: Promise<T>, timeoutMs = 100): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -169,7 +170,7 @@ test("the proxy forwards only Depth Overwrite If If-Match If-None-Match and Cont
   await handleJianguoyunWebDavProxy(proxyRequest({
     ...validPayload,
     method: "PUT",
-    body: "content",
+    bodyBase64: btoa("content"),
     headers: {
       Depth: "1", Overwrite: "F",
       If: "(<token>)", "If-Match": '"v1"', "If-None-Match": "*",
@@ -223,10 +224,10 @@ test("the proxy disables redirects", async () => {
   });
 });
 
-test("the proxy rejects request bodies over 8 MiB", async () => {
+test("the proxy rejects envelopes over the hard limit", async () => {
   let fetched = false;
   const response = await handleJianguoyunWebDavProxy(proxyRequest(validPayload, {
-    "Content-Length": String(MAX_BODY_BYTES + 1),
+    "Content-Length": String(MAX_ENVELOPE_BYTES + 1),
   }), { fetchImpl: async () => { fetched = true; return new Response(); } });
 
   assert.equal(response.status, 413);
@@ -480,7 +481,7 @@ test("a never-settling request body cancel cannot block a declared size rejectio
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Content-Length": String(MAX_BODY_BYTES + 1),
+      "Content-Length": String(MAX_ENVELOPE_BYTES + 1),
     },
     body,
     duplex: "half",
@@ -561,5 +562,61 @@ test("the proxy rejects ambiguous legacy path and Destination fields", async () 
       ...extra,
     }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
     assert.equal(response.status, 400);
+  }
+});
+
+
+test("decoded WebDAV request body allows exactly 8 MiB and rejects one byte more", async () => {
+  const exact = Buffer.alloc(MAX_BODY_BYTES, 0x61).toString("base64");
+  let forwardedLength = -1;
+  const accepted = await handleJianguoyunWebDavProxy(proxyRequest({
+    ...validPayload,
+    method: "PUT",
+    bodyBase64: exact,
+  }), {
+    fetchImpl: async (_input, init) => {
+      forwardedLength = (init?.body as Uint8Array).byteLength;
+      return new Response(null, { status: 204 });
+    },
+  });
+  assert.equal(accepted.status, 204);
+  assert.equal(forwardedLength, MAX_BODY_BYTES);
+
+  let fetched = false;
+  const rejected = await handleJianguoyunWebDavProxy(proxyRequest({
+    ...validPayload,
+    method: "PUT",
+    bodyBase64: Buffer.alloc(MAX_BODY_BYTES + 1, 0x61).toString("base64"),
+  }), { fetchImpl: async () => { fetched = true; return new Response(); } });
+  assert.equal(rejected.status, 413);
+  assert.equal(fetched, false);
+});
+
+test("invalid base64 and oversized metadata are rejected before upstream fetch", async () => {
+  for (const extra of [
+    { bodyBase64: "not base64!" },
+    { username: "u".repeat(1025) },
+    { password: "p".repeat(4097) },
+    { headers: { Depth: "x".repeat(8193) } },
+  ]) {
+    let fetched = false;
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({ ...validPayload, ...extra }), {
+      fetchImpl: async () => { fetched = true; return new Response(); },
+    });
+    assert.ok(response.status === 400 || response.status === 413);
+    assert.equal(fetched, false);
+  }
+});
+
+test("upstream status text is never exposed on successful or error responses", async () => {
+  for (const status of [207, 401]) {
+    const response = await handleJianguoyunWebDavProxy(proxyRequest(validPayload), {
+      fetchImpl: async () => new Response(status === 207 ? "ok" : null, {
+        status,
+        statusText: "account@example.test app-password sensitive",
+      }),
+    });
+    assert.equal(response.status, status);
+    assert.equal(response.statusText.includes("sensitive"), false);
   }
 });

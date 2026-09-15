@@ -179,7 +179,15 @@ export function createJianguoyunProxyFetch(
       envelope.destinationTrailingSlash = destinationPath.trailingSlash;
     }
     if (Object.keys(forwardedHeaders).length > 0) envelope.headers = forwardedHeaders;
-    if (request.body !== null) envelope.body = await request.text();
+    if (request.body !== null) {
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      let binary = "";
+      const chunkSize = 32 * 1024;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+      envelope.bodyBase64 = btoa(binary);
+    }
 
     return fetchImpl(getApiRequestUrl("/api/webdav/jianguoyun"), {
       method: "POST",

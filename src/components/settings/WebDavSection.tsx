@@ -13,7 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getWebDavSyncController } from "@/hooks/useWebDavSync";
-import { normalizeWebDavBaseUrl } from "@/lib/webdav/client";
+import { isJianguoyunWebDavUrl, normalizeWebDavBaseUrl } from "@/lib/webdav/client";
 import { WebDavError } from "@/lib/webdav/errors";
 import type { WebDavSyncController } from "@/lib/webdav/controller";
 import { useLocale, useTranslations } from "@/i18n/compat/client";
@@ -46,14 +46,14 @@ const normalizeSettings = (draft: WebDavSettings): WebDavSettings => ({
   remoteDirectory: normalizeDirectory(draft.remoteDirectory),
 });
 
-const errorKey = (code: WebDavSafeError["code"]): string => {
+const errorKey = (code: WebDavSafeError["code"], jianguoyun: boolean): string => {
   switch (code) {
     case "SNAPSHOT_VERSION": return "newerSnapshotError";
     case "SNAPSHOT_JSON":
     case "SNAPSHOT_SHAPE":
     case "SNAPSHOT_RESUME":
     case "SNAPSHOT_HASH": return "corruptSnapshotError";
-    case "AUTH": return "authError";
+    case "AUTH": return jianguoyun ? "jianguoyunAuthError" : "authError";
     case "FORBIDDEN": return "forbiddenError";
     case "NETWORK": case "SERVER": return "networkError";
     case "TIMEOUT": return "timeoutError";
@@ -139,8 +139,14 @@ export const WebDavSection = ({
   };
 
   const busy = isSyncing || pendingAction !== null;
+  let jianguoyun = false;
+  try {
+    jianguoyun = isJianguoyunWebDavUrl(normalizeWebDavBaseUrl(draft.baseUrl));
+  } catch {
+    // Invalid drafts must retain generic, sanitized error guidance.
+  }
   const statusMessage = error
-    ? t(errorKey(error.code))
+    ? t(errorKey(error.code, jianguoyun))
     : warning
       ? t("nonAtomicWarning")
       : status === "syncing" || status === "testing" || busy

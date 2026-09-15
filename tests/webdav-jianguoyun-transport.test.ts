@@ -106,7 +106,7 @@ test("Jianguoyun PROPFIND forwards Depth and XML body through the envelope", asy
     username: "account@example.test",
     password: "app-password",
     headers: { depth: "1", "content-type": "application/xml" },
-    body: xml,
+    bodyBase64: btoa(xml),
   });
 });
 
@@ -260,7 +260,7 @@ test("Jianguoyun proxy fetch applies merged Request method headers body and sign
     username: "account@example.test",
     password: "app-password",
     headers: { "content-type": "application/json", "if-match": '"revision-1"' },
-    body: "request-body",
+    bodyBase64: btoa("request-body"),
   });
   const forwardedSignal = calls[0].init.signal;
   assert.ok(forwardedSignal);
@@ -291,4 +291,35 @@ test("default runtime automatically selects the Jianguoyun proxy endpoint", asyn
 
   assert.equal(calls[0].url, "/api/webdav/jianguoyun");
   assert.deepEqual((await payload(calls[0])).pathSegments, ["magic-resume"]);
+});
+
+
+test("client-to-handler bodyBase64 preserves Unicode bytes and omits absent bodies", async () => {
+  const unicode = "<?xml version=\"1.0\"?><文档>简历🚀</文档>";
+  let upstreamBody = "";
+  const apiFetch: typeof fetch = async (input, init) => {
+    const envelope = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.equal("body" in envelope, false);
+    return handleJianguoyunWebDavProxy(new Request(String(input), init), {
+      fetchImpl: async (_upstream, upstreamInit) => {
+        upstreamBody = new TextDecoder().decode(upstreamInit?.body as Uint8Array);
+        return new Response(null, { status: 204 });
+      },
+    });
+  };
+  const proxyFetch = createJianguoyunProxyFetch(config, apiFetch);
+  await proxyFetch("https://dav.jianguoyun.com/dav/magic-resume/item.xml", {
+    method: "PUT",
+    headers: { "Content-Type": "application/xml" },
+    body: unicode,
+  });
+  assert.equal(upstreamBody, unicode);
+
+  const { calls, fetchImpl } = recordingApiFetch();
+  await createJianguoyunProxyFetch(config, fetchImpl)(
+    "https://dav.jianguoyun.com/dav/magic-resume/item.xml",
+    { method: "GET" },
+  );
+  const withoutBody = await payload(calls[0]);
+  assert.equal("bodyBase64" in withoutBody, false);
 });

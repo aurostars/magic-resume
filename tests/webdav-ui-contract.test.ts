@@ -79,6 +79,7 @@ const requiredKeys = [
   "autoSync", "testConnection", "syncNow", "clearCredentials", "clearConfirmTitle",
   "clearConfirmBody", "cancel", "confirm", "localStorageWarning", "dedicatedAccountHint",
   "lastSyncedAt", "neverSynced", "syncing", "success", "nonAtomicWarning", "authError",
+  "jianguoyunAuthError",
   "forbiddenError", "networkError", "timeoutError", "directoryError", "quotaError",
   "corruptSnapshotError", "newerSnapshotError", "unknownError", "perResumeJsonDescription",
   "credentialsLocalDescription", "clearKeepsFilesDescription", "syncedResumeCount", "conflictTitle",
@@ -363,18 +364,26 @@ test("conflict choices identify the resume and all conflict actions are disabled
   }
 });
 
-test("authentication guidance names Jianguoyun's third-party app password", () => {
+test("authentication guidance names Jianguoyun's third-party app password only for the exact provider", () => {
+  useWebDavStore.getState().setSettings({ baseUrl: "https://dav.jianguoyun.com/dav" });
   useWebDavStore.getState().setError({ code: "AUTH", status: 401 });
-  renderLocalized(React.createElement(WebDavSection));
+  const jianguoyun = renderLocalized(React.createElement(WebDavSection));
 
   assert.equal(
     screen.getByRole("alert").textContent,
-    "Authentication failed. Use the third-party app password generated under Jianguoyun Account Information → Security Options → Third-party App Management, not your login password.",
+    en.dashboard.settings.webdav.jianguoyunAuthError,
   );
   assert.match(
-    zh.dashboard.settings.webdav.authError,
+    zh.dashboard.settings.webdav.jianguoyunAuthError,
     /坚果云“账户信息 → 安全选项 → 第三方应用管理”.*第三方应用密码.*不是登录密码/,
   );
+  jianguoyun.unmount();
+
+  useWebDavStore.getState().setSettings({ baseUrl: "https://dav.example.test/root" });
+  useWebDavStore.getState().setError({ code: "AUTH", status: 401 });
+  renderLocalized(React.createElement(WebDavSection));
+  assert.equal(screen.getByRole("alert").textContent, en.dashboard.settings.webdav.authError);
+  assert.doesNotMatch(screen.getByRole("alert").textContent ?? "", /Jianguoyun|third-party/);
 });
 
 test("forbidden, timeout, server, and unknown errors stay sanitized and localized", () => {
