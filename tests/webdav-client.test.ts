@@ -479,26 +479,19 @@ test("rejects dot-segment paths before they can escape the configured base path"
   assert.deepEqual(calls, []);
 });
 
-test("rejects raw and encoded dot segments at every client path boundary before requests", async () => {
+test("treats percent-encoded dot text as a literal client path segment", async () => {
   const { calls, fetchImpl } = recordingFetch();
   const client = clientWith(fetchImpl, { baseUrl: "https://dav.example.test/root/base/" });
-  const operations = [
-    () => client.options("/safe/%2e%2e/escape"),
-    () => client.propfind("/safe/%2E/file"),
-    () => client.listCollection("/safe/%2e%2e/"),
-    () => client.ensureDirectory("/safe/../escape/"),
-    () => client.getText("/safe/%2E%2E/file"),
-    () => client.putText("/safe/%2e/file", "{}"),
-    () => client.move("/safe/../source", "/safe/destination"),
-    () => client.move("/safe/source", "/safe/%2e%2e/destination"),
-    () => client.delete("/safe/%2E/file"),
-  ];
 
-  for (const operation of operations) {
-    await expectWebDavError(operation(), "UNKNOWN", null);
-  }
+  await client.options("/safe/%2e%2e/file");
+  await client.move("/safe/%2E/source", "/safe/%2e%2e/destination");
 
-  assert.deepEqual(calls, []);
+  assert.equal(calls[0].url, "https://dav.example.test/root/base/safe/%252e%252e/file");
+  assert.equal(calls[1].url, "https://dav.example.test/root/base/safe/%252E/source");
+  assert.equal(
+    new Headers(calls[1].init.headers).get("Destination"),
+    "https://dav.example.test/root/base/safe/%252e%252e/destination",
+  );
 });
 
 test("rejects base URL userinfo without sending or exposing it", async () => {

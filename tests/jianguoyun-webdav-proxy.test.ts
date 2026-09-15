@@ -28,7 +28,8 @@ function proxyRequest(payload: Record<string, unknown>, headers?: HeadersInit): 
 
 const validPayload = {
   method: "GET",
-  path: "magic-resume/manifest.json",
+  pathSegments: ["magic-resume", "manifest.json"],
+  pathTrailingSlash: false,
   username: "account@example.test",
   password: "app-password",
 };
@@ -37,7 +38,8 @@ test("the Jianguoyun proxy constructs only the fixed HTTPS upstream", async () =
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const response = await handleJianguoyunWebDavProxy(proxyRequest({
     method: "PROPFIND",
-    path: "magic-resume/manifest.json",
+    pathSegments: ["magic-resume", "manifest.json"],
+    pathTrailingSlash: false,
     username: "account@example.test",
     password: "app-password",
     headers: { Depth: "0" },
@@ -73,21 +75,28 @@ test("the Jianguoyun proxy rejects unsupported methods before fetch", async () =
   assert.equal(fetched, false);
 });
 
-test("the Jianguoyun proxy rejects absolute paths and encoded path traversal", async (t) => {
-  for (const path of [
-    "/magic-resume/manifest.json",
-    "https://evil.test/stolen",
-    "https%3A//evil.test/stolen",
-    "magic-resume/%2e%2e/stolen",
-    "magic-resume/%2Fetc",
-    "magic-resume\\manifest.json",
-    "magic-resume/%00manifest.json",
-  ]) {
-    await t.test(path, async () => {
+test("the Jianguoyun proxy rejects invalid source path segments before fetch", async (t) => {
+  const invalidSegments: Array<{ name: string; value: unknown }> = [
+    { name: "non-array", value: "magic-resume/manifest.json" },
+    { name: "non-string", value: ["magic-resume", 1] },
+    { name: "empty-array", value: [] },
+    { name: "empty", value: ["magic-resume", ""] },
+    { name: "dot", value: ["magic-resume", "."] },
+    { name: "dot-dot", value: ["magic-resume", ".."] },
+    { name: "slash", value: ["magic-resume", "nested/file"] },
+    { name: "backslash", value: ["magic-resume", "nested\\file"] },
+    { name: "nul", value: ["magic-resume", "nul\0file"] },
+    { name: "control", value: ["magic-resume", "line\nfile"] },
+    { name: "too-many", value: Array.from({ length: 257 }, () => "segment") },
+    { name: "too-long", value: ["x".repeat(1025)] },
+  ];
+
+  for (const { name, value } of invalidSegments) {
+    await t.test(name, async () => {
       let fetched = false;
       const response = await handleJianguoyunWebDavProxy(proxyRequest({
         ...validPayload,
-        path,
+        pathSegments: value,
       }), { fetchImpl: async () => { fetched = true; return new Response(); } });
       assert.equal(response.status, 400);
       assert.equal(fetched, false);
@@ -96,13 +105,13 @@ test("the Jianguoyun proxy rejects absolute paths and encoded path traversal", a
 });
 
 test("the Jianguoyun proxy rejects credentials embedded in path data", async () => {
-  for (const path of [
-    "magic-resume/account@example.test/manifest.json",
-    "magic-resume/app-password/manifest.json",
+  for (const pathSegments of [
+    ["magic-resume", "account@example.test", "manifest.json"],
+    ["magic-resume", "app-password", "manifest.json"],
   ]) {
     const response = await handleJianguoyunWebDavProxy(proxyRequest({
       ...validPayload,
-      path,
+      pathSegments,
     }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
     assert.equal(response.status, 400);
   }
@@ -113,7 +122,9 @@ test("MOVE rewrites an allowed relative Destination to the fixed upstream", asyn
   const response = await handleJianguoyunWebDavProxy(proxyRequest({
     ...validPayload,
     method: "MOVE",
-    headers: { Destination: "magic-resume/archive.json", Overwrite: "T" },
+    destinationSegments: ["magic-resume", "archive.json"],
+    destinationTrailingSlash: false,
+    headers: { Overwrite: "T" },
   }), {
     fetchImpl: async (_input, init) => {
       destination = new Headers(init?.headers).get("Destination");
@@ -125,31 +136,42 @@ test("MOVE rewrites an allowed relative Destination to the fixed upstream", asyn
   assert.equal(destination, "https://dav.jianguoyun.com/dav/magic-resume/archive.json");
 });
 
-test("MOVE rejects an absolute or cross-origin Destination", async () => {
-  for (const destination of [
-    "https://dav.jianguoyun.com/dav/magic-resume/archive.json",
-    "https://evil.test/archive.json",
-    "/dav/magic-resume/archive.json",
-  ]) {
+test("MOVE rejects invalid Destination segments before fetch", async () => {
+  const invalidDestinations: unknown[] = [
+    "magic-resume/archive.json",
+    ["magic-resume", 1],
+    [],
+    ["magic-resume", ""],
+    ["magic-resume", "."],
+    ["magic-resume", ".."],
+    ["magic-resume", "nested/file"],
+    ["magic-resume", "nested\\file"],
+    ["magic-resume", "nul\0file"],
+    ["magic-resume", "line\nfile"],
+    Array.from({ length: 257 }, () => "segment"),
+    ["x".repeat(1025)],
+  ];
+  for (const destinationSegments of invalidDestinations) {
     let fetched = false;
     const response = await handleJianguoyunWebDavProxy(proxyRequest({
       ...validPayload,
       method: "MOVE",
-      headers: { Destination: destination },
+      destinationSegments,
+      destinationTrailingSlash: false,
     }), { fetchImpl: async () => { fetched = true; return new Response(); } });
     assert.equal(response.status, 400);
     assert.equal(fetched, false);
   }
 });
 
-test("the proxy forwards only Depth Destination Overwrite If If-Match If-None-Match and Content-Type", async () => {
+test("the proxy forwards only Depth Overwrite If If-Match If-None-Match and Content-Type", async () => {
   let forwarded = new Headers();
   await handleJianguoyunWebDavProxy(proxyRequest({
     ...validPayload,
     method: "PUT",
     body: "content",
     headers: {
-      Depth: "1", Destination: "magic-resume/archive.json", Overwrite: "F",
+      Depth: "1", Overwrite: "F",
       If: "(<token>)", "If-Match": '"v1"', "If-None-Match": "*",
       "Content-Type": "application/octet-stream", Cookie: "secret", Host: "evil.test",
       Authorization: "Bearer attacker",
@@ -162,7 +184,7 @@ test("the proxy forwards only Depth Destination Overwrite If If-Match If-None-Ma
   });
 
   assert.equal(forwarded.get("Depth"), "1");
-  assert.equal(forwarded.get("Destination"), "magic-resume/archive.json");
+  assert.equal(forwarded.get("Destination"), null);
   assert.equal(forwarded.get("Overwrite"), "F");
   assert.equal(forwarded.get("If"), "(<token>)");
   assert.equal(forwarded.get("If-Match"), '"v1"');
@@ -257,18 +279,26 @@ test("proxy errors never include username password Authorization or upstream bod
   });
 });
 
-test("the proxy rejects multi-encoded traversal and decode-limit exhaustion", async () => {
-  for (const path of [
-    "magic-resume/%25252e%25252e/stolen",
-    "magic-resume/%25252525252525252541/manifest.json",
+test("the proxy preserves multi-encoded percent text as a literal segment", async () => {
+  const upstreamUrls: string[] = [];
+  for (const [segment, expected] of [
+    ["%252e%252e", "%25252e%25252e"],
+    ["%25252525252525252541", "%2525252525252525252541"],
   ]) {
-    let fetched = false;
     const response = await handleJianguoyunWebDavProxy(proxyRequest({
       ...validPayload,
-      path,
-    }), { fetchImpl: async () => { fetched = true; return new Response(); } });
-    assert.equal(response.status, 400);
-    assert.equal(fetched, false);
+      pathSegments: ["magic-resume", segment, "manifest.json"],
+    }), {
+      fetchImpl: async (input) => {
+        upstreamUrls.push(String(input));
+        return new Response(null, { status: 204 });
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(
+      upstreamUrls.at(-1),
+      `https://dav.jianguoyun.com/dav/magic-resume/${expected}/manifest.json`,
+    );
   }
 });
 
@@ -307,19 +337,17 @@ test("the proxy rejects colon and control characters in usernames before fetch",
   }
 });
 
-test("MOVE rejects credentials embedded in Destination including encoded forms", async () => {
-  for (const destination of [
-    "magic-resume/account@example.test/archive.json",
-    "magic-resume/account%40example.test/archive.json",
-    "magic-resume/account%2540example.test/archive.json",
-    "magic-resume/app-password/archive.json",
-    "magic-resume/app%252Dpassword/archive.json",
+test("MOVE rejects credentials embedded in Destination segments", async () => {
+  for (const destinationSegments of [
+    ["magic-resume", "account@example.test", "archive.json"],
+    ["magic-resume", "app-password", "archive.json"],
   ]) {
     let fetched = false;
     const response = await handleJianguoyunWebDavProxy(proxyRequest({
       ...validPayload,
       method: "MOVE",
-      headers: { Destination: destination },
+      destinationSegments,
+      destinationTrailingSlash: false,
     }), { fetchImpl: async () => { fetched = true; return new Response(); } });
     assert.equal(response.status, 400);
     assert.equal(fetched, false);
@@ -481,42 +509,57 @@ test("a never-settling reader cancel cannot block an oversized stream rejection"
   assert.ok(pulls <= 3, `oversized response pulled ${pulls} chunks`);
 });
 
-test("url-path envelopes preserve one encoded layer without weakening path safety", async () => {
-  const upstreamUrls: string[] = [];
-  for (const [path, expected] of [
-    ["literal%2520name", "literal%2520name"],
-    ["percent%25name", "percent%25name"],
-    ["%E7%9B%AE%E5%BD%95", "%E7%9B%AE%E5%BD%95"],
-  ]) {
+test("logical source and Destination segments are encoded exactly once", async () => {
+  const cases = [
+    ["%2e%2e", "%252e%252e"],
+    ["literal%20name", "literal%2520name"],
+    ["literal%2520name", "literal%252520name"],
+    ["目录", "%E7%9B%AE%E5%BD%95"],
+    ["literal%2Fslash", "literal%252Fslash"],
+  ] as const;
+
+  for (const [segment, expected] of cases) {
+    let source = "";
+    let destination = "";
     const response = await handleJianguoyunWebDavProxy(proxyRequest({
       ...validPayload,
-      path,
-      pathEncoding: "url-path",
+      method: "MOVE",
+      pathSegments: ["magic-resume", segment],
+      destinationSegments: ["archive", segment],
+      destinationTrailingSlash: false,
     }), {
-      fetchImpl: async (input) => {
-        upstreamUrls.push(String(input));
-        return new Response(null, { status: 204 });
+      fetchImpl: async (input, init) => {
+        source = String(input);
+        destination = new Headers(init?.headers).get("Destination") ?? "";
+        return new Response(null, { status: 201 });
       },
     });
-    assert.equal(response.status, 204);
-    assert.equal(upstreamUrls.at(-1), `https://dav.jianguoyun.com/dav/${expected}`);
-  }
-
-  for (const path of ["%2e%2e/stolen", "safe/%2Fstolen", "safe/%5Cstolen"]) {
-    const response = await handleJianguoyunWebDavProxy(proxyRequest({
-      ...validPayload,
-      path,
-      pathEncoding: "url-path",
-    }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
-    assert.equal(response.status, 400, path);
+    assert.equal(response.status, 201);
+    assert.equal(source, `https://dav.jianguoyun.com/dav/magic-resume/${expected}`);
+    assert.equal(destination, `https://dav.jianguoyun.com/dav/archive/${expected}`);
   }
 });
 
-test("the proxy rejects unknown path encoding modes", async () => {
-  const response = await handleJianguoyunWebDavProxy(proxyRequest({
-    ...validPayload,
-    pathEncoding: "decode-all",
-  }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
+test("the proxy rejects forged legacy pathEncoding envelopes", async () => {
+  for (const pathEncoding of ["url-path", "decode-all"]) {
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      pathEncoding,
+    }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
+    assert.equal(response.status, 400);
+  }
+});
 
-  assert.equal(response.status, 400);
+test("the proxy rejects ambiguous legacy path and Destination fields", async () => {
+  for (const extra of [
+    { path: "magic-resume/manifest.json" },
+    { headers: { Destination: "magic-resume/archive.json" } },
+    { pathTrailingSlash: "false" },
+  ]) {
+    const response = await handleJianguoyunWebDavProxy(proxyRequest({
+      ...validPayload,
+      ...extra,
+    }), { fetchImpl: async () => { throw new Error("must not fetch"); } });
+    assert.equal(response.status, 400);
+  }
 });

@@ -79,8 +79,8 @@ test("Jianguoyun OPTIONS uses the same-origin API endpoint", async () => {
   );
   assert.deepEqual(await payload(calls[0]), {
     method: "OPTIONS",
-    path: "magic-resume/",
-    pathEncoding: "url-path",
+    pathSegments: ["magic-resume"],
+    pathTrailingSlash: true,
     username: "account@example.test",
     password: "app-password",
   });
@@ -101,8 +101,8 @@ test("Jianguoyun PROPFIND forwards Depth and XML body through the envelope", asy
 
   assert.deepEqual(await payload(calls[0]), {
     method: "PROPFIND",
-    path: "magic-resume/",
-    pathEncoding: "url-path",
+    pathSegments: ["magic-resume"],
+    pathTrailingSlash: true,
     username: "account@example.test",
     password: "app-password",
     headers: { depth: "1", "content-type": "application/xml" },
@@ -124,12 +124,13 @@ test("Jianguoyun MOVE converts Destination to a relative Jianguoyun path", async
 
   assert.deepEqual(await payload(calls[0]), {
     method: "MOVE",
-    path: "magic-resume/file.tmp",
-    pathEncoding: "url-path",
+    pathSegments: ["magic-resume", "file.tmp"],
+    pathTrailingSlash: false,
     username: "account@example.test",
     password: "app-password",
+    destinationSegments: ["magic-resume", "archive file.json"],
+    destinationTrailingSlash: false,
     headers: {
-      destination: "magic-resume/archive%20file.json",
       overwrite: "T",
     },
   });
@@ -210,6 +211,7 @@ test("a trailing-dot or lookalike Jianguoyun hostname does not select the proxy"
 
 test("client envelope and Task 1 handler preserve literal path semantics", async () => {
   const cases = [
+    ["%2e%2e", "%252e%252e"],
     ["percent%name", "percent%25name"],
     ["literal%20name", "literal%2520name"],
     ["literal%2520name", "literal%252520name"],
@@ -253,8 +255,8 @@ test("Jianguoyun proxy fetch applies merged Request method headers body and sign
 
   assert.deepEqual(await payload(calls[0]), {
     method: "PUT",
-    path: "magic-resume/item.json",
-    pathEncoding: "url-path",
+    pathSegments: ["magic-resume", "item.json"],
+    pathTrailingSlash: false,
     username: "account@example.test",
     password: "app-password",
     headers: { "content-type": "application/json", "if-match": '"revision-1"' },
@@ -288,5 +290,5 @@ test("default runtime automatically selects the Jianguoyun proxy endpoint", asyn
   await new WebDavClient(config).options("/magic-resume/");
 
   assert.equal(calls[0].url, "/api/webdav/jianguoyun");
-  assert.equal((await payload(calls[0])).pathEncoding, "url-path");
+  assert.deepEqual((await payload(calls[0])).pathSegments, ["magic-resume"]);
 });

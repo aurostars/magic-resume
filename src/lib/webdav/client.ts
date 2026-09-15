@@ -109,14 +109,32 @@ export function isJianguoyunWebDavUrl(value: URL): boolean {
     && value.pathname.startsWith("/dav/");
 }
 
-function jianguoyunRelativePath(value: URL): string {
+interface JianguoyunLogicalPath {
+  segments: string[];
+  trailingSlash: boolean;
+}
+
+function jianguoyunLogicalPath(value: URL): JianguoyunLogicalPath {
   if (!isJianguoyunWebDavUrl(value)) throw new WebDavError("UNKNOWN");
-  return value.pathname.slice("/dav/".length);
+  const relativePath = value.pathname.slice("/dav/".length);
+  const trailingSlash = relativePath === "" || relativePath.endsWith("/");
+  const encodedSegments = (trailingSlash ? relativePath.slice(0, -1) : relativePath).split("/");
+  if (encodedSegments.length === 1 && encodedSegments[0] === "") {
+    return { segments: [], trailingSlash };
+  }
+
+  try {
+    return {
+      segments: encodedSegments.map((segment) => decodeURIComponent(segment)),
+      trailingSlash,
+    };
+  } catch {
+    throw new WebDavError("UNKNOWN");
+  }
 }
 
 const JIANGUOYUN_REQUEST_HEADERS = new Set([
   "depth",
-  "destination",
   "overwrite",
   "if",
   "if-match",
@@ -136,11 +154,13 @@ export function createJianguoyunProxyFetch(
       throw new WebDavError("UNKNOWN");
     }
     const target = new URL(request.url);
+    const path = jianguoyunLogicalPath(target);
     const headers = new Headers(request.headers);
     const destination = headers.get("Destination");
-    if (destination !== null) {
-      headers.set("Destination", jianguoyunRelativePath(new URL(destination)));
-    }
+    const destinationPath = destination === null
+      ? null
+      : jianguoyunLogicalPath(new URL(destination));
+    headers.delete("Destination");
 
     const forwardedHeaders: Record<string, string> = {};
     headers.forEach((value, name) => {
@@ -148,11 +168,15 @@ export function createJianguoyunProxyFetch(
     });
     const envelope: Record<string, unknown> = {
       method: request.method,
-      path: jianguoyunRelativePath(target),
-      pathEncoding: "url-path",
+      pathSegments: path.segments,
+      pathTrailingSlash: path.trailingSlash,
       username: config.username,
       password: config.password,
     };
+    if (destinationPath !== null) {
+      envelope.destinationSegments = destinationPath.segments;
+      envelope.destinationTrailingSlash = destinationPath.trailingSlash;
+    }
     if (Object.keys(forwardedHeaders).length > 0) envelope.headers = forwardedHeaders;
     if (request.body !== null) envelope.body = await request.text();
 
@@ -562,13 +586,7 @@ export class WebDavClient implements WebDavClientApi {
 
   private assertSafePath(path: string): void {
     for (const segment of path.split("/")) {
-      let decoded = segment;
-      try {
-        decoded = decodeURIComponent(segment);
-      } catch {
-        // A malformed percent sequence is encoded as a literal by remoteUrl and cannot form a segment.
-      }
-      if (decoded === "." || decoded === "..") throw new WebDavError("UNKNOWN");
+      if (segment === "." || segment === "..") throw new WebDavError("UNKNOWN");
     }
   }
 

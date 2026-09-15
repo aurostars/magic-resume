@@ -3,8 +3,10 @@ export type JianguoyunWebDavMethod =
 
 export interface JianguoyunProxyRequest {
   method: JianguoyunWebDavMethod;
-  path: string;
-  pathEncoding?: "url-path";
+  pathSegments: string[];
+  pathTrailingSlash: boolean;
+  destinationSegments?: string[];
+  destinationTrailingSlash?: boolean;
   username: string;
   password: string;
   headers?: Record<string, string>;
@@ -19,12 +21,13 @@ export interface JianguoyunProxyDependencies {
 const JIANGUOYUN_ORIGIN = "https://dav.jianguoyun.com";
 const JIANGUOYUN_ROOT = "/dav/";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
-const MAX_DECODE_PASSES = 8;
+const MAX_PATH_SEGMENTS = 256;
+const MAX_PATH_SEGMENT_LENGTH = 1024;
 const ALLOWED_METHODS = new Set<JianguoyunWebDavMethod>([
   "OPTIONS", "PROPFIND", "MKCOL", "GET", "PUT", "DELETE", "MOVE",
 ]);
 const REQUEST_HEADERS = new Set([
-  "depth", "destination", "overwrite", "if", "if-match", "if-none-match", "content-type",
+  "depth", "overwrite", "if", "if-match", "if-none-match", "content-type",
 ]);
 const RESPONSE_HEADERS = new Set([
   "dav", "etag", "last-modified", "content-type", "allow",
@@ -106,65 +109,46 @@ async function readBodyWithLimit(
   return bytes;
 }
 
-function decodePathSegment(segment: string): string | undefined {
-  let decoded = segment;
-  try {
-    for (let pass = 0; pass < MAX_DECODE_PASSES; pass += 1) {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) return decoded;
-      decoded = next;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function decodeUrlPathSegment(segment: string): string | undefined {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return undefined;
-  }
-}
-
 function fixedUpstreamUrl(
-  path: unknown,
+  segments: unknown,
+  trailingSlash: unknown,
   username?: string,
   password?: string,
-  pathEncoding?: "url-path",
 ): URL | undefined {
   if (
-    typeof path !== "string"
-    || path.startsWith("/")
-    || path.startsWith("\\")
-    || /^[A-Za-z][A-Za-z\d+.-]*:/.test(path)
+    !Array.isArray(segments)
+    || segments.length > MAX_PATH_SEGMENTS
+    || (segments.length === 0 && trailingSlash !== true)
+    || (trailingSlash !== undefined && typeof trailingSlash !== "boolean")
   ) {
     return undefined;
   }
 
   const encodedSegments: string[] = [];
-  for (const segment of path.split("/")) {
-    const decoded = pathEncoding === "url-path"
-      ? decodeUrlPathSegment(segment)
-      : decodePathSegment(segment);
+  for (const segment of segments) {
     if (
-      decoded === undefined
-      || decoded === "."
-      || decoded === ".."
-      || decoded.includes("/")
-      || decoded.includes("\\")
-      || decoded.includes("\0")
-      || (encodedSegments.length === 0 && /^[A-Za-z][A-Za-z\d+.-]*:/.test(decoded))
-      || (username !== undefined && decoded.includes(username))
-      || (password !== undefined && decoded.includes(password))
+      typeof segment !== "string"
+      || segment.length === 0
+      || segment.length > MAX_PATH_SEGMENT_LENGTH
+      || segment === "."
+      || segment === ".."
+      || segment.includes("/")
+      || segment.includes("\\")
+      || /[\u0000-\u001F\u007F-\u009F]/.test(segment)
+      || (username !== undefined && segment.includes(username))
+      || (password !== undefined && segment.includes(password))
     ) {
       return undefined;
     }
-    encodedSegments.push(encodeURIComponent(decoded));
+    try {
+      encodedSegments.push(encodeURIComponent(segment));
+    } catch {
+      return undefined;
+    }
   }
 
-  const target = new URL(encodedSegments.join("/"), `${JIANGUOYUN_ORIGIN}${JIANGUOYUN_ROOT}`);
+  const relativePath = encodedSegments.join("/") + (trailingSlash ? "/" : "");
+  const target = new URL(relativePath, `${JIANGUOYUN_ORIGIN}${JIANGUOYUN_ROOT}`);
   if (target.origin !== JIANGUOYUN_ORIGIN || !target.pathname.startsWith(JIANGUOYUN_ROOT)) {
     return undefined;
   }
@@ -182,11 +166,26 @@ function basicAuthorization(username: string, password: string): string {
 
 function isProxyRequest(value: unknown): value is JianguoyunProxyRequest {
   if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<JianguoyunProxyRequest>;
+  const candidate = value as Partial<JianguoyunProxyRequest> & Record<string, unknown>;
+  const hasDestination = candidate.destinationSegments !== undefined
+    || candidate.destinationTrailingSlash !== undefined;
   return typeof candidate.method === "string"
     && ALLOWED_METHODS.has(candidate.method as JianguoyunWebDavMethod)
-    && typeof candidate.path === "string"
-    && (candidate.pathEncoding === undefined || candidate.pathEncoding === "url-path")
+    && Array.isArray(candidate.pathSegments)
+    && typeof candidate.pathTrailingSlash === "boolean"
+    && !("path" in candidate)
+    && !("pathEncoding" in candidate)
+    && (candidate.destinationSegments === undefined || Array.isArray(candidate.destinationSegments))
+    && (
+      candidate.destinationTrailingSlash === undefined
+      || typeof candidate.destinationTrailingSlash === "boolean"
+    )
+    && (
+      candidate.method === "MOVE"
+        ? Array.isArray(candidate.destinationSegments)
+          && typeof candidate.destinationTrailingSlash === "boolean"
+        : !hasDestination
+    )
     && typeof candidate.username === "string"
     && candidate.username.length > 0
     && !/[:\u0000-\u001F\u007F-\u009F]/.test(candidate.username)
@@ -198,6 +197,7 @@ function isProxyRequest(value: unknown): value is JianguoyunProxyRequest {
       && typeof candidate.headers === "object"
       && !Array.isArray(candidate.headers)
       && Object.values(candidate.headers).every((header) => typeof header === "string")
+      && !Object.keys(candidate.headers).some((name) => name.toLowerCase() === "destination")
     ));
 }
 
@@ -229,10 +229,10 @@ export async function handleJianguoyunWebDavProxy(
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const target = fixedUpstreamUrl(
-      payload.path,
+      payload.pathSegments,
+      payload.pathTrailingSlash,
       payload.username,
       payload.password,
-      payload.pathEncoding,
     );
     if (!target) return invalidRequest();
 
@@ -241,12 +241,12 @@ export async function handleJianguoyunWebDavProxy(
       if (REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
     }
 
-    if (payload.method === "MOVE" && headers.has("Destination")) {
+    if (payload.method === "MOVE") {
       const destination = fixedUpstreamUrl(
-        headers.get("Destination"),
+        payload.destinationSegments,
+        payload.destinationTrailingSlash,
         payload.username,
         payload.password,
-        payload.pathEncoding,
       );
       if (!destination) return invalidRequest();
       headers.set("Destination", destination.href);
