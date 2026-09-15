@@ -1,6 +1,10 @@
 {
   "schemaVersion": 1,
   "releases": {
+    "65169c34cb5914aec3b85bfa05b2660ecee0b1c1": {
+      "releaseId": "65169c34cb59-20260915111529",
+      "manifest": "releases/65169c34cb5914aec3b85bfa05b2660ecee0b1c1/manifest.json"
+    },
     "67b870858f2dfe1fd50c07ed85fb1d30ce26df81": {
       "releaseId": "67b870858f2d-20260915044104",
       "manifest": "releases/67b870858f2dfe1fd50c07ed85fb1d30ce26df81/manifest.json"
