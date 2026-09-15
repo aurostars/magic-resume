@@ -6,7 +6,8 @@ export type ApiRoutePath =
   | "/api/polish"
   | "/api/ai-test"
   | "/api/resume-import"
-  | "/api/proxy/image";
+  | "/api/proxy/image"
+  | "/api/webdav/jianguoyun";
 
 export interface ApiRouterDependencies {
   grammar: (request: Request) => Promise<Response>;
@@ -14,6 +15,7 @@ export interface ApiRouterDependencies {
   aiTest: (request: Request) => Promise<Response>;
   resumeImport: (request: Request) => Promise<Response>;
   imageProxy: (request: Request) => Promise<Response>;
+  webdavJianguoyun: (request: Request) => Promise<Response>;
 }
 
 export const defaultApiRouterDependencies: ApiRouterDependencies = {
@@ -24,6 +26,10 @@ export const defaultApiRouterDependencies: ApiRouterDependencies = {
   imageProxy: async (request) => {
     const { handleImageProxy } = await import("./image-proxy");
     return handleImageProxy(request);
+  },
+  webdavJianguoyun: async (request) => {
+    const { handleJianguoyunWebDavProxy } = await import("./jianguoyun-webdav-proxy");
+    return handleJianguoyunWebDavProxy(request);
   },
 };
 
@@ -36,6 +42,7 @@ const routes: Record<
   "/api/ai-test": { method: "POST", dependency: "aiTest" },
   "/api/resume-import": { method: "POST", dependency: "resumeImport" },
   "/api/proxy/image": { method: "GET", dependency: "imageProxy" },
+  "/api/webdav/jianguoyun": { method: "POST", dependency: "webdavJianguoyun" },
 };
 
 function jsonError(status: number, error: string, code: string, headers?: HeadersInit) {

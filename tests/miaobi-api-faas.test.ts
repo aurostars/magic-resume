@@ -22,6 +22,17 @@ test("a POST FaaS request reaches the selected API route", async () => {
   });
 });
 
+test("the Miaobi API routes Jianguoyun WebDAV requests through the injected handler", async () => {
+  const handler = createMiaobiApiHandler(undefined, async () =>
+    Response.json({ proxied: true }, { status: 207 }));
+  const response = await handler(new Request(
+    "https://magic.solutionsuite.cn/api/faas/id?__path=%2Fapi%2Fwebdav%2Fjianguoyun",
+    { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } },
+  ));
+  assert.equal(response.status, 207);
+  assert.deepEqual(await response.json(), { proxied: true });
+});
+
 test("the adapter removes only __path and preserves every other query value", async () => {
   let routedUrl = "";
   let routedLogicalPath = "";

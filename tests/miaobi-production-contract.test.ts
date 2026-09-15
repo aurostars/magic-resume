@@ -440,7 +440,10 @@ test("production builds emit isolated complete artifacts with only audited URLs 
       webFaas: "web-faas.cjs",
     });
 
-    const assetOrigins = new Set(["https://aurostars.github.io"]);
+    const assetOrigins = new Set([
+      "https://aurostars.github.io",
+      "https://dav.jianguoyun.com",
+    ]);
     const pagesDirectory = join(distDirectory, "gh-pages-staging");
     await materializeGitHubPagesRelease({
       clientDirectory: join(miaobiDirectory, "client"),

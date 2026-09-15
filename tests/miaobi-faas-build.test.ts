@@ -66,6 +66,14 @@ test("the API bundle loads and serves health without runtime require", async () 
       nonce: "0123456789abcdef0123456789abcdef",
     });
     const module = { exports: undefined as unknown };
+    const upstreamCalls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      upstreamCalls.push(String(input));
+      return new Response("<multistatus/>", {
+        status: 207,
+        headers: { "Content-Type": "application/xml" },
+      });
+    };
     runInNewContext(await readFile(bundlePath, "utf8"), {
       module,
       require: (specifier: string) => {
@@ -78,8 +86,11 @@ test("the API bundle loads and serves health without runtime require", async () 
       Request,
       Response,
       URL,
+      TextDecoder,
+      TextEncoder,
+      btoa,
       clearTimeout,
-      fetch,
+      fetch: fetchImpl,
       setTimeout,
     });
 
@@ -90,6 +101,25 @@ test("the API bundle loads and serves health without runtime require", async () 
     assert.equal(response.status, 404);
     assert.equal(response.headers.get("X-Magic-Resume-Faas"), "magic-resume-api");
     assert.deepEqual(await response.json(), { error: "Not found", code: "notFound" });
+
+    const proxied = await handler(new Request(
+      "https://magic.solutionsuite.cn/api/faas/id?__path=%2Fapi%2Fwebdav%2Fjianguoyun",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "PROPFIND",
+          path: "magic-resume/manifest.json",
+          username: "account@example.test",
+          password: "app-password",
+        }),
+      },
+    ));
+    assert.equal(proxied.status, 207);
+    assert.equal(await proxied.text(), "<multistatus/>");
+    assert.deepEqual(upstreamCalls, [
+      "https://dav.jianguoyun.com/dav/magic-resume/manifest.json",
+    ]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
