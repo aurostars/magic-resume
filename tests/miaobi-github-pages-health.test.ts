@@ -131,6 +131,29 @@ test("verifies the release manifest, index, and every boot-critical module and s
   ]);
 });
 
+test("uses a fresh timeout signal for every request instead of one cumulative release deadline", async () => {
+  const { publication, bodies } = releaseFixture();
+  const signals: AbortSignal[] = [];
+  let signalFactoryCalls = 0;
+  const signalFactory = (_timeoutMs: number): AbortSignal => {
+    signalFactoryCalls += 1;
+    const signal = AbortSignal.timeout(30);
+    signals.push(signal);
+    return signal;
+  };
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    assert.equal(init?.signal, signals.at(-1));
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    if (init?.signal?.aborted) throw init.signal.reason;
+    return successfulFetch(bodies)(input, init);
+  }) as typeof fetch;
+
+  await verifyGitHubPagesRelease({ publication, fetchImpl, signalFactory });
+
+  assert.equal(signalFactoryCalls, 4);
+  assert.equal(new Set(signals).size, 4);
+});
+
 test("ignores inline modules while verifying external module, preload, and stylesheet assets", async () => {
   const fixture = releaseFixture();
   const chunk = new TextEncoder().encode("export const chunk = true");
@@ -305,10 +328,15 @@ test("rejects malformed manifest URLs before making a request", async () => {
   assert.equal(called, false);
 });
 
-test("follows same-prefix redirects manually and uses one signal for the whole chain", async () => {
+test("follows same-prefix redirects manually with a fresh signal for every network request", async () => {
   const { publication, bodies } = releaseFixture();
   const redirected = `${PAGES_BASE}releases/${SOURCE_COMMIT}/manifest-copy.json`;
   const seenSignals = new Set<AbortSignal | null | undefined>();
+  let signalFactoryCalls = 0;
+  const signalFactory = (timeoutMs: number): AbortSignal => {
+    signalFactoryCalls += 1;
+    return AbortSignal.timeout(timeoutMs);
+  };
   let redirectedBodyCancelled = false;
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     seenSignals.add(init?.signal);
@@ -323,9 +351,10 @@ test("follows same-prefix redirects manually and uses one signal for the whole c
     return successfulFetch(bodies)(input, init);
   }) as typeof fetch;
 
-  await verifyGitHubPagesRelease({ publication, fetchImpl });
+  await verifyGitHubPagesRelease({ publication, fetchImpl, signalFactory });
   assert.equal(redirectedBodyCancelled, true);
-  assert.equal(seenSignals.size, 1);
+  assert.equal(signalFactoryCalls, 5);
+  assert.equal(seenSignals.size, 5);
 });
 
 test("rejects redirect escape and cancels its response body", async () => {
@@ -396,7 +425,7 @@ test("rejects asset hash mismatch and stale source commit", async () => {
   }), /MIAOBI_PAGES_HEALTH_FAILED/);
 });
 
-test("one total deadline covers waiting for response headers", async () => {
+test("a per-request deadline covers waiting for response headers", async () => {
   const { publication } = releaseFixture();
   await assert.rejects(verifyGitHubPagesRelease({
     publication,
@@ -407,7 +436,7 @@ test("one total deadline covers waiting for response headers", async () => {
   }), /MIAOBI_PAGES_HEALTH_FAILED/);
 });
 
-test("one total deadline aborts a stalled response body and cancels it", async () => {
+test("a per-request deadline aborts a stalled response body and cancels it", async () => {
   const { publication } = releaseFixture();
   let cancelled = false;
   const fetchImpl = (async () => {

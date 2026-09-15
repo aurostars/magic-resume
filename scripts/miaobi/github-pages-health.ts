@@ -92,11 +92,12 @@ function cancelResponse(response: Response): void {
 async function fetchFollowingRedirects(
   initialUrl: string,
   fetchImpl: typeof fetch,
-  signal: AbortSignal,
-): Promise<Response> {
+  signalFactory: (timeoutMs: number) => AbortSignal,
+): Promise<{ response: Response; signal: AbortSignal }> {
   let url = initialUrl;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     assertPagesUrl(url);
+    const signal = signalFactory(DEFAULT_TIMEOUT_MS);
     const response = await withAbort(
       fetchImpl(url, { method: "GET", redirect: "manual", signal }),
       signal,
@@ -113,7 +114,7 @@ async function fetchFollowingRedirects(
       }
       continue;
     }
-    return response;
+    return { response, signal };
   }
   return healthFailed();
 }
@@ -180,10 +181,10 @@ async function fetchChecked(
   expectedContentType: string,
   limit: number,
   fetchImpl: typeof fetch,
-  signal: AbortSignal,
+  signalFactory: (timeoutMs: number) => AbortSignal,
   collect: boolean,
 ): Promise<{ bytes?: Uint8Array; hash: string; size: number }> {
-  const response = await fetchFollowingRedirects(url, fetchImpl, signal);
+  const { response, signal } = await fetchFollowingRedirects(url, fetchImpl, signalFactory);
   if (response.status < 200 || response.status >= 300 ||
     !contentTypeMatches(response.headers.get("Content-Type"), expectedContentType)) {
     cancelResponse(response);
@@ -258,7 +259,7 @@ export async function verifyGitHubPagesRelease(input: {
   signalFactory?: (timeoutMs: number) => AbortSignal;
 }): Promise<void> {
   assertPublication(input.publication);
-  const signal = (input.signalFactory ?? AbortSignal.timeout)(DEFAULT_TIMEOUT_MS);
+  const signalFactory = input.signalFactory ?? AbortSignal.timeout;
   const fetchImpl = input.fetchImpl ?? globalThis.fetch;
   try {
     const manifestResult = await fetchChecked(
@@ -266,7 +267,7 @@ export async function verifyGitHubPagesRelease(input: {
       "application/json; charset=utf-8",
       MANIFEST_LIMIT,
       fetchImpl,
-      signal,
+      signalFactory,
       true,
     );
     let remoteManifest: GitHubPagesManifest;
@@ -283,7 +284,7 @@ export async function verifyGitHubPagesRelease(input: {
     assertAssetRecord(index, "index.html", remoteManifest.baseUrl);
     assertRoleContentType(index.contentType, "index");
     const indexResult = await fetchChecked(
-      index.url, index.contentType, index.size, fetchImpl, signal, true,
+      index.url, index.contentType, index.size, fetchImpl, signalFactory, true,
     );
     if (indexResult.size !== index.size || indexResult.hash !== index.contentHash) healthFailed();
     let html: string;
@@ -306,7 +307,7 @@ export async function verifyGitHubPagesRelease(input: {
       if (!/\.(?:css|js|mjs)$/.test(relativePath)) healthFailed();
       assertRoleContentType(record.contentType, role);
       const result = await fetchChecked(
-        record.url, record.contentType, record.size, fetchImpl, signal, false,
+        record.url, record.contentType, record.size, fetchImpl, signalFactory, false,
       );
       if (result.size !== record.size || result.hash !== record.contentHash) healthFailed();
     }
