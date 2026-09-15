@@ -202,8 +202,22 @@ function assertAssetRecord(record: GitHubPagesAssetRecord, relativePath: string,
   assertPagesUrl(record.url);
 }
 
-function attribute(tag: string, name: string): string | undefined {
-  return new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag)?.[1];
+interface ParsedAttribute {
+  present: boolean;
+  value?: string;
+}
+
+function attribute(tag: string, name: string): ParsedAttribute {
+  const openingTag = /^<[^\s>]+/.exec(tag);
+  if (!openingTag) return { present: false };
+  const attributes = tag.slice(openingTag[0].length);
+  const pattern = /(?:^|\s+)([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  for (const match of attributes.matchAll(pattern)) {
+    if (match[1].toLowerCase() === name.toLowerCase()) {
+      return { present: true, value: match[2] ?? match[3] ?? match[4] };
+    }
+  }
+  return { present: false };
 }
 
 function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole, "index"> }> {
@@ -214,22 +228,24 @@ function bootAssets(html: string): Array<{ url: string; role: Exclude<AssetRole,
     assets.set(url, role);
   };
   for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
-    if (attribute(tag, "type")?.toLowerCase() === "module") {
+    const type = attribute(tag, "type");
+    if (type.value?.toLowerCase() === "module") {
       const src = attribute(tag, "src");
-      if (src === undefined) continue;
-      if (!src.trim()) healthFailed();
-      add(src, "script");
+      if (!src.present) continue;
+      if (!src.value?.trim()) healthFailed();
+      add(src.value, "script");
     }
   }
   for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
-    const relations = (attribute(tag, "rel") ?? "").toLowerCase().split(/\s+/);
+    const rel = attribute(tag, "rel");
+    const relations = (rel.value ?? "").toLowerCase().split(/\s+/);
     const isStylesheet = relations.includes("stylesheet");
     const isModulePreload = relations.includes("modulepreload");
     if (isStylesheet && isModulePreload) healthFailed();
     if (isStylesheet || isModulePreload) {
       const href = attribute(tag, "href");
-      if (!href) healthFailed();
-      add(href, isStylesheet ? "stylesheet" : "script");
+      if (!href.present || !href.value?.trim()) healthFailed();
+      add(href.value, isStylesheet ? "stylesheet" : "script");
     }
   }
   return [...assets].sort(([left], [right]) => left.localeCompare(right))

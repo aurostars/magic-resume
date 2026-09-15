@@ -181,6 +181,67 @@ for (const src of ["", "   "]) {
   });
 }
 
+test("rejects a module script with a boolean src attribute", async () => {
+  const fixture = releaseFixture();
+  const html = new TextEncoder().encode(
+    `<!doctype html><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><script type="module" src></script>`,
+  );
+  const index = record("index.html", html, "text/html; charset=utf-8");
+  fixture.publication.manifest.files["index.html"] = index;
+  fixture.bodies.set(index.url, html);
+  refreshManifestBody(fixture);
+
+  await assert.rejects(verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl: fetchUsingManifestMimes(fixture),
+  }), /MIAOBI_PAGES_HEALTH_FAILED/);
+});
+
+test("verifies an unquoted module src as a boot-critical asset", async () => {
+  const fixture = releaseFixture();
+  const html = new TextEncoder().encode(
+    `<!doctype html><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><script type=module src=${OBJECT_BASE}assets/app.js></script>`,
+  );
+  const index = record("index.html", html, "text/html; charset=utf-8");
+  fixture.publication.manifest.files["index.html"] = index;
+  fixture.bodies.set(index.url, html);
+  refreshManifestBody(fixture);
+  const visited: string[] = [];
+
+  await verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      visited.push(String(input));
+      return fetchUsingManifestMimes(fixture)(input, init);
+    }) as typeof fetch,
+  });
+
+  assert.ok(visited.includes(fixture.publication.manifest.files["assets/app.js"].url));
+});
+
+test("does not treat data-src on an inline module as src", async () => {
+  const fixture = releaseFixture();
+  const dataSrc = "https://evil.example/not-a-module.js";
+  const html = new TextEncoder().encode(
+    `<!doctype html><link rel="stylesheet" href="${OBJECT_BASE}assets/app.css"><script type="module" data-src="${dataSrc}">globalThis.__booted = true</script>`,
+  );
+  const index = record("index.html", html, "text/html; charset=utf-8");
+  fixture.publication.manifest.files["index.html"] = index;
+  fixture.bodies.set(index.url, html);
+  refreshManifestBody(fixture);
+  const visited: string[] = [];
+
+  await verifyGitHubPagesRelease({
+    publication: fixture.publication,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      visited.push(String(input));
+      return fetchUsingManifestMimes(fixture)(input, init);
+    }) as typeof fetch,
+  });
+
+  assert.equal(visited.includes(dataSrc), false);
+});
+
 test("rejects boot-critical links without href even when an inline module is present", async () => {
   const fixture = releaseFixture();
   const html = new TextEncoder().encode(
