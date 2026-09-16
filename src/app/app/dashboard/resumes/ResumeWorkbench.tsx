@@ -18,6 +18,7 @@ import { getConfig, getFileHandle } from "@/utils/fileSystem";
 import { preloadFontFamily } from "@/utils/fonts";
 import { useResumeStore } from "@/store/useResumeStore";
 import { useAIConfigStore } from "@/store/useAIConfigStore";
+import { useDeferredDialogNavigation } from "@/hooks/useDeferredDialogNavigation";
 import { DEFAULT_TEMPLATES } from "@/config";
 import { CreateResumeModal } from "./CreateResumeModal";
 import { ImportResumeDialog } from "./ImportResumeDialog";
@@ -54,9 +55,17 @@ export const ResumeWorkbench = () => {
     const [hasConfiguredFolder, setHasConfiguredFolder] = useState(false);
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+    const [pendingImportedResumeId, setPendingImportedResumeId] = useState<string | null>(null);
     const [isImporting, setIsImporting] = useState(false);
     const jsonFileInputRef = useRef<HTMLInputElement>(null);
     const pdfFileInputRef = useRef<HTMLInputElement>(null);
+
+    useDeferredDialogNavigation({
+        isDialogOpen: isImportDialogOpen,
+        pendingId: pendingImportedResumeId,
+        clearPendingId: () => setPendingImportedResumeId(null),
+        navigate: (id) => router.push({ to: "/app/workbench/$id", params: { id } }),
+    });
 
     useEffect(() => {
         const loadSavedConfig = async () => {
@@ -180,10 +189,9 @@ export const ResumeWorkbench = () => {
             updatedAt: now,
         };
         const resumeId = addResume(newResume);
-        setActiveResume(resumeId);
+        setPendingImportedResumeId(resumeId);
         setIsImportDialogOpen(false);
         toast.success(t("dashboard.resumes.importSuccess"));
-        router.push({ to: "/app/workbench/$id", params: { id: resumeId } });
     };
 
     const extractImagesFromPdf = async (file: File) => {
