@@ -30,21 +30,50 @@ Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
   value: true,
 });
 
-const NativeMessageChannel = globalThis.MessageChannel;
 let scheduledChannels = 0;
 let scheduledFrames = 0;
+let queuedMessages: Array<() => void> = [];
 
-class TrackingMessageChannel {
+class FakeMessagePort {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  peer: FakeMessagePort | null = null;
+  closed = false;
+
+  postMessage(data: unknown) {
+    const target = this.peer;
+    queuedMessages.push(() => {
+      if (!this.closed && target && !target.closed) {
+        target.onmessage?.({ data } as MessageEvent);
+      }
+    });
+  }
+
+  close() {
+    this.closed = true;
+  }
+}
+
+class FakeMessageChannel {
+  port1 = new FakeMessagePort();
+  port2 = new FakeMessagePort();
+
   constructor() {
     scheduledChannels += 1;
-    return new NativeMessageChannel();
+    this.port1.peer = this.port2;
+    this.port2.peer = this.port1;
   }
+}
+
+function flushMessages() {
+  const messages = queuedMessages;
+  queuedMessages = [];
+  for (const deliver of messages) deliver();
 }
 
 Object.defineProperty(globalThis, "MessageChannel", {
   configurable: true,
   writable: true,
-  value: TrackingMessageChannel,
+  value: FakeMessageChannel,
 });
 window.requestAnimationFrame = () => {
   scheduledFrames += 1;
@@ -52,7 +81,7 @@ window.requestAnimationFrame = () => {
 };
 window.cancelAnimationFrame = () => {};
 
-const { cleanup, render } = await import("@testing-library/react");
+const { act, cleanup, render } = await import("@testing-library/react");
 
 interface HarnessProps {
   open: boolean;
@@ -71,16 +100,15 @@ function Harness({ open, pendingId, onClear = () => {}, onNavigate }: HarnessPro
   return null;
 }
 
-const flushAsyncTask = () => new Promise<void>((resolve) => setImmediate(resolve));
-
 afterEach(() => {
   cleanup();
   scheduledChannels = 0;
   scheduledFrames = 0;
+  queuedMessages = [];
   Object.defineProperty(globalThis, "MessageChannel", {
     configurable: true,
     writable: true,
-    value: TrackingMessageChannel,
+    value: FakeMessageChannel,
   });
   Reflect.deleteProperty(document, "visibilityState");
 });
@@ -100,7 +128,7 @@ test("waits until the dialog is closed and a later async task before navigating"
   assert.deepEqual(calls, []);
   assert.equal(scheduledChannels, 1);
 
-  await flushAsyncTask();
+  act(flushMessages);
   assert.deepEqual(calls, ["resume-1"]);
 });
 
@@ -115,7 +143,7 @@ test("clears the pending id before navigating", async () => {
     />,
   );
 
-  await flushAsyncTask();
+  act(flushMessages);
   assert.deepEqual(events, ["clear", "navigate:resume-2"]);
 });
 
@@ -141,7 +169,7 @@ test("uses fresh callbacks without rescheduling the queued task", async () => {
   );
   assert.equal(scheduledChannels, 1);
 
-  await flushAsyncTask();
+  act(flushMessages);
   assert.deepEqual(calls, ["new-clear", "new-navigate"]);
 });
 
@@ -153,7 +181,7 @@ test("cancels queued navigation when unmounted", async () => {
   assert.equal(scheduledChannels, 1);
 
   view.unmount();
-  await flushAsyncTask();
+  act(flushMessages);
   assert.deepEqual(calls, []);
 });
 
@@ -173,8 +201,8 @@ test("navigates exactly once across Strict Mode effects and rerenders", async ()
   );
   assert.equal(scheduledChannels, 2);
 
-  await flushAsyncTask();
-  await flushAsyncTask();
+  act(flushMessages);
+  act(flushMessages);
   assert.deepEqual(calls, ["resume-5"]);
 });
 
@@ -208,14 +236,14 @@ test("navigates after the real dialog unmounts while hidden RAF never fires", as
   assert.deepEqual(events, ["dialog-unmounted"]);
   assert.equal(scheduledFrames, 0);
 
-  await flushAsyncTask();
+  act(flushMessages);
   assert.deepEqual(events, [
     "dialog-unmounted",
     "clear",
     "navigate:resume-hidden",
   ]);
 
-  await flushAsyncTask();
+  act(flushMessages);
   assert.equal(
     events.filter((event) => event === "navigate:resume-hidden").length,
     1,
