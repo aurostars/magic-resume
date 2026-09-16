@@ -49,7 +49,11 @@ async function rewriteBuiltAssetReferences(
       `${assetBasePlaceholder}assets/`,
     );
     for (const directory of publicDirectories) {
-      text = text.replaceAll(`/${directory}/`, `${assetBasePlaceholder}${directory}/`);
+      const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      text = text.replace(
+        new RegExp(`(?:\\.\\./|\\./|/)${escapedDirectory}/`, "g"),
+        `${assetBasePlaceholder}${directory}/`,
+      );
     }
     for (const publicPath of publicPaths.filter((path) => !path.includes("/"))) {
       text = text.replaceAll(`/${publicPath}`, `${assetBasePlaceholder}${publicPath}`);

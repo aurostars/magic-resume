@@ -219,6 +219,18 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
     assert.doesNotMatch(shell, /<iframe|html box/i);
 
     const files = await readFilesRecursively(outputDirectory);
+    const stylesheets = (
+      await Promise.all(
+        files
+          .filter((path) => path.endsWith(".css"))
+          .map((path) => readFile(path, "utf8")),
+      )
+    ).join("\n");
+    assert.doesNotMatch(stylesheets, /\.\.https:\/\//);
+    assert.match(
+      stylesheets,
+      /url\(https:\/\/miaobi\.invalid\/__ASSET_BASE__\/fonts\/AlibabaPuHuiTi-3-55-Regular\.ttf\)/,
+    );
     const javascript = (
       await Promise.all(
         files
