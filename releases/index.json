@@ -5,6 +5,10 @@
       "releaseId": "16b437536843-20260915134814",
       "manifest": "releases/16b437536843c1c0b9bae78da8e4ecf7b62b914d/manifest.json"
     },
+    "1ed2191a607540169a48ac924aece28902bcb716": {
+      "releaseId": "1ed2191a6075-20260916045359",
+      "manifest": "releases/1ed2191a607540169a48ac924aece28902bcb716/manifest.json"
+    },
     "65169c34cb5914aec3b85bfa05b2660ecee0b1c1": {
       "releaseId": "65169c34cb59-20260915111529",
       "manifest": "releases/65169c34cb5914aec3b85bfa05b2660ecee0b1c1/manifest.json"
