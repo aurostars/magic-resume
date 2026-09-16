@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
-import { buildMiaobiSpa } from "../scripts/miaobi/build-spa";
-
-const ASSET_BASE_PLACEHOLDER = "https://miaobi.invalid/__ASSET_BASE__/";
+import { build, resolveConfig } from "vite";
 
 async function javascriptFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -17,39 +15,80 @@ async function javascriptFiles(directory: string): Promise<string[]> {
   return files.flat();
 }
 
-test("Miaobi dynamic CSS preloads resolve relative to the immutable asset directory", { timeout: 180_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "miaobi-relative-preload-"));
-  const outputDirectory = join(directory, "client");
+test("Miaobi dynamic CSS preloads resolve relative to the immutable asset directory", async () => {
+  const projectRoot = process.cwd();
+  const config = await resolveConfig({
+    configFile: resolve(projectRoot, "vite.miaobi.config.ts"),
+    logLevel: "silent",
+  }, "build");
+  assert.equal(config.base, "./");
+
+  const fixtureRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "miaobi-relative-preload-")),
+  );
+  const outputDirectory = join(fixtureRoot, "dist");
 
   try {
-    await buildMiaobiSpa({
-      outputDirectory,
-      assetBasePlaceholder: ASSET_BASE_PLACEHOLDER,
+    await writeFile(
+      join(fixtureRoot, "index.html"),
+      '<script type="module" src="/main.js"></script>',
+    );
+    await writeFile(
+      join(fixtureRoot, "main.js"),
+      'globalThis.loadLazy = () => import("./lazy.js");',
+    );
+    await writeFile(
+      join(fixtureRoot, "lazy.js"),
+      'import "./lazy.css"; export const loaded = true;',
+    );
+    await writeFile(join(fixtureRoot, "lazy.css"), ".lazy { color: green; }");
+
+    await build({
+      root: fixtureRoot,
+      configFile: false,
+      base: config.base,
+      logLevel: "silent",
+      build: {
+        outDir: outputDirectory,
+        emptyOutDir: true,
+        rollupOptions: {
+          output: {
+            entryFileNames: "assets/[name].js",
+            chunkFileNames: "assets/[name].js",
+            assetFileNames: "assets/[name][extname]",
+          },
+        },
+      },
     });
 
     const bundles = await Promise.all(
-      (await javascriptFiles(outputDirectory)).map((path) => readFile(path, "utf8")),
+      (await javascriptFiles(outputDirectory)).map(async (path) => ({
+        path,
+        source: await readFile(path, "utf8"),
+      })),
     );
-    const preloadBundle = bundles.find((bundle) =>
-      bundle.includes("Unable to preload CSS for") && /mermaid-[\w-]+\.css/.test(bundle),
+    const preloadBundle = bundles.find(({ source }) =>
+      source.includes("Unable to preload CSS for") && source.includes("lazy.css"),
     );
 
-    assert.ok(preloadBundle, "production output must include the workbench Mermaid CSS preload");
+    assert.ok(preloadBundle, "fixture output must include the lazy CSS preload");
     assert.doesNotMatch(
-      preloadBundle,
+      preloadBundle.source,
       /["']modulepreload["'],[\w$]+=function\(([\w$]+)\)\{return["']\/["']\+\1\}/,
-      "Vite preload helper must not resolve dynamic dependencies from /assets/ at the page origin",
+      "Vite preload helper must not resolve dynamic dependencies from the page root",
     );
-    const mermaidCssReference = /["'](\.\/mermaid-[\w-]+\.css)["']/.exec(preloadBundle)?.[1];
-    assert.ok(mermaidCssReference, "Mermaid CSS preload must be relative to its importing asset");
+
+    const cssReference = /["'](\.\/lazy\.css)["']/.exec(preloadBundle.source)?.[1];
+    assert.equal(cssReference, "./lazy.css");
+    const importingBundlePath = relative(outputDirectory, preloadBundle.path).split(sep).join("/");
+    const importingBundleUrl = `https://aurostars.github.io/magic-resume/objects/immutable-graph/${importingBundlePath}`;
+    const resolvedCssUrl = new URL(cssReference, importingBundleUrl);
     assert.equal(
-      new URL(
-        mermaidCssReference,
-        "https://aurostars.github.io/magic-resume/objects/immutable-graph/assets/main.js",
-      ).href,
-      `https://aurostars.github.io/magic-resume/objects/immutable-graph/assets/${mermaidCssReference.slice(2)}`,
+      resolvedCssUrl.href,
+      "https://aurostars.github.io/magic-resume/objects/immutable-graph/assets/lazy.css",
     );
+    await access(resolve(dirname(preloadBundle.path), cssReference));
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
