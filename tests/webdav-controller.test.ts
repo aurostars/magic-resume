@@ -147,6 +147,7 @@ const setup = (overrides: {
   options?: (path: string, signal?: AbortSignal) => Promise<void>;
   propfind?: (path: string, signal?: AbortSignal) => Promise<boolean>;
   begin?: () => void;
+  requestActive?: () => boolean;
   hydrated?: boolean;
   configured?: boolean;
   auto?: boolean;
@@ -174,7 +175,9 @@ const setup = (overrides: {
     isOnline: () => flags.online,
     isVisible: () => flags.visible,
     hasConflict: () => currentConflicts.length > 0,
+    isRequestActive: overrides.requestActive,
     begin: () => { events.push("begin"); overrides.begin?.(); },
+    cancel: () => { events.push("cancel"); },
     complete: (warning) => events.push(`complete:${warning ?? "none"}`),
     defer: () => events.push("defer"),
     fail: () => events.push("fail"),
@@ -1477,4 +1480,61 @@ test("successful applied and no-op syncs publish only count and completion time 
     { warning: null, syncedCount: 0 },
   ]);
   assert.doesNotMatch(JSON.stringify(completions), /private|token|resume/i);
+});
+
+
+test("dispose releases its lease and suppresses late complete conflict and fail callbacks", async () => {
+  for (const outcome of ["complete", "conflict", "fail"] as const) {
+    const operation = deferred<SyncExecuteResult>();
+    const s = setup({
+      execute: async () => operation.promise,
+    });
+    const running = s.controller.syncNow("manual");
+    await settle();
+
+    s.controller.dispose();
+    if (outcome === "complete") operation.resolve(completed);
+    else if (outcome === "conflict") operation.resolve(conflictResult);
+    else operation.reject(new Error("late failure"));
+    await running;
+
+    assert.deepEqual(s.events, ["begin", "cancel"], outcome);
+  }
+});
+
+
+test("lifecycle runs one deferred auto-sync when a one-shot lease blocks a local change", async () => {
+  let requestActive = true;
+  const s = setup({ auto: false, requestActive: () => requestActive });
+  let resumeListener: ((state: any, previous: any) => void) | null = null;
+  let requestListener: ((active: boolean, previousActive: boolean) => void) | null = null;
+  const initial = {
+    _hasHydrated: true,
+    _isApplyingSyncSnapshot: false,
+    resumes: { initial: {} },
+    activeResumeId: "initial",
+  };
+  const cleanup = attachWebDavLifecycle(s.controller, {
+    windowTarget: new FakeEventTarget(),
+    documentTarget: Object.assign(new FakeEventTarget(), { visibilityState: "visible" as const }),
+    getResumeState: () => initial,
+    subscribeResume: (listener) => { resumeListener = listener; return () => {}; },
+    isAutoSyncEnabled: () => s.flags.auto,
+    isRequestActive: () => requestActive,
+    subscribeRequest: (listener) => { requestListener = listener; return () => {}; },
+  });
+  s.flags.auto = true;
+
+  resumeListener?.({ ...initial, resumes: { changed: {} } }, initial);
+  assert.equal(s.calls(), 0);
+  requestActive = false;
+  requestListener?.(false, true);
+  await settle();
+  await s.controller.whenIdle();
+  assert.equal(s.calls(), 1);
+
+  requestListener?.(false, false);
+  await settle();
+  assert.equal(s.calls(), 1);
+  cleanup();
 });

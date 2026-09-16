@@ -759,3 +759,65 @@ test("clearing credentials aborts a one-shot test without leaving a stale error"
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test("Providers replacement and unmount release leases and ignore stale controller completion", async () => {
+  const originalFetch = globalThis.fetch;
+  const oldResponse = (() => {
+    let resolve!: (response: Response) => void;
+    const promise = new Promise<Response>((done) => { resolve = done; });
+    return { promise, resolve };
+  })();
+  let oldSignal: AbortSignal | null = null;
+  let newSignal: AbortSignal | null = null;
+  try {
+    resetStores();
+    useResumeStore.setState({ _hasHydrated: true });
+    useWebDavStore.getState().setSettings({
+      baseUrl: "https://old.example.test",
+      username: "alice",
+      password: "app-password",
+      remoteDirectory: "/magic-resume/",
+      autoSyncEnabled: true,
+    });
+    globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = String(input);
+      const signal = init.signal as AbortSignal;
+      if (url.includes("old.example.test")) {
+        oldSignal = signal;
+        return await oldResponse.promise;
+      }
+      newSignal = signal;
+      return await new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as typeof fetch;
+
+    const view = renderLocalized(React.createElement(Providers, null, React.createElement("div")));
+    await waitFor(() => assert.ok(oldSignal));
+    const oldOwner = useWebDavStore.getState().abortController;
+    assert.ok(oldOwner);
+
+    await act(async () => {
+      useWebDavStore.getState().setSettings({ baseUrl: "https://new.example.test" });
+    });
+    await waitFor(() => assert.equal(oldSignal?.aborted, true));
+    await waitFor(() => assert.ok(newSignal));
+    const newOwner = useWebDavStore.getState().abortController;
+    assert.ok(newOwner);
+    assert.notEqual(newOwner, oldOwner);
+
+    oldResponse.resolve(new Response(null, { status: 404 }));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(useWebDavStore.getState().abortController, newOwner);
+    assert.equal(useWebDavStore.getState().error, null);
+
+    view.unmount();
+    await waitFor(() => assert.equal(newSignal?.aborted, true));
+    await waitFor(() => assert.equal(useWebDavStore.getState().abortController, null));
+    assert.equal(useWebDavStore.getState().status, "idle");
+    assert.equal(useWebDavStore.getState().error, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

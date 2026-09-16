@@ -26,6 +26,7 @@ export interface SyncControllerState {
   hasConflict(): boolean;
   isRequestActive?(): boolean;
   begin(controller: AbortController): boolean | void;
+  cancel?(controller: AbortController): void;
   complete(warning: "NON_ATOMIC_UPLOAD" | null, syncedCount?: number): void;
   defer(): void;
   fail(error: unknown): void;
@@ -91,9 +92,11 @@ export class WebDavSyncController {
       try {
         await this.dependencies.client.options(this.dependencies.remoteDirectory, signal);
         await this.dependencies.client.propfind(this.dependencies.remoteDirectory, signal);
+        if (this.disposed) return false;
         this.dependencies.state.complete(null);
         return true;
       } catch (error) {
+        if (this.disposed) return false;
         this.dependencies.state.fail(error);
         throw error;
       }
@@ -119,6 +122,7 @@ export class WebDavSyncController {
   private async performSync(signal: AbortSignal): Promise<boolean> {
     try {
       const result = await this.dependencies.coordinator.execute(signal);
+      if (this.disposed) return false;
       if (isDeferred(result)) {
         this.dirty = true;
         this.dependencies.state.defer();
@@ -127,6 +131,7 @@ export class WebDavSyncController {
       this.handleResult(result);
       return true;
     } catch (error) {
+      if (this.disposed) return false;
       if (error instanceof LocalCasMismatchError) {
         await this.refreshConflict(signal);
         return true;
@@ -194,6 +199,7 @@ export class WebDavSyncController {
       ) return true;
       try {
         const result = await this.dependencies.coordinator.execute(decision, signal);
+        if (this.disposed) return false;
         if (isConflict(result)) {
           this.surfaceConflicts(result);
           return true;
@@ -208,6 +214,7 @@ export class WebDavSyncController {
         this.dependencies.state.complete(result.warning, result.syncedCount);
         return true;
       } catch (error) {
+        if (this.disposed) return false;
         if (error instanceof LocalCasMismatchError) {
           await this.refreshConflict(signal);
           return true;
@@ -233,7 +240,10 @@ export class WebDavSyncController {
     this.disposed = true;
     this.clearDebounce();
     for (const queued of this.queue.splice(0)) queued.resolve();
-    this.activeController?.abort();
+    if (this.activeController) {
+      this.dependencies.state.cancel?.(this.activeController);
+      this.activeController.abort();
+    }
   }
 
   private enqueue(key: FlightKey, operation: FlightOperation): Promise<void> {
@@ -334,6 +344,7 @@ export class WebDavSyncController {
 
   private async refreshConflict(signal: AbortSignal): Promise<void> {
     const inspection = await this.dependencies.coordinator.inspect(signal);
+    if (this.disposed) return;
     if (inspection.decision === "conflict") this.surfaceResult(inspection);
   }
 

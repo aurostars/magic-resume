@@ -135,6 +135,10 @@ export const createConfiguredController = (
         if (acquired) leasedRequest = requestController;
         return acquired;
       },
+      cancel: (requestController) => {
+        if (leasedRequest !== requestController) return;
+        finishOwnedRequest("idle");
+      },
       complete: (warning, syncedCount) => {
         if (!ownsRequest()) return;
         const store = useWebDavStore.getState();
@@ -198,6 +202,9 @@ export const attachWebDavLifecycle = (
   dependencies.documentTarget.addEventListener("visibilitychange", onVisibilityChange);
 
   const hydrated = dependencies.getResumeState()._hasHydrated;
+  let deferredAutoSync = hydrated &&
+    dependencies.isAutoSyncEnabled() &&
+    (dependencies.isRequestActive?.() ?? false);
   const unsubscribe = hydrated
     ? dependencies.subscribeResume((state, previous) => {
         const snapshotChanged =
@@ -208,14 +215,15 @@ export const attachWebDavLifecycle = (
           snapshotChanged &&
           !state._isApplyingSyncSnapshot
         ) {
+          if (
+            dependencies.isAutoSyncEnabled() &&
+            (dependencies.isRequestActive?.() ?? false)
+          ) deferredAutoSync = true;
           controller.notifyLocalChange();
         }
       })
     : null;
 
-  let deferredAutoSync = hydrated &&
-    dependencies.isAutoSyncEnabled() &&
-    (dependencies.isRequestActive?.() ?? false);
   const unsubscribeRequest = dependencies.subscribeRequest?.((active, previousActive) => {
     if (!deferredAutoSync || active || !previousActive) return;
     deferredAutoSync = false;
