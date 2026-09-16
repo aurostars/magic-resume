@@ -260,7 +260,7 @@ test("request and transient actions form a safe runtime state machine", () => {
   assert.deepEqual(store.getState().error, { code: "AUTH", status: 401 });
   assert.deepEqual(Object.keys(store.getState().error ?? {}).sort(), ["code", "status"]);
 
-  store.getState().finishRequest("success");
+  store.getState().finishRequest(controller, "success");
   assert.equal(store.getState().isSyncing, false);
   assert.equal(store.getState().abortController, null);
   assert.equal(store.getState().status, "success");
@@ -333,4 +333,20 @@ test("clearCredentials aborts first, clears persisted and transient sync data, a
   assert.equal(state.warning, null);
   assert.equal(state.error, null);
   assert.equal(state.status, "idle");
+});
+
+
+test("request ownership rejects overlap and stale completion cannot clear the active controller", () => {
+  const store = createWebDavStore(memoryStorage().storage);
+  const oneShot = new AbortController();
+  const sync = new AbortController();
+
+  assert.equal(store.getState().beginRequest(oneShot, "testing"), true);
+  assert.equal(store.getState().beginRequest(sync, "syncing"), false);
+  assert.equal(store.getState().finishRequest(sync, "success"), false);
+  assert.equal(store.getState().abortController, oneShot);
+  assert.equal(store.getState().status, "testing");
+  assert.equal(store.getState().finishRequest(oneShot, "success"), true);
+  assert.equal(store.getState().abortController, null);
+  assert.equal(store.getState().status, "success");
 });

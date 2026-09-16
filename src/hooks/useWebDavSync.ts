@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { WebDavClient } from "../lib/webdav/client";
+import { WEB_DAV_REQUEST_TIMEOUT_MS, WebDavClient } from "../lib/webdav/client";
 import { WebDavResumeRepository } from "../lib/webdav/repository";
 import { LocalCasMismatchError, WebDavError } from "../lib/webdav/errors";
 import { WebDavSyncCoordinator } from "../lib/webdav/coordinator";
@@ -15,9 +15,8 @@ import {
   useWebDavStore,
   type WebDavSafeError,
   type WebDavSettings,
+  type WebDavStatus,
 } from "../store/useWebDavStore";
-
-const REQUEST_TIMEOUT_MS = 15_000;
 
 type ResumeLifecycleState = Pick<
   ReturnType<typeof useResumeStore.getState>,
@@ -37,6 +36,8 @@ export interface WebDavLifecycleDependencies {
     listener: (state: ResumeLifecycleState, previous: ResumeLifecycleState) => void,
   ): () => void;
   isAutoSyncEnabled(): boolean;
+  isRequestActive?(): boolean;
+  subscribeRequest?(listener: (active: boolean, previousActive: boolean) => void): () => void;
 }
 
 let activeController: WebDavSyncController | null = null;
@@ -85,7 +86,7 @@ export const createConfiguredController = (
       baseUrl: settings.baseUrl,
       username: settings.username,
       password: settings.password,
-      timeoutMs: REQUEST_TIMEOUT_MS,
+      timeoutMs: WEB_DAV_REQUEST_TIMEOUT_MS,
     });
   } catch (error) {
     useWebDavStore.getState().setError(toSafeError(error));
@@ -105,6 +106,17 @@ export const createConfiguredController = (
     now: () => new Date().toISOString(),
   });
 
+  let leasedRequest: AbortController | null = null;
+  const ownsRequest = (): boolean => Boolean(
+    leasedRequest && useWebDavStore.getState().abortController === leasedRequest,
+  );
+  const finishOwnedRequest = (status: WebDavStatus): boolean => {
+    if (!leasedRequest) return false;
+    const finished = useWebDavStore.getState().finishRequest(leasedRequest, status);
+    if (finished) leasedRequest = null;
+    return finished;
+  };
+
   return new WebDavSyncController({
     client,
     coordinator,
@@ -117,35 +129,44 @@ export const createConfiguredController = (
       isOnline: () => typeof navigator === "undefined" || navigator.onLine,
       isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
       hasConflict: () => useWebDavStore.getState().conflicts.length > 0,
-      begin: (requestController) => useWebDavStore.getState().beginRequest(requestController),
+      isRequestActive: () => useWebDavStore.getState().abortController !== null,
+      begin: (requestController) => {
+        const acquired = useWebDavStore.getState().beginRequest(requestController);
+        if (acquired) leasedRequest = requestController;
+        return acquired;
+      },
       complete: (warning, syncedCount) => {
+        if (!ownsRequest()) return;
         const store = useWebDavStore.getState();
         if (syncedCount !== undefined) store.completeSync(syncedCount);
         if (warning) {
           store.setWarning({ code: "MOVE_UNSUPPORTED", status: null });
-          store.finishRequest("warning");
+          finishOwnedRequest("warning");
         } else {
           store.setWarning(null);
-          store.finishRequest("success");
+          finishOwnedRequest("success");
         }
       },
       defer: () => {
+        if (!ownsRequest()) return;
         const store = useWebDavStore.getState();
         store.setWarning(null);
-        store.finishRequest("idle");
+        finishOwnedRequest("idle");
       },
       fail: (error) => {
+        if (!ownsRequest()) return;
         const store = useWebDavStore.getState();
-        store.finishRequest("error");
         store.setError(toSafeError(error));
+        finishOwnedRequest("error");
       },
       setConflicts: (conflicts) => {
+        if (!ownsRequest()) return;
         const store = useWebDavStore.getState();
-        store.finishRequest("conflict");
         store.setConflicts(conflicts);
+        finishOwnedRequest("conflict");
       },
       clearConflict: () => {
-        useWebDavStore.getState().setConflicts([]);
+        if (ownsRequest()) useWebDavStore.getState().setConflicts([]);
       },
     },
   });
@@ -157,6 +178,10 @@ const browserLifecycleDependencies = (): WebDavLifecycleDependencies => ({
   getResumeState: () => useResumeStore.getState(),
   subscribeResume: (listener) => useResumeStore.subscribe(listener),
   isAutoSyncEnabled: () => useWebDavStore.getState().settings.autoSyncEnabled,
+  isRequestActive: () => useWebDavStore.getState().abortController !== null,
+  subscribeRequest: (listener) => useWebDavStore.subscribe((state, previous) => {
+    listener(state.abortController !== null, previous.abortController !== null);
+  }),
 });
 
 export const attachWebDavLifecycle = (
@@ -188,7 +213,16 @@ export const attachWebDavLifecycle = (
       })
     : null;
 
-  if (hydrated && dependencies.isAutoSyncEnabled()) {
+  let deferredAutoSync = hydrated &&
+    dependencies.isAutoSyncEnabled() &&
+    (dependencies.isRequestActive?.() ?? false);
+  const unsubscribeRequest = dependencies.subscribeRequest?.((active, previousActive) => {
+    if (!deferredAutoSync || active || !previousActive) return;
+    deferredAutoSync = false;
+    queueMicrotask(() => { void controller.syncNow("automatic"); });
+  });
+
+  if (hydrated && dependencies.isAutoSyncEnabled() && !deferredAutoSync) {
     void controller.syncNow("automatic");
   }
 
@@ -196,6 +230,7 @@ export const attachWebDavLifecycle = (
     dependencies.windowTarget.removeEventListener("online", onOnline);
     dependencies.documentTarget.removeEventListener("visibilitychange", onVisibilityChange);
     unsubscribe?.();
+    unsubscribeRequest?.();
     controller.dispose();
   };
 };

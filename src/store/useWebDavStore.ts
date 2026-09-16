@@ -67,8 +67,8 @@ export interface WebDavState extends PersistedWebDavState {
   warning: WebDavSafeError | null;
   setSettings: (settings: Partial<WebDavSettings>) => void;
   setAutoSyncEnabled: (enabled: boolean) => void;
-  beginRequest: (controller: AbortController, status?: "testing" | "syncing") => void;
-  finishRequest: (status?: WebDavStatus) => void;
+  beginRequest: (controller: AbortController, status?: "testing" | "syncing") => boolean;
+  finishRequest: (controller: AbortController, status?: WebDavStatus) => boolean;
   setConflict: (conflict: WebDavConflict | null) => void;
   setConflicts: (conflicts: ResumeSyncConflict[]) => void;
   completeSync: (syncedResumeCount: number, lastSyncedAt?: string) => void;
@@ -143,10 +143,16 @@ export const createWebDavStore = (
           set((state) => ({ settings: { ...state.settings, ...settings } })),
         setAutoSyncEnabled: (autoSyncEnabled) =>
           set((state) => ({ settings: { ...state.settings, autoSyncEnabled } })),
-        beginRequest: (abortController, status = "syncing") =>
-          set({ abortController, isSyncing: true, status, error: null, warning: null }),
-        finishRequest: (status = "idle") =>
-          set({ abortController: null, isSyncing: false, status }),
+        beginRequest: (abortController, status = "syncing") => {
+          if (get().abortController) return false;
+          set({ abortController, isSyncing: true, status, error: null, warning: null });
+          return true;
+        },
+        finishRequest: (controller, status = "idle") => {
+          if (get().abortController !== controller) return false;
+          set({ abortController: null, isSyncing: false, status });
+          return true;
+        },
         setConflict: (conflict) => set({
           conflict,
           conflicts: [],

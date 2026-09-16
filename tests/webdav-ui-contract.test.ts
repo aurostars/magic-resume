@@ -280,7 +280,6 @@ test("Sync persists normalized drafts before calling the controller and prevents
   const pendingSync = new Promise<void>((resolve) => { finishSync = resolve; });
   const calls: unknown[] = [];
   const controller = {
-    testConnection: async () => {},
     syncNow: () => {
       calls.push(useWebDavStore.getState().settings);
       return pendingSync;
@@ -317,7 +316,6 @@ test("ordinary WebDAV URLs keep legacy trailing-slash normalization in settings"
   const user = userEvent.setup({ document });
   const calls: unknown[] = [];
   const controller = {
-    testConnection: async () => {},
     syncNow: async () => { calls.push(useWebDavStore.getState().settings); },
     resolveConflict: async () => {},
   };
@@ -339,7 +337,6 @@ test("invalid URL normalization reports a safe localized error without calling t
     controllerProvider: () => {
       providerCalls += 1;
       return {
-        testConnection: async () => {},
         syncNow: async () => {},
         resolveConflict: async () => {},
       };
@@ -636,7 +633,6 @@ test("actual Chinese settings resolves the named resume and keeps unresolved con
     warning: null,
   } as any);
   const controller = {
-    testConnection: async () => {},
     syncNow: async () => {},
     dismissConflict: () => {},
     resolveConflict: async (resumeId: string, resolution: string) => {
@@ -656,5 +652,110 @@ test("actual Chinese settings resolves the named resume and keeps unresolved con
   for (const role of ["status", "alert"] as const) {
     const message = screen.queryByRole(role)?.textContent ?? "";
     assert.doesNotMatch(message, /password-should-not-render|private=secret/);
+  }
+});
+
+
+test("hydration defers automatic sync until a hanging one-shot test finishes, then starts it once", async () => {
+  const originalFetch = globalThis.fetch;
+  let finishOptions!: () => void;
+  const hangingOptions = new Promise<void>((resolve) => { finishOptions = resolve; });
+  const methods: string[] = [];
+  try {
+    resetStores();
+    useResumeStore.setState({ _hasHydrated: false });
+    globalThis.fetch = (async (_input: string | URL | Request, init: RequestInit = {}) => {
+      const method = init.method ?? "GET";
+      methods.push(method);
+      if (methods.length === 1) await hangingOptions;
+      if (method === "PROPFIND") {
+        return new Response('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>', { status: 207 });
+      }
+      if (method === "GET") return new Response(null, { status: 404 });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    const user = userEvent.setup({ document });
+    renderLocalized(React.createElement(Providers, null, React.createElement(WebDavSection)));
+
+    await user.type(screen.getByLabelText("Server URL"), "https://dav.example.test");
+    await user.type(screen.getByLabelText("Username"), "alice");
+    await user.type(screen.getByLabelText("Password"), "app-password");
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    await waitFor(() => assert.deepEqual(methods, ["OPTIONS"]));
+
+    await act(async () => { useResumeStore.getState().setHasHydrated(true); });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(methods, ["OPTIONS"], "formal sync must not overlap the one-shot test");
+
+    finishOptions();
+    await waitFor(() => assert.equal(methods.filter((method) => method === "GET").length, 1));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("unmounting WebDavSection does not abort the global synchronization request", async () => {
+  const originalFetch = globalThis.fetch;
+  let globalSignal: AbortSignal | null = null;
+  try {
+    resetStores();
+    useResumeStore.setState({ _hasHydrated: true });
+    useWebDavStore.getState().setSettings({
+      baseUrl: "https://dav.example.test",
+      username: "alice",
+      password: "app-password",
+      remoteDirectory: "/magic-resume/",
+      autoSyncEnabled: true,
+    });
+    globalThis.fetch = (async (_input: string | URL | Request, init: RequestInit = {}) => {
+      globalSignal = init.signal ?? null;
+      return await new Promise<Response>((_resolve, reject) => {
+        globalSignal?.addEventListener("abort", () => reject(globalSignal?.reason), { once: true });
+      });
+    }) as typeof fetch;
+    const view = renderLocalized(React.createElement(Providers, null, React.createElement(WebDavSection)));
+    await waitFor(() => assert.ok(globalSignal));
+
+    view.rerender(React.createElement(
+      NextIntlClientProvider,
+      { locale: "en", messages: en },
+      React.createElement(Providers, null, React.createElement("div", null, "kept alive")),
+    ));
+
+    assert.equal(globalSignal?.aborted, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("clearing credentials aborts a one-shot test without leaving a stale error", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestSignal: AbortSignal | null = null;
+  try {
+    resetStores();
+    globalThis.fetch = (async (_input: string | URL | Request, init: RequestInit = {}) => {
+      requestSignal = init.signal ?? null;
+      return await new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+      });
+    }) as typeof fetch;
+    const user = userEvent.setup({ document });
+    renderLocalized(React.createElement(WebDavSection));
+    await user.type(screen.getByLabelText("Server URL"), "https://dav.example.test");
+    await user.type(screen.getByLabelText("Username"), "alice");
+    await user.type(screen.getByLabelText("Password"), "app-password");
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    await waitFor(() => assert.ok(requestSignal));
+
+    act(() => { useWebDavStore.getState().clearCredentials(); });
+    await waitFor(() => assert.equal(requestSignal?.aborted, true));
+    await waitFor(() => assert.equal(useWebDavStore.getState().status, "idle"));
+
+    assert.equal(useWebDavStore.getState().error, null);
+    assert.equal(screen.queryByRole("alert"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

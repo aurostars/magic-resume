@@ -91,18 +91,23 @@ export const WebDavSection = ({
       setSettings(normalized);
       if (action === "test") {
         const requestController = new AbortController();
-        connectionTestControllerRef.current = requestController;
         const store = useWebDavStore.getState();
-        store.beginRequest(requestController, "testing");
+        if (!store.beginRequest(requestController, "testing")) return;
+        connectionTestControllerRef.current = requestController;
         try {
           await testWebDavConnection(normalized, requestController.signal);
-          store.finishRequest("success");
+          store.finishRequest(requestController, "success");
         } catch (caught) {
-          store.finishRequest("error");
+          if (requestController.signal.aborted) {
+            store.finishRequest(requestController, "idle");
+            return;
+          }
+          if (useWebDavStore.getState().abortController !== requestController) return;
           const safeError = caught instanceof WebDavError
             ? caught
             : new WebDavError("UNKNOWN");
           store.setError({ code: safeError.code, status: safeError.status });
+          store.finishRequest(requestController, "error");
           throw safeError;
         } finally {
           if (connectionTestControllerRef.current === requestController) {

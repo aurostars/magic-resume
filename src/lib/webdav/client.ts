@@ -1,6 +1,8 @@
 import { getApiRequestUrl } from "../../config/runtime-endpoints";
 import { WebDavError, type WebDavErrorCode } from "./errors";
 
+export const WEB_DAV_REQUEST_TIMEOUT_MS = 15_000;
+
 export interface WebDavClientConfig {
   baseUrl: string;
   username: string;

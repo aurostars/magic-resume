@@ -24,7 +24,8 @@ export interface SyncControllerState {
   isOnline(): boolean;
   isVisible(): boolean;
   hasConflict(): boolean;
-  begin(controller: AbortController): void;
+  isRequestActive?(): boolean;
+  begin(controller: AbortController): boolean | void;
   complete(warning: "NON_ATOMIC_UPLOAD" | null, syncedCount?: number): void;
   defer(): void;
   fail(error: unknown): void;
@@ -269,7 +270,11 @@ export class WebDavSyncController {
     void (async () => {
       let allowFollowUp = false;
       try {
-        this.dependencies.state.begin(controller);
+        if (this.dependencies.state.begin(controller) === false) {
+          if (key === "sync") this.dirty = true;
+          resolve();
+          return;
+        }
         allowFollowUp = await operation(controller.signal);
         resolve();
       } catch (error) {
@@ -307,7 +312,8 @@ export class WebDavSyncController {
       state.isHydrated() &&
       state.isConfigured() &&
       state.isOnline() &&
-      !state.hasConflict();
+      !state.hasConflict() &&
+      !state.isRequestActive?.();
   }
 
   private canAutoSync(): boolean {

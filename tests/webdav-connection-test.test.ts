@@ -9,7 +9,6 @@ const settings = {
   baseUrl: "https://webdav.example.test/dav",
   username: "user",
   password: "password",
-  timeoutMs: 1_000,
   remoteDirectory: "/magic-resume/",
 };
 
@@ -97,4 +96,24 @@ test("runs as a standalone service without store or controller construction", as
   await testWebDavConnection(settings, undefined, fetchImpl);
 
   assert.equal(calls.length, 2);
+});
+
+
+test("uses the shared 15-second timeout instead of aborting immediately when callers omit timeoutMs", async () => {
+  const caller = new AbortController();
+  let requestSignal: AbortSignal | null = null;
+  const fetchImpl: typeof fetch = async (_input, init = {}) => {
+    requestSignal = init.signal ?? null;
+    return await new Promise<Response>((_resolve, reject) => {
+      requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+    });
+  };
+
+  const operation = testWebDavConnection(settings, caller.signal, fetchImpl).catch((error) => error);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const abortedEarly = requestSignal?.aborted ?? false;
+  caller.abort();
+  await operation;
+
+  assert.equal(abortedEarly, false);
 });
