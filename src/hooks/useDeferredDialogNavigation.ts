@@ -22,11 +22,30 @@ export function useDeferredDialogNavigation({
     if (isDialogOpen || !pendingId) return;
 
     const resumeId = pendingId;
-    const frame = window.requestAnimationFrame(() => {
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      cancelled = true;
       clearPendingIdRef.current();
       navigateRef.current(resumeId);
-    });
+    };
 
-    return () => window.cancelAnimationFrame(frame);
+    if (typeof MessageChannel === "undefined") {
+      queueMicrotask(run);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const channel = new MessageChannel();
+    channel.port1.onmessage = run;
+    channel.port2.postMessage(undefined);
+
+    return () => {
+      cancelled = true;
+      channel.port1.onmessage = null;
+      channel.port1.close();
+      channel.port2.close();
+    };
   }, [isDialogOpen, pendingId]);
 }

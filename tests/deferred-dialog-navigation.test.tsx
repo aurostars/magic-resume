@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { after, afterEach } from "node:test";
-import React, { StrictMode } from "react";
+import React, { StrictMode, useEffect } from "react";
 import { JSDOM } from "jsdom";
 import { useDeferredDialogNavigation } from "../src/hooks/useDeferredDialogNavigation";
 
@@ -30,18 +30,27 @@ Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
   value: true,
 });
 
-type Frame = { id: number; callback: FrameRequestCallback };
-let nextFrameId = 1;
-let frames: Frame[] = [];
+const NativeMessageChannel = globalThis.MessageChannel;
+let scheduledChannels = 0;
+let scheduledFrames = 0;
 
-window.requestAnimationFrame = (callback) => {
-  const id = nextFrameId++;
-  frames.push({ id, callback });
-  return id;
+class TrackingMessageChannel {
+  constructor() {
+    scheduledChannels += 1;
+    return new NativeMessageChannel();
+  }
+}
+
+Object.defineProperty(globalThis, "MessageChannel", {
+  configurable: true,
+  writable: true,
+  value: TrackingMessageChannel,
+});
+window.requestAnimationFrame = () => {
+  scheduledFrames += 1;
+  return scheduledFrames;
 };
-window.cancelAnimationFrame = (id) => {
-  frames = frames.filter((frame) => frame.id !== id);
-};
+window.cancelAnimationFrame = () => {};
 
 const { cleanup, render } = await import("@testing-library/react");
 
@@ -62,37 +71,40 @@ function Harness({ open, pendingId, onClear = () => {}, onNavigate }: HarnessPro
   return null;
 }
 
-function flushAnimationFrame() {
-  const queued = frames;
-  frames = [];
-  for (const frame of queued) frame.callback(0);
-}
+const flushAsyncTask = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 afterEach(() => {
   cleanup();
-  frames = [];
+  scheduledChannels = 0;
+  scheduledFrames = 0;
+  Object.defineProperty(globalThis, "MessageChannel", {
+    configurable: true,
+    writable: true,
+    value: TrackingMessageChannel,
+  });
+  Reflect.deleteProperty(document, "visibilityState");
 });
 after(() => dom.window.close());
 
-test("waits until the dialog is closed and the next frame before navigating", () => {
+test("waits until the dialog is closed and a later async task before navigating", async () => {
   const calls: string[] = [];
   const view = render(
     <Harness open pendingId="resume-1" onNavigate={(id) => calls.push(id)} />,
   );
   assert.deepEqual(calls, []);
-  assert.equal(frames.length, 0);
+  assert.equal(scheduledChannels, 0);
 
   view.rerender(
     <Harness open={false} pendingId="resume-1" onNavigate={(id) => calls.push(id)} />,
   );
   assert.deepEqual(calls, []);
-  assert.equal(frames.length, 1);
+  assert.equal(scheduledChannels, 1);
 
-  flushAnimationFrame();
+  await flushAsyncTask();
   assert.deepEqual(calls, ["resume-1"]);
 });
 
-test("clears the pending id before navigating", () => {
+test("clears the pending id before navigating", async () => {
   const events: string[] = [];
   render(
     <Harness
@@ -103,11 +115,11 @@ test("clears the pending id before navigating", () => {
     />,
   );
 
-  flushAnimationFrame();
+  await flushAsyncTask();
   assert.deepEqual(events, ["clear", "navigate:resume-2"]);
 });
 
-test("uses fresh callbacks without rescheduling the queued frame", () => {
+test("uses fresh callbacks without rescheduling the queued task", async () => {
   const calls: string[] = [];
   const view = render(
     <Harness
@@ -117,8 +129,7 @@ test("uses fresh callbacks without rescheduling the queued frame", () => {
       onNavigate={() => calls.push("old-navigate")}
     />,
   );
-  assert.equal(frames.length, 1);
-  const scheduledFrameId = frames[0].id;
+  assert.equal(scheduledChannels, 1);
 
   view.rerender(
     <Harness
@@ -128,43 +139,109 @@ test("uses fresh callbacks without rescheduling the queued frame", () => {
       onNavigate={() => calls.push("new-navigate")}
     />,
   );
-  assert.equal(frames.length, 1);
-  assert.equal(frames[0].id, scheduledFrameId);
+  assert.equal(scheduledChannels, 1);
 
-  flushAnimationFrame();
+  await flushAsyncTask();
   assert.deepEqual(calls, ["new-clear", "new-navigate"]);
 });
 
-test("cancels queued navigation when unmounted", () => {
+test("cancels queued navigation when unmounted", async () => {
   const calls: string[] = [];
   const view = render(
     <Harness open={false} pendingId="resume-4" onNavigate={(id) => calls.push(id)} />,
   );
-  assert.equal(frames.length, 1);
+  assert.equal(scheduledChannels, 1);
 
   view.unmount();
-  assert.equal(frames.length, 0);
-  flushAnimationFrame();
+  await flushAsyncTask();
   assert.deepEqual(calls, []);
 });
 
-test("navigates exactly once across Strict Mode effects and rerenders", () => {
+test("navigates exactly once across Strict Mode effects and rerenders", async () => {
   const calls: string[] = [];
   const view = render(
     <StrictMode>
       <Harness open={false} pendingId="resume-5" onNavigate={(id) => calls.push(id)} />
     </StrictMode>,
   );
-  assert.equal(frames.length, 1);
+  assert.equal(scheduledChannels, 2);
 
   view.rerender(
     <StrictMode>
       <Harness open={false} pendingId="resume-5" onNavigate={(id) => calls.push(id)} />
     </StrictMode>,
   );
-  assert.equal(frames.length, 1);
+  assert.equal(scheduledChannels, 2);
 
-  flushAnimationFrame();
+  await flushAsyncTask();
+  await flushAsyncTask();
   assert.deepEqual(calls, ["resume-5"]);
-  assert.equal(frames.length, 0);
+});
+
+test("navigates after the real dialog unmounts while hidden RAF never fires", async () => {
+  const events: string[] = [];
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+
+  function Dialog() {
+    useEffect(() => () => {
+      events.push("dialog-unmounted");
+    }, []);
+    return <div role="dialog" />;
+  }
+
+  function ImportHarness({ open }: { open: boolean }) {
+    useDeferredDialogNavigation({
+      isDialogOpen: open,
+      pendingId: "resume-hidden",
+      clearPendingId: () => events.push("clear"),
+      navigate: (id) => events.push(`navigate:${id}`),
+    });
+    return open ? <Dialog /> : null;
+  }
+
+  const view = render(<ImportHarness open />);
+  view.rerender(<ImportHarness open={false} />);
+
+  assert.deepEqual(events, ["dialog-unmounted"]);
+  assert.equal(scheduledFrames, 0);
+
+  await flushAsyncTask();
+  assert.deepEqual(events, [
+    "dialog-unmounted",
+    "clear",
+    "navigate:resume-hidden",
+  ]);
+
+  await flushAsyncTask();
+  assert.equal(
+    events.filter((event) => event === "navigate:resume-hidden").length,
+    1,
+  );
+});
+
+test("uses an asynchronous cancellable microtask fallback without MessageChannel", async () => {
+  Object.defineProperty(globalThis, "MessageChannel", {
+    configurable: true,
+    writable: true,
+    value: undefined,
+  });
+  const calls: string[] = [];
+  const completed = render(
+    <Harness open={false} pendingId="resume-fallback" onNavigate={(id) => calls.push(id)} />,
+  );
+
+  assert.deepEqual(calls, []);
+  await Promise.resolve();
+  assert.deepEqual(calls, ["resume-fallback"]);
+  completed.unmount();
+
+  const cancelled = render(
+    <Harness open={false} pendingId="resume-cancelled" onNavigate={(id) => calls.push(id)} />,
+  );
+  cancelled.unmount();
+  await Promise.resolve();
+  assert.deepEqual(calls, ["resume-fallback"]);
 });

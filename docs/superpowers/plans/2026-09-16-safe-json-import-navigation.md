@@ -4,7 +4,7 @@
 
 **Goal:** Make valid legacy Magic Resume JSON imports close the import dialog completely before navigating, preventing Radix scroll-lock cleanup from touching a destroyed Miaobi document.
 
-**Architecture:** Add a focused React hook that consumes a pending resume ID only after the dialog is closed and one animation frame has elapsed. `ResumeWorkbench` will parse and save the JSON exactly as today, but it will queue the new ID and close the dialog instead of navigating synchronously. The hook is independently exercised with JSDOM and Testing Library; production is verified with the anonymized structural equivalent of the supplied legacy export.
+**Architecture:** Add a focused React hook that consumes a pending resume ID in a visibility-independent async task only after the dialog is closed and its subtree has unmounted. `ResumeWorkbench` will parse and save the JSON exactly as today, but it will queue the new ID and close the dialog instead of navigating synchronously. The hook uses a cancellable `MessageChannel` task (with a cancellable microtask fallback) rather than `requestAnimationFrame`, because hidden production documents can suspend RAF indefinitely. The hook is independently exercised with JSDOM and Testing Library; production is verified with the anonymized structural equivalent of the supplied legacy export.
 
 **Tech Stack:** React 18, TypeScript, TanStack Router, Radix Dialog, Node test runner through `tsx --test`, JSDOM, Testing Library, Vite/Miaobi deployment scripts.
 
@@ -40,27 +40,28 @@
     options: DeferredDialogNavigationOptions,
   ): void;
   ```
-- Behavior: no scheduling while `isDialogOpen` is `true` or `pendingId` is `null`; after close, schedule one `requestAnimationFrame`, clear the pending ID before navigation, cancel an uncommitted frame on effect cleanup.
+- Behavior: no scheduling while `isDialogOpen` is `true` or `pendingId` is `null`; after the Dialog subtree unmounts, schedule one visibility-independent `MessageChannel` task, clear the pending ID before navigation, and cancel an uncommitted task on effect cleanup. If `MessageChannel` is unavailable, use a microtask guarded by the same cancelled token.
 
 - [ ] **Step 1: Write the failing lifecycle tests**
 
 Create a JSDOM harness that calls the hook and records `navigate` calls. Add tests equivalent to:
 
 ```tsx
-it("waits until the dialog is closed and the next frame before navigating", () => {
+it("navigates after the real dialog unmounts while hidden RAF never fires", async () => {
   const calls: string[] = [];
-  const view = render(<Harness open pendingId="resume-1" onNavigate={(id) => calls.push(id)} />);
-  assert.deepEqual(calls, []);
+  setDocumentVisibility("hidden");
+  const view = render(<ImportHarness open onNavigate={(id) => calls.push(id)} />);
 
-  view.rerender(<Harness open={false} pendingId="resume-1" onNavigate={(id) => calls.push(id)} />);
+  view.rerender(<ImportHarness open={false} onNavigate={(id) => calls.push(id)} />);
   assert.deepEqual(calls, []);
+  assert.equal(scheduledAnimationFrames, 0);
 
-  flushAnimationFrame();
+  await flushAsyncTask();
   assert.deepEqual(calls, ["resume-1"]);
 });
 ```
 
-Also cover rerenders/Strict Mode producing only one navigation and unmount cancelling the queued frame.
+Also cover rerenders/Strict Mode producing only one navigation and unmount cancelling the queued task.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
@@ -74,28 +75,9 @@ Expected: FAIL because `useDeferredDialogNavigation` does not exist.
 
 - [ ] **Step 3: Implement the minimal hook**
 
-Implement the hook with callback refs plus an effect keyed only by dialog state and pending ID:
+Implement the hook with callback refs plus an effect keyed only by dialog state and pending ID. The effect creates a `MessageChannel`, handles `port1.onmessage` by checking a cancelled token, clearing the pending ID, then navigating, and posts through `port2`. Cleanup marks the task cancelled, clears the handler, and closes both ports. If `MessageChannel` is unavailable, queue the same guarded callback as a microtask. Do not use RAF or a fixed-millisecond timer.
 
-```ts
-const clearPendingIdRef = useRef(clearPendingId);
-const navigateRef = useRef(navigate);
-clearPendingIdRef.current = clearPendingId;
-navigateRef.current = navigate;
-
-useEffect(() => {
-  if (isDialogOpen || !pendingId) return;
-
-  const resumeId = pendingId;
-  const frame = window.requestAnimationFrame(() => {
-    clearPendingIdRef.current();
-    navigateRef.current(resumeId);
-  });
-
-  return () => window.cancelAnimationFrame(frame);
-}, [isDialogOpen, pendingId]);
-```
-
-Callback identity changes must not cancel and recreate an already scheduled frame; clearing the pending ID must happen before navigation to preserve the exactly-once guarantee.
+Callback identity changes must not cancel and recreate an already scheduled task; clearing the pending ID must happen before navigation to preserve the exactly-once guarantee.
 
 - [ ] **Step 4: Run the focused test and verify GREEN**
 
@@ -248,7 +230,7 @@ Expected: all commands exit 0; report exact test counts rather than only “pass
 
 - [ ] **Step 2: Perform independent code review**
 
-Review the final diff for lifecycle ordering, exactly-once navigation, stale frame cancellation, preservation of import data, and absence of fixed delays. Resolve every Critical or Important finding before deployment.
+Review the final diff for lifecycle ordering, exactly-once navigation, stale async-task cancellation, hidden-document independence, preservation of import data, and absence of fixed delays. Resolve every Critical or Important finding before deployment.
 
 - [ ] **Step 3: Build and deploy the exact reviewed HEAD**
 

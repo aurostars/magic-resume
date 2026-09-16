@@ -35,10 +35,10 @@ Cannot read properties of null (reading 'style')
 1. 导入函数继续解析文件、生成新 ID 并写入 Store。
 2. 导入成功后记录待导航 ID，然后关闭导入弹窗；不在回调中直接调用 router。
 3. React effect 监听弹窗关闭状态和待导航 ID。
-4. 只有在弹窗状态已关闭、Dialog 子树已完成卸载后，才消费待导航 ID 并导航。
+4. 只有在弹窗状态已关闭、Dialog 子树已完成卸载后，才投递一个不依赖页面可见性的异步任务来消费待导航 ID 并导航。
 5. 导航前先清空待导航 ID，防止重渲染、Strict Mode 或 effect 重入造成重复导航。
 
-该方案以 React 生命周期作为同步边界，不采用 `setTimeout` 经验值，也不升级或替换全局 Dialog 依赖。
+该方案以 React 生命周期作为 Dialog 卸载边界，并使用可取消的 `MessageChannel` 零延迟任务作为异步边界；不使用 `requestAnimationFrame`，因为妙笔生产页面可能处于 `document.visibilityState === "hidden"`，浏览器会暂停 RAF，导致已调度的导航无限期不执行。缺少 `MessageChannel` 时使用带 cancelled token 的微任务降级。方案不采用固定毫秒 `setTimeout`，也不升级或替换全局 Dialog 依赖。
 
 ## 错误处理
 
