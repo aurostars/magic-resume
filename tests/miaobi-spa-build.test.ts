@@ -10,6 +10,7 @@ import {
   buildMiaobiSpa,
   injectMiaobiRuntime,
   replaceDirectory,
+  rewriteBuiltAssetReferences,
   rewritePublicAssetReferences,
 } from "../scripts/miaobi/build-spa";
 
@@ -90,6 +91,39 @@ test("public asset rewriting only changes real relative or root resource referen
   assert.match(rewritten, /const rootMessage = "\/fonts\/a\.ttf";/);
   assert.match(rewritten, /asset: "\.\.\/fonts\/a\.ttf"/);
   assert.doesNotMatch(rewritten, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/https:\/\//);
+});
+
+test("the complete built-asset rewrite preserves ordinary JavaScript root-path strings", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "magic-resume-asset-rewrite-"));
+
+  try {
+    await mkdir(join(directory, "fonts"));
+    await writeFile(join(directory, "fonts", "a.ttf"), "font");
+    await writeFile(
+      join(directory, "styles.css"),
+      '.root { src: url("/fonts/a.ttf"); }\n.relative { src: url("../fonts/a.ttf"); }',
+    );
+    await writeFile(
+      join(directory, "index.html"),
+      '<link rel="preload" href="/fonts/a.ttf">',
+    );
+    await writeFile(
+      join(directory, "app.js"),
+      'const rootMessage = "/fonts/a.ttf";',
+    );
+
+    await rewriteBuiltAssetReferences(directory, ASSET_BASE_PLACEHOLDER);
+
+    const expected = `${ASSET_BASE_PLACEHOLDER}fonts/a.ttf`;
+    const stylesheet = await readFile(join(directory, "styles.css"), "utf8");
+    const html = await readFile(join(directory, "index.html"), "utf8");
+    const javascript = await readFile(join(directory, "app.js"), "utf8");
+    assert.equal(stylesheet.match(new RegExp(expected, "g"))?.length, 2);
+    assert.match(html, new RegExp(expected));
+    assert.equal(javascript, 'const rootMessage = "/fonts/a.ttf";');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("runtime injection precedes application scripts with canonical production URLs", () => {

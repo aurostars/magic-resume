@@ -47,7 +47,7 @@ export function rewritePublicAssetReferences(
   return rewritten;
 }
 
-function rewriteRootPublicDirectoryLiterals(
+function rewriteRootPublicDirectoryReferences(
   text: string,
   publicDirectories: string[],
   assetBasePlaceholder: string,
@@ -55,8 +55,12 @@ function rewriteRootPublicDirectoryLiterals(
   let rewritten = text;
   for (const directory of publicDirectories) {
     const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const boundary = new RegExp(
+      `((?:(?:\\b[$\\w]+|["'][^"']+["'])\\s*:|\\bnew URL\\()\\s*["'])\\/${escapedDirectory}/`,
+      "g",
+    );
     rewritten = rewritten.replace(
-      new RegExp(`(["'])\\/${escapedDirectory}/`, "g"),
+      boundary,
       `$1${assetBasePlaceholder}${directory}/`,
     );
   }
@@ -73,13 +77,19 @@ function rewriteKnownPublicAssetLiterals(
     const escapedPath = publicPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     rewritten = rewritten.replace(
       new RegExp(`(["'])\\/${escapedPath}(?=[?#]|\\1)`, "g"),
-      `$1${assetBasePlaceholder}${publicPath}`,
+      (literal, quote: string, offset: number, source: string) => {
+        const prefix = source.slice(0, offset);
+        if (/(?:^|[;{}])\s*(?:const|let|var)\s+[$\w]+\s*=\s*$/.test(prefix)) {
+          return literal;
+        }
+        return `${quote}${assetBasePlaceholder}${publicPath}`;
+      },
     );
   }
   return rewritten;
 }
 
-async function rewriteBuiltAssetReferences(
+export async function rewriteBuiltAssetReferences(
   clientDirectory: string,
   assetBasePlaceholder: string,
 ): Promise<void> {
@@ -105,7 +115,7 @@ async function rewriteBuiltAssetReferences(
       publicDirectories,
       assetBasePlaceholder,
     );
-    text = rewriteRootPublicDirectoryLiterals(
+    text = rewriteRootPublicDirectoryReferences(
       text,
       publicDirectories,
       assetBasePlaceholder,
