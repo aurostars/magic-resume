@@ -1,3 +1,4 @@
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
 import { Inter } from "next/font/google";
 import { ReactNode } from "react";
 
@@ -17,19 +18,19 @@ export default function Document({ children, locale, bodyClassName }: Props) {
       <head>
         <link
           rel="preload"
-          href="/fonts/AlibabaPuHuiTi-3-55-Regular.ttf"
+          href={getPublicAssetUrl("/fonts/AlibabaPuHuiTi-3-55-Regular.ttf")}
           as="font"
           type="font/ttf"
           crossOrigin="anonymous"
         />
         <link
           rel="preload"
-          href="/fonts/AlibabaPuHuiTi-3-85-Bold.ttf"
+          href={getPublicAssetUrl("/fonts/AlibabaPuHuiTi-3-85-Bold.ttf")}
           as="font"
           type="font/ttf"
           crossOrigin="anonymous"
         />
-        <link rel="icon" href="/favicon.ico?v=2" />
+        <link rel="icon" href={getPublicAssetUrl("/favicon.ico?v=2")} />
       </head>
       <body className={bodyClassName}>{children}</body>
     </html>

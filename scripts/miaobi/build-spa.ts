@@ -15,7 +15,7 @@ import { createBuilder } from "vite";
 import { MIAOBI_ASSET_BASE_PLACEHOLDER } from "../../vite.miaobi.config";
 export { injectMiaobiRuntime } from "../../miaobi/runtime-config";
 
-const REWRITABLE_BUILD_EXTENSIONS = new Set([".css", ".html", ".js", ".mjs"]);
+const REWRITABLE_BUILD_EXTENSIONS = new Set([".css", ".html"]);
 
 async function filesRecursively(directory: string): Promise<string[]> {
   const files: string[] = [];
@@ -47,27 +47,7 @@ export function rewritePublicAssetReferences(
   return rewritten;
 }
 
-function rewriteRootPublicDirectoryReferences(
-  text: string,
-  publicDirectories: string[],
-  assetBasePlaceholder: string,
-): string {
-  let rewritten = text;
-  for (const directory of publicDirectories) {
-    const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const boundary = new RegExp(
-      `((?:(?:\\b[$\\w]+|["'][^"']+["'])\\s*:|\\bnew URL\\()\\s*["'])\\/${escapedDirectory}/`,
-      "g",
-    );
-    rewritten = rewritten.replace(
-      boundary,
-      `$1${assetBasePlaceholder}${directory}/`,
-    );
-  }
-  return rewritten;
-}
-
-function rewriteKnownPublicAssetLiterals(
+function rewritePublicFileReferences(
   text: string,
   publicPaths: string[],
   assetBasePlaceholder: string,
@@ -75,16 +55,13 @@ function rewriteKnownPublicAssetLiterals(
   let rewritten = text;
   for (const publicPath of publicPaths) {
     const escapedPath = publicPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    rewritten = rewritten.replace(
-      new RegExp(`(["'])\\/${escapedPath}(?=[?#]|\\1)`, "g"),
-      (literal, quote: string, offset: number, source: string) => {
-        const prefix = source.slice(0, offset);
-        if (/(?:^|[;{}])\s*(?:const|let|var)\s+[$\w]+\s*=\s*$/.test(prefix)) {
-          return literal;
-        }
-        return `${quote}${assetBasePlaceholder}${publicPath}`;
-      },
-    );
+    const boundaries = [
+      new RegExp(`(\\burl\\(\\s*["']?)\\/${escapedPath}(?=[?#"')])`, "g"),
+      new RegExp(`(\\b(?:src|href|poster)\\s*=\\s*["'])\\/${escapedPath}(?=[?#"'])`, "g"),
+    ];
+    for (const boundary of boundaries) {
+      rewritten = rewritten.replace(boundary, `$1${assetBasePlaceholder}${publicPath}`);
+    }
   }
   return rewritten;
 }
@@ -115,12 +92,7 @@ export async function rewriteBuiltAssetReferences(
       publicDirectories,
       assetBasePlaceholder,
     );
-    text = rewriteRootPublicDirectoryReferences(
-      text,
-      publicDirectories,
-      assetBasePlaceholder,
-    );
-    text = rewriteKnownPublicAssetLiterals(
+    text = rewritePublicFileReferences(
       text,
       publicPaths,
       assetBasePlaceholder,

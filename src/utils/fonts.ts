@@ -1,6 +1,8 @@
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
+
 type FontSource = {
   family: string;
-  url: string;
+  url: `/${string}`;
   format: "truetype" | "opentype" | "woff" | "woff2";
   weight: string;
   style: "normal" | "italic";
@@ -225,7 +227,8 @@ export const getFontFaceCss = async (
 
   const rules = await Promise.all(
     definition.sources.map(async (source) => {
-      const resolvedUrl = inline ? await toDataUrl(source.url) : source.url;
+      const publicUrl = getPublicAssetUrl(source.url);
+      const resolvedUrl = inline ? await toDataUrl(publicUrl) : publicUrl;
       return buildFontFaceRule(source, resolvedUrl);
     })
   );

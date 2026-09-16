@@ -1,3 +1,4 @@
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
 import { DEFAULT_TEMPLATES } from "@/config";
 import {
   initialResumeState,
@@ -79,4 +80,7 @@ export const getTemplateSnapshotSrc = (
   manifest: TemplateSnapshotManifest,
   locale: TemplatePreviewLocale,
   templateId: string
-) => manifest.locales[locale][templateId] ?? null;
+) => {
+  const path = manifest.locales[locale][templateId];
+  return path ? getPublicAssetUrl(path as `/${string}`) : null;
+};

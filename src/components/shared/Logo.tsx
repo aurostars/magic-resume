@@ -1,3 +1,4 @@
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
 import React from "react";
 import Image from "@/lib/image";
 
@@ -14,7 +15,7 @@ const Logo: React.FC<LogoProps> = ({
 }) => {
   return (
     <Image
-      src="/logo.svg"
+      src={getPublicAssetUrl("/logo.svg")}
       alt="Magic Resume Logo"
       width={size}
       height={size}

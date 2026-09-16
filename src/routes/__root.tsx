@@ -14,20 +14,21 @@ import zhMessages from "@/i18n/locales/zh.json";
 import enMessages from "@/i18n/locales/en.json";
 import { Providers } from "@/app/providers";
 import { Toaster } from "@/components/ui/sonner";
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
 import { getPreferredLocale } from "@/i18n/runtime";
 import { ReactGrab } from "@/components/dev/ReactGrab";
 
 const defaultFontPreloadLinks = [
   {
     rel: "preload",
-    href: "/fonts/AlibabaPuHuiTi-3-55-Regular.ttf",
+    href: getPublicAssetUrl("/fonts/AlibabaPuHuiTi-3-55-Regular.ttf"),
     as: "font",
     type: "font/ttf",
     crossOrigin: "anonymous" as const
   },
   {
     rel: "preload",
-    href: "/fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
+    href: getPublicAssetUrl("/fonts/AlibabaPuHuiTi-3-85-Bold.ttf"),
     as: "font",
     type: "font/ttf",
     crossOrigin: "anonymous" as const
@@ -74,8 +75,8 @@ function RootComponent() {
     <html lang={locale} suppressHydrationWarning>
       <head>
         <HeadContent />
-        <link rel="icon" href="/favicon.ico?v=2" />
-        <link rel="icon" href="/icon.png" />
+        <link rel="icon" href={getPublicAssetUrl("/favicon.ico?v=2")} />
+        <link rel="icon" href={getPublicAssetUrl("/icon.png")} />
       </head>
       <body>
         <AppBody locale={locale} />

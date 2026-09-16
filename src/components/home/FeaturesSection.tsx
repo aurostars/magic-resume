@@ -1,4 +1,5 @@
 
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
 import { useTranslations } from "@/i18n/compat/client";
 import Image from "@/lib/image";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -212,7 +213,7 @@ export default function FeaturesSection() {
                     <div className="absolute inset-0 bg-gradient-to-tr from-primary/5 to-transparent pointer-events-none" />
                     <div className="relative w-full h-full transform group-hover:scale-[1.02] transition-transform duration-700">
                       <Image
-                        src={category.items[activeFeatures[catIndex]].image}
+                        src={getPublicAssetUrl(category.items[activeFeatures[catIndex]].image)}
                         alt={t(category.items[activeFeatures[catIndex]].title)}
                         fill
                         className="object-contain"

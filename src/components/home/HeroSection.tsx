@@ -1,3 +1,4 @@
+import { getPublicAssetUrl } from "@/config/runtime-endpoints";
 import { useTranslations } from "@/i18n/compat/client";
 import { Button } from "@/components/ui/button";
 import { Sparkles, ArrowRight, Play } from "lucide-react";
@@ -63,7 +64,7 @@ export default function HeroSection() {
              <div className="absolute -inset-4 bg-gradient-to-b from-primary/5 to-transparent rounded-[3rem] blur-2xl -z-10" />
              <div className="relative rounded-3xl border border-border/50 bg-secondary/30 p-2 sm:p-4 backdrop-blur-sm shadow-2xl overflow-hidden group">
                 <Image
-                  src="/web-shot.png"
+                  src={getPublicAssetUrl("/web-shot.png")}
                   alt="Resume Editor Preview"
                   width={1200}
                   height={800}

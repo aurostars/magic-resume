@@ -109,7 +109,14 @@ test("the complete built-asset rewrite preserves ordinary JavaScript root-path s
     );
     await writeFile(
       join(directory, "app.js"),
-      'const rootMessage = "/fonts/a.ttf";',
+      [
+        'const rootMessage = "/fonts/a.ttf";',
+        'export const exportedMessage = "/fonts/a.ttf";',
+        'const config = { asset: "/fonts/a.ttf" };',
+        'consume("/fonts/a.ttf");',
+        'function getMessage() { return "/fonts/a.ttf"; }',
+        'if (candidate === "/fonts/a.ttf") consume(candidate);',
+      ].join("\n"),
     );
 
     await rewriteBuiltAssetReferences(directory, ASSET_BASE_PLACEHOLDER);
@@ -120,7 +127,17 @@ test("the complete built-asset rewrite preserves ordinary JavaScript root-path s
     const javascript = await readFile(join(directory, "app.js"), "utf8");
     assert.equal(stylesheet.match(new RegExp(expected, "g"))?.length, 2);
     assert.match(html, new RegExp(expected));
-    assert.equal(javascript, 'const rootMessage = "/fonts/a.ttf";');
+    assert.equal(
+      javascript,
+      [
+        'const rootMessage = "/fonts/a.ttf";',
+        'export const exportedMessage = "/fonts/a.ttf";',
+        'const config = { asset: "/fonts/a.ttf" };',
+        'consume("/fonts/a.ttf");',
+        'function getMessage() { return "/fonts/a.ttf"; }',
+        'if (candidate === "/fonts/a.ttf") consume(candidate);',
+      ].join("\n"),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -317,8 +334,8 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
       /workers\.dev|(?:from\s*|import\s*\()["'](?:cloudflare:|wrangler)/i,
     );
     assert.doesNotMatch(javascript, /(?:from\s*|import\s*\()["']node:/);
-    assert.doesNotMatch(javascript, /["'`]\/(?:avatar\.png|features\/|fonts\/|icon\.png|logo\.svg|template-snapshots\/|web-shot\.png)/);
-    assert.match(javascript, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/template-snapshots\/zh\/classic\.png/);
+    assert.match(javascript, /["'`]\/template-snapshots\/zh\/classic\.png/);
+    assert.match(javascript, /assetBaseUrl/);
     assert.match(javascript, /platform\s*===\s*["']miaobi["']/);
     assert.match(javascript, /createHashHistory|hashchange/);
     assert.equal(await snapshotPath(join(dirname(outputDirectory), "server")), "<missing>");
