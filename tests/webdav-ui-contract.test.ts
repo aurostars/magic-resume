@@ -181,57 +181,135 @@ test("a hydrated persisted false renders automatic sync disabled", async () => {
   }
 });
 
-test("Test and Sync persist normalized drafts before calling the controller and prevent duplicate actions", async () => {
+test("Test connection performs one-shot Jianguoyun I/O before resume hydration", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalRuntime = window.__MAGIC_RESUME_RUNTIME__;
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  try {
+    resetStores();
+    useResumeStore.setState({ _hasHydrated: false });
+    window.__MAGIC_RESUME_RUNTIME__ = {
+      platform: "miaobi",
+      apiFunctionUrl: "https://miaobi.example.test/function",
+      assetBaseUrl: null,
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      requests.push({ url: String(input), init });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    const user = userEvent.setup({ document });
+    renderLocalized(React.createElement(
+      Providers,
+      null,
+      React.createElement(WebDavSection),
+    ));
+
+    await user.type(screen.getByLabelText("Server URL"), "https://dav.jianguoyun.com/dav");
+    await user.type(screen.getByLabelText("Username"), "alice");
+    await user.type(screen.getByLabelText("Password"), "app-password");
+    await user.clear(screen.getByLabelText("Remote directory"));
+    await user.type(screen.getByLabelText("Remote directory"), "magic-resume");
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+
+    await waitFor(() => assert.equal(requests.length, 2));
+    const envelopes = requests.map(({ url, init }) => {
+      assert.equal(url, "https://miaobi.example.test/function?__path=%2Fapi%2Fwebdav%2Fjianguoyun");
+      assert.equal(init.method, "POST");
+      assert.equal(new Headers(init.headers).has("Authorization"), false);
+      assert.equal(typeof init.body, "string");
+      assert.doesNotMatch(init.body as string, /"authorization"\s*:/i);
+      return JSON.parse(init.body as string) as {
+        method: string;
+        pathSegments: string[];
+      };
+    });
+    assert.deepEqual(envelopes.map(({ method }) => method), ["OPTIONS", "PROPFIND"]);
+    assert.deepEqual(envelopes.map(({ pathSegments }) => pathSegments), [
+      ["magic-resume"],
+      ["magic-resume"],
+    ]);
+    assert.equal(useWebDavStore.getState().status, "success");
+    assert.equal(screen.queryByText(/WD-CLIENT-UNKNOWN/), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalRuntime === undefined) delete window.__MAGIC_RESUME_RUNTIME__;
+    else window.__MAGIC_RESUME_RUNTIME__ = originalRuntime;
+  }
+});
+
+test("Sync now without a hydrated controller reports client-not-ready without I/O", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  try {
+    resetStores();
+    useResumeStore.setState({ _hasHydrated: false });
+    useWebDavStore.getState().setSettings({
+      baseUrl: "https://dav.example.test/root",
+      username: "alice",
+      password: "app-password",
+      remoteDirectory: "/magic-resume/",
+    });
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    const user = userEvent.setup({ document });
+    renderLocalized(React.createElement(
+      Providers,
+      null,
+      React.createElement(WebDavSection),
+    ));
+
+    await user.click(screen.getByRole("button", { name: "Sync now" }));
+
+    await waitFor(() => assert.match(
+      screen.getByRole("alert").textContent ?? "",
+      /Diagnostic code: WD-CLIENT-NOT-READY/,
+    ));
+    assert.deepEqual(useWebDavStore.getState().error, { code: "CLIENT_NOT_READY", status: null });
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Sync persists normalized drafts before calling the controller and prevents duplicate actions", async () => {
   resetStores();
   const user = userEvent.setup({ document });
-  let finishTest!: () => void;
-  const pendingTest = new Promise<void>((resolve) => { finishTest = resolve; });
-  const calls: Array<{ action: string; settings: unknown }> = [];
+  let finishSync!: () => void;
+  const pendingSync = new Promise<void>((resolve) => { finishSync = resolve; });
+  const calls: unknown[] = [];
   const controller = {
-    testConnection: () => {
-      calls.push({ action: "test", settings: useWebDavStore.getState().settings });
-      return pendingTest;
+    testConnection: async () => {},
+    syncNow: () => {
+      calls.push(useWebDavStore.getState().settings);
+      return pendingSync;
     },
-    syncNow: async () => {
-      calls.push({ action: "sync", settings: useWebDavStore.getState().settings });
-    },
-    dismissConflict: () => {},
     resolveConflict: async () => {},
   };
   renderLocalized(React.createElement(WebDavSection, { controllerProvider: () => controller }));
 
-  const serverUrl = screen.getByLabelText("Server URL");
-  await user.click(serverUrl);
-  await user.paste("https://dav.jianguoyun.com/dav\u200c");
+  await user.type(screen.getByLabelText("Server URL"), "https://dav.jianguoyun.com/dav\u200c");
   await user.type(screen.getByLabelText("Username"), "  alice  ");
   await user.type(screen.getByLabelText("Password"), " secret ");
   await user.clear(screen.getByLabelText("Remote directory"));
   await user.type(screen.getByLabelText("Remote directory"), " resumes ");
   assert.equal(useWebDavStore.getState().settings.baseUrl, "");
 
-  await user.click(screen.getByRole("button", { name: "Test connection" }));
+  await user.click(screen.getByRole("button", { name: "Sync now" }));
   await waitFor(() => assert.equal(calls.length, 1));
-  const normalized = {
+  assert.deepEqual(calls[0], {
     baseUrl: "https://dav.jianguoyun.com/dav/",
     username: "alice",
     password: " secret ",
     remoteDirectory: "/resumes/",
     autoSyncEnabled: true,
-  };
-  assert.deepEqual(calls[0], { action: "test", settings: normalized });
+  });
   assert.equal(screen.getByRole("button", { name: "Test connection" }).hasAttribute("disabled"), true);
   assert.equal(screen.getByRole("button", { name: "Sync now" }).hasAttribute("disabled"), true);
 
-  finishTest();
+  finishSync();
   await waitFor(() => assert.equal(screen.getByRole("button", { name: "Sync now" }).hasAttribute("disabled"), false));
-  await user.clear(screen.getByLabelText("Remote directory"));
-  await user.type(screen.getByLabelText("Remote directory"), "next");
-  await user.click(screen.getByRole("button", { name: "Sync now" }));
-  await waitFor(() => assert.equal(calls.length, 2));
-  assert.deepEqual(calls[1], {
-    action: "sync",
-    settings: { ...normalized, remoteDirectory: "/next/" },
-  });
 });
 
 test("ordinary WebDAV URLs keep legacy trailing-slash normalization in settings", async () => {
@@ -239,14 +317,14 @@ test("ordinary WebDAV URLs keep legacy trailing-slash normalization in settings"
   const user = userEvent.setup({ document });
   const calls: unknown[] = [];
   const controller = {
-    testConnection: async () => { calls.push(useWebDavStore.getState().settings); },
-    syncNow: async () => {},
+    testConnection: async () => {},
+    syncNow: async () => { calls.push(useWebDavStore.getState().settings); },
     resolveConflict: async () => {},
   };
   renderLocalized(React.createElement(WebDavSection, { controllerProvider: () => controller }));
 
   await user.type(screen.getByLabelText("Server URL"), "https://dav.example.test/root///");
-  await user.click(screen.getByRole("button", { name: "Test connection" }));
+  await user.click(screen.getByRole("button", { name: "Sync now" }));
   await waitFor(() => assert.equal(calls.length, 1));
 
   assert.equal((calls[0] as { baseUrl: string }).baseUrl, "https://dav.example.test/root");

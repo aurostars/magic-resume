@@ -16,6 +16,7 @@ import { getWebDavSyncController } from "@/hooks/useWebDavSync";
 import { isJianguoyunWebDavUrl, normalizeWebDavBaseUrl } from "@/lib/webdav/client";
 import { WebDavError } from "@/lib/webdav/errors";
 import { getWebDavDiagnostic } from "@/lib/webdav/diagnostics";
+import { testWebDavConnection } from "@/lib/webdav/connection-test";
 import type { WebDavSyncController } from "@/lib/webdav/controller";
 import { useLocale, useTranslations } from "@/i18n/compat/client";
 import {
@@ -26,7 +27,7 @@ import { WebDavConflictDialog } from "./WebDavConflictDialog";
 
 type ControllerApi = Pick<
   WebDavSyncController,
-  "testConnection" | "syncNow" | "resolveConflict"
+  "syncNow" | "resolveConflict"
 >;
 
 export interface WebDavSectionProps {
@@ -61,8 +62,10 @@ export const WebDavSection = ({
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const clearCancelRef = useRef<HTMLButtonElement>(null);
   const clearTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const connectionTestControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => setDraft(settings), [settings]);
+  useEffect(() => () => connectionTestControllerRef.current?.abort(), []);
 
   const updateDraft = (field: keyof WebDavSettings, value: string | boolean) => {
     setDraft((current) => ({ ...current, [field]: value }));
@@ -86,14 +89,34 @@ export const WebDavSection = ({
       }
       setDraft(normalized);
       setSettings(normalized);
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      const controller = controllerProvider();
-      if (!controller) {
-        useWebDavStore.getState().setError({ code: "UNKNOWN", status: null });
+      if (action === "test") {
+        const requestController = new AbortController();
+        connectionTestControllerRef.current = requestController;
+        const store = useWebDavStore.getState();
+        store.beginRequest(requestController, "testing");
+        try {
+          await testWebDavConnection(normalized, requestController.signal);
+          store.finishRequest("success");
+        } catch (caught) {
+          store.finishRequest("error");
+          const safeError = caught instanceof WebDavError
+            ? caught
+            : new WebDavError("UNKNOWN");
+          store.setError({ code: safeError.code, status: safeError.status });
+          throw safeError;
+        } finally {
+          if (connectionTestControllerRef.current === requestController) {
+            connectionTestControllerRef.current = null;
+          }
+        }
         return;
       }
-      if (action === "test") await controller.testConnection();
-      else await controller.syncNow("manual");
+      const controller = controllerProvider();
+      if (!controller) {
+        useWebDavStore.getState().setError({ code: "CLIENT_NOT_READY", status: null });
+        return;
+      }
+      await controller.syncNow("manual");
     } catch (caught) {
       if (caught instanceof WebDavError) {
         useWebDavStore.getState().setError({
