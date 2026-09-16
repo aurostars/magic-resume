@@ -93,51 +93,57 @@ test("public asset rewriting only changes real relative or root resource referen
   assert.doesNotMatch(rewritten, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/https:\/\//);
 });
 
-test("the complete built-asset rewrite preserves ordinary JavaScript root-path strings", async () => {
+test("the complete built-asset rewrite preserves ordinary JavaScript strings, including inline scripts", async () => {
   const directory = await mkdtemp(join(tmpdir(), "magic-resume-asset-rewrite-"));
+  const ordinaryJavascript = [
+    'const rootMessage = "/assets/message.js";',
+    'export const exportedMessage = "./assets/message.js";',
+    'const config = { asset: "/assets/message.js" };',
+    `const markup = '<img src="/assets/preview.png">';`,
+    `const cssText = 'url("/assets/preview.png")';`,
+    'consume("./assets/message.js");',
+    'function getMessage() { return "/./assets/message.js"; }',
+    'if (candidate === "/assets/message.js") consume(candidate);',
+  ].join("\n");
 
   try {
     await mkdir(join(directory, "fonts"));
     await writeFile(join(directory, "fonts", "a.ttf"), "font");
     await writeFile(
       join(directory, "styles.css"),
-      '.root { src: url("/fonts/a.ttf"); }\n.relative { src: url("../fonts/a.ttf"); }',
+      [
+        '.root { src: url("/fonts/a.ttf"); }',
+        '.relative { src: url("../fonts/a.ttf"); }',
+        '.asset-root { background: url("/assets/background.png"); }',
+        '.asset-relative { background: url("./assets/background.png"); }',
+      ].join("\n"),
     );
     await writeFile(
       join(directory, "index.html"),
-      '<link rel="preload" href="/fonts/a.ttf">',
-    );
-    await writeFile(
-      join(directory, "app.js"),
       [
-        'const rootMessage = "/fonts/a.ttf";',
-        'export const exportedMessage = "/fonts/a.ttf";',
-        'const config = { asset: "/fonts/a.ttf" };',
-        'consume("/fonts/a.ttf");',
-        'function getMessage() { return "/fonts/a.ttf"; }',
-        'if (candidate === "/fonts/a.ttf") consume(candidate);',
+        '<link rel="preload" href="/fonts/a.ttf">',
+        '<link rel="stylesheet" href="./assets/app.css">',
+        '<script type="module" src="/assets/app.js"></script>',
+        `<script>${ordinaryJavascript}</script>`,
+        '<script type="module">import("/assets/chunk.js")</script>',
       ].join("\n"),
     );
+    await writeFile(join(directory, "app.js"), ordinaryJavascript);
 
     await rewriteBuiltAssetReferences(directory, ASSET_BASE_PLACEHOLDER);
 
-    const expected = `${ASSET_BASE_PLACEHOLDER}fonts/a.ttf`;
+    const expectedFont = `${ASSET_BASE_PLACEHOLDER}fonts/a.ttf`;
+    const expectedAsset = `${ASSET_BASE_PLACEHOLDER}assets/`;
     const stylesheet = await readFile(join(directory, "styles.css"), "utf8");
     const html = await readFile(join(directory, "index.html"), "utf8");
     const javascript = await readFile(join(directory, "app.js"), "utf8");
-    assert.equal(stylesheet.match(new RegExp(expected, "g"))?.length, 2);
-    assert.match(html, new RegExp(expected));
-    assert.equal(
-      javascript,
-      [
-        'const rootMessage = "/fonts/a.ttf";',
-        'export const exportedMessage = "/fonts/a.ttf";',
-        'const config = { asset: "/fonts/a.ttf" };',
-        'consume("/fonts/a.ttf");',
-        'function getMessage() { return "/fonts/a.ttf"; }',
-        'if (candidate === "/fonts/a.ttf") consume(candidate);',
-      ].join("\n"),
-    );
+    assert.equal(stylesheet.match(new RegExp(expectedFont, "g"))?.length, 2);
+    assert.equal(stylesheet.match(new RegExp(expectedAsset, "g"))?.length, 2);
+    assert.match(html, new RegExp(expectedFont));
+    assert.equal(html.match(new RegExp(expectedAsset, "g"))?.length, 3);
+    assert.ok(html.includes(`<script>${ordinaryJavascript}</script>`));
+    assert.ok(html.includes(`<script type="module">import("${expectedAsset}chunk.js")</script>`));
+    assert.equal(javascript, ordinaryJavascript);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

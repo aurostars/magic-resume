@@ -27,22 +27,25 @@ async function filesRecursively(directory: string): Promise<string[]> {
   return files;
 }
 
-export function rewritePublicAssetReferences(
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+type ResourceSyntax = "css" | "html";
+
+function rewriteDirectoryReferences(
   text: string,
-  publicDirectories: string[],
+  directories: string[],
   assetBasePlaceholder: string,
+  syntax: ResourceSyntax,
 ): string {
   let rewritten = text;
-  for (const directory of publicDirectories) {
-    const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const resourcePath = `(?:\\.\\./|\\./|/)${escapedDirectory}/`;
-    const boundaries = [
-      new RegExp(`(\\burl\\(\\s*["']?)${resourcePath}`, "g"),
-      new RegExp(`(\\b(?:src|href|poster)\\s*=\\s*["'])${resourcePath}`, "g"),
-    ];
-    for (const boundary of boundaries) {
-      rewritten = rewritten.replace(boundary, `$1${assetBasePlaceholder}${directory}/`);
-    }
+  for (const directory of directories) {
+    const resourcePath = `(?:\\.\\./|\\./|/\\./|/)${escapeRegularExpression(directory)}/`;
+    const boundary = syntax === "css"
+      ? new RegExp(`(\\burl\\(\\s*["']?)${resourcePath}`, "g")
+      : new RegExp(`(\\b(?:src|href|poster)\\s*=\\s*["'])${resourcePath}`, "g");
+    rewritten = rewritten.replace(boundary, `$1${assetBasePlaceholder}${directory}/`);
   }
   return rewritten;
 }
@@ -51,19 +54,104 @@ function rewritePublicFileReferences(
   text: string,
   publicPaths: string[],
   assetBasePlaceholder: string,
+  syntax: ResourceSyntax,
 ): string {
   let rewritten = text;
   for (const publicPath of publicPaths) {
-    const escapedPath = publicPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const boundaries = [
-      new RegExp(`(\\burl\\(\\s*["']?)\\/${escapedPath}(?=[?#"')])`, "g"),
-      new RegExp(`(\\b(?:src|href|poster)\\s*=\\s*["'])\\/${escapedPath}(?=[?#"'])`, "g"),
-    ];
-    for (const boundary of boundaries) {
-      rewritten = rewritten.replace(boundary, `$1${assetBasePlaceholder}${publicPath}`);
-    }
+    const escapedPath = escapeRegularExpression(publicPath);
+    const boundary = syntax === "css"
+      ? new RegExp(`(\\burl\\(\\s*["']?)\\/${escapedPath}(?=[?#"')])`, "g")
+      : new RegExp(`(\\b(?:src|href|poster)\\s*=\\s*["'])\\/${escapedPath}(?=[?#"'])`, "g");
+    rewritten = rewritten.replace(boundary, `$1${assetBasePlaceholder}${publicPath}`);
   }
   return rewritten;
+}
+
+export function rewritePublicAssetReferences(
+  text: string,
+  publicDirectories: string[],
+  assetBasePlaceholder: string,
+): string {
+  return rewriteDirectoryReferences(
+    rewriteDirectoryReferences(text, publicDirectories, assetBasePlaceholder, "css"),
+    publicDirectories,
+    assetBasePlaceholder,
+    "html",
+  );
+}
+
+function rewriteCssAssetReferences(
+  text: string,
+  directories: string[],
+  publicPaths: string[],
+  assetBasePlaceholder: string,
+): string {
+  return rewritePublicFileReferences(
+    rewriteDirectoryReferences(text, directories, assetBasePlaceholder, "css"),
+    publicPaths,
+    assetBasePlaceholder,
+    "css",
+  );
+}
+
+function rewriteStandaloneModuleImport(
+  script: string,
+  directories: string[],
+  assetBasePlaceholder: string,
+): string {
+  let rewritten = script;
+  for (const directory of directories) {
+    const resourcePath = `(?:\\.\\./|\\./|/\\./|/)${escapeRegularExpression(directory)}/`;
+    rewritten = rewritten.replace(
+      new RegExp(`^(\\s*import\\(\\s*["'])${resourcePath}([^"']+["']\\s*\\)\\s*;?\\s*)$`),
+      `$1${assetBasePlaceholder}${directory}/$2`,
+    );
+  }
+  return rewritten;
+}
+
+function rewriteHtmlAssetReferences(
+  text: string,
+  directories: string[],
+  publicPaths: string[],
+  assetBasePlaceholder: string,
+): string {
+  return text.replace(
+    /<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>|<style\b[^>]*>[\s\S]*?<\/style\s*>|<[^>]+>/gi,
+    (token) => {
+      if (/^<!--/.test(token)) return token;
+      if (/^<script\b/i.test(token)) {
+        return token.replace(
+          /^(<script\b[^>]*>)([\s\S]*)(<\/script\s*>)$/i,
+          (_, openingTag: string, script: string, closingTag: string) => {
+            const rewrittenOpeningTag = rewritePublicFileReferences(
+              rewriteDirectoryReferences(openingTag, directories, assetBasePlaceholder, "html"),
+              publicPaths,
+              assetBasePlaceholder,
+              "html",
+            );
+            const rewrittenScript = /\btype\s*=\s*["']module["']/i.test(openingTag)
+              ? rewriteStandaloneModuleImport(script, directories, assetBasePlaceholder)
+              : script;
+            return `${rewrittenOpeningTag}${rewrittenScript}${closingTag}`;
+          },
+        );
+      }
+      if (/^<style\b/i.test(token)) {
+        return token.replace(
+          /^(<style\b[^>]*>)([\s\S]*)(<\/style\s*>)$/i,
+          (_, openingTag: string, css: string, closingTag: string) =>
+            `${openingTag}${rewriteCssAssetReferences(css, directories, publicPaths, assetBasePlaceholder)}${closingTag}`,
+        );
+      }
+      return rewritePublicFileReferences(
+        rewriteDirectoryReferences(token, directories, assetBasePlaceholder, "html"),
+        publicPaths,
+        assetBasePlaceholder,
+        "html",
+      );
+    },
+  );
 }
 
 export async function rewriteBuiltAssetReferences(
@@ -80,24 +168,26 @@ export async function rewriteBuiltAssetReferences(
     publicPaths.filter((path) => path.includes("/")).map((path) => path.split("/", 1)[0]),
   )].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 
+  const assetDirectories = ["assets", ...publicDirectories];
+
   for (const path of files) {
-    if (!REWRITABLE_BUILD_EXTENSIONS.has(extname(path).toLowerCase())) continue;
-    let text = await readFile(path, "utf8");
-    text = text.replace(
-      /(?:\/\.\/|\.\/|\/)assets\//g,
-      `${assetBasePlaceholder}assets/`,
-    );
-    text = rewritePublicAssetReferences(
-      text,
-      publicDirectories,
-      assetBasePlaceholder,
-    );
-    text = rewritePublicFileReferences(
-      text,
-      publicPaths,
-      assetBasePlaceholder,
-    );
-    await writeFile(path, text, "utf8");
+    const extension = extname(path).toLowerCase();
+    if (!REWRITABLE_BUILD_EXTENSIONS.has(extension)) continue;
+    const text = await readFile(path, "utf8");
+    const rewritten = extension === ".css"
+      ? rewriteCssAssetReferences(
+        text,
+        assetDirectories,
+        publicPaths,
+        assetBasePlaceholder,
+      )
+      : rewriteHtmlAssetReferences(
+        text,
+        assetDirectories,
+        publicPaths,
+        assetBasePlaceholder,
+      );
+    await writeFile(path, rewritten, "utf8");
   }
 }
 
