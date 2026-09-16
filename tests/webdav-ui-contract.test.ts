@@ -81,7 +81,7 @@ const requiredKeys = [
   "lastSyncedAt", "neverSynced", "syncing", "success", "nonAtomicWarning", "authError",
   "jianguoyunAuthError", "proxyProtocolError", "diagnosticLabel", "httpStatusLabel",
   "forbiddenError", "networkError", "timeoutError", "directoryError", "quotaError",
-  "corruptSnapshotError", "newerSnapshotError", "unknownError", "perResumeJsonDescription",
+  "corruptSnapshotError", "newerSnapshotError", "clientNotReadyError", "unknownError", "perResumeJsonDescription",
   "credentialsLocalDescription", "clearKeepsFilesDescription", "syncedResumeCount", "conflictTitle",
   "conflictBody", "bothModified", "deleteVsModify", "localUpdatedAt", "remoteUpdatedAt",
   "notAvailable", "keepLocal", "useCloud",
@@ -116,6 +116,12 @@ test("English and Chinese expose the complete equivalent WebDAV locale contract"
     assert.ok(english[key as keyof typeof english].trim());
     assert.ok(chinese[key as keyof typeof chinese].trim());
   }
+});
+
+test("client-not-ready guidance describes local resume readiness without internal store fields", () => {
+  const message = zh.dashboard.settings.webdav.clientNotReadyError;
+  assert.equal(message, "本地简历数据尚未准备完成，请刷新页面后重试。");
+  assert.doesNotMatch(message, /Store|useResumeStore|webDavBaseline|_hasHydrated/);
 });
 
 test("newly hydrated settings expose labeled controls and default automatic sync on", async () => {

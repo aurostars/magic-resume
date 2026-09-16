@@ -11,6 +11,7 @@ export type WebDavDiagnosticMessageKey =
   | "directoryError"
   | "quotaError"
   | "proxyProtocolError"
+  | "clientNotReadyError"
   | "unknownError";
 
 export interface WebDavDiagnostic {
@@ -66,6 +67,8 @@ export function getWebDavDiagnostic(
         diagnosticCode: httpStatus === 502 ? "WD-UPSTREAM-502" : withStatus("WD-SERVER", httpStatus),
         httpStatus,
       };
+    case "CLIENT_NOT_READY":
+      return { messageKey: "clientNotReadyError", diagnosticCode: "WD-CLIENT-NOT-READY", httpStatus: null };
     default:
       return {
         messageKey: "unknownError",

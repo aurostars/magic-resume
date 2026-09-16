@@ -13,6 +13,7 @@ export type WebDavErrorCode =
   | "REMOTE_CONTENT_MISMATCH"
   | "INVALID_REMOTE_RESUME"
   | "SERVER"
+  | "CLIENT_NOT_READY"
   | "UNKNOWN";
 
 export class WebDavError extends Error {

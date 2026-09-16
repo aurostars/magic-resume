@@ -235,6 +235,7 @@
         "corruptSnapshotError": "云端备份已损坏，因此未应用该备份。",
         "newerSnapshotError": "云端备份由更新且当前不支持的应用版本创建。",
         "proxyProtocolError": "请求格式与当前服务版本不兼容，请强制刷新页面后重试。",
+        "clientNotReadyError": "本地简历数据尚未准备完成，请刷新页面后重试。",
         "diagnosticLabel": "诊断码：{code}",
         "httpStatusLabel": "HTTP {status}",
         "unknownError": "WebDAV 操作失败，请检查设置后重试。",

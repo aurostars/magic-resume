@@ -234,6 +234,7 @@
         "corruptSnapshotError": "The cloud backup is damaged and was not applied.",
         "newerSnapshotError": "The cloud backup was created by a newer, unsupported app version.",
         "proxyProtocolError": "The request format is incompatible with the current service version. Force-refresh the page and try again.",
+        "clientNotReadyError": "Local resume data is not ready yet. Refresh the page and try again.",
         "diagnosticLabel": "Diagnostic code: {code}",
         "httpStatusLabel": "HTTP {status}",
         "unknownError": "The WebDAV operation failed. Check the settings and try again.",

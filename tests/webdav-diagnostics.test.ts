@@ -29,6 +29,12 @@ test("classifies safe WebDAV errors into stable diagnostics", () => {
       expected: { messageKey: "networkError", diagnosticCode: "WD-UPSTREAM-502", httpStatus: 502 },
     },
     {
+      name: "client not ready",
+      error: { code: "CLIENT_NOT_READY", status: null },
+      jianguoyun: true,
+      expected: { messageKey: "clientNotReadyError", diagnosticCode: "WD-CLIENT-NOT-READY", httpStatus: null },
+    },
+    {
       name: "unknown client failure",
       error: { code: "UNKNOWN", status: null },
       jianguoyun: true,
