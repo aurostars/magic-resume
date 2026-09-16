@@ -21,6 +21,10 @@
       "releaseId": "a7ebc86e8040-20260915042023",
       "manifest": "releases/a7ebc86e8040dff12023db06c5c7ec1834fe6e1b/manifest.json"
     },
+    "ae1900cd721de256dbd51d5f1df87d7af90d5269": {
+      "releaseId": "ae1900cd721d-20260916034153",
+      "manifest": "releases/ae1900cd721de256dbd51d5f1df87d7af90d5269/manifest.json"
+    },
     "b3cd7d721c71fd98e3f35f583a1828871f0d1dbd": {
       "releaseId": "b3cd7d721c71-20260915040949",
       "manifest": "releases/b3cd7d721c71fd98e3f35f583a1828871f0d1dbd/manifest.json"
