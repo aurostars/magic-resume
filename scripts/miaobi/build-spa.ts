@@ -27,6 +27,58 @@ async function filesRecursively(directory: string): Promise<string[]> {
   return files;
 }
 
+export function rewritePublicAssetReferences(
+  text: string,
+  publicDirectories: string[],
+  assetBasePlaceholder: string,
+): string {
+  let rewritten = text;
+  for (const directory of publicDirectories) {
+    const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const resourcePath = `(?:\\.\\./|\\./|/)${escapedDirectory}/`;
+    const boundaries = [
+      new RegExp(`(\\burl\\(\\s*["']?)${resourcePath}`, "g"),
+      new RegExp(`(\\b(?:src|href|poster)\\s*=\\s*["'])${resourcePath}`, "g"),
+    ];
+    for (const boundary of boundaries) {
+      rewritten = rewritten.replace(boundary, `$1${assetBasePlaceholder}${directory}/`);
+    }
+  }
+  return rewritten;
+}
+
+function rewriteRootPublicDirectoryLiterals(
+  text: string,
+  publicDirectories: string[],
+  assetBasePlaceholder: string,
+): string {
+  let rewritten = text;
+  for (const directory of publicDirectories) {
+    const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    rewritten = rewritten.replace(
+      new RegExp(`(["'])\\/${escapedDirectory}/`, "g"),
+      `$1${assetBasePlaceholder}${directory}/`,
+    );
+  }
+  return rewritten;
+}
+
+function rewriteKnownPublicAssetLiterals(
+  text: string,
+  publicPaths: string[],
+  assetBasePlaceholder: string,
+): string {
+  let rewritten = text;
+  for (const publicPath of publicPaths) {
+    const escapedPath = publicPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    rewritten = rewritten.replace(
+      new RegExp(`(["'])\\/${escapedPath}(?=[?#]|\\1)`, "g"),
+      `$1${assetBasePlaceholder}${publicPath}`,
+    );
+  }
+  return rewritten;
+}
+
 async function rewriteBuiltAssetReferences(
   clientDirectory: string,
   assetBasePlaceholder: string,
@@ -48,16 +100,21 @@ async function rewriteBuiltAssetReferences(
       /(?:\/\.\/|\.\/|\/)assets\//g,
       `${assetBasePlaceholder}assets/`,
     );
-    for (const directory of publicDirectories) {
-      const escapedDirectory = directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      text = text.replace(
-        new RegExp(`(?:\\.\\./|\\./|/)${escapedDirectory}/`, "g"),
-        `${assetBasePlaceholder}${directory}/`,
-      );
-    }
-    for (const publicPath of publicPaths.filter((path) => !path.includes("/"))) {
-      text = text.replaceAll(`/${publicPath}`, `${assetBasePlaceholder}${publicPath}`);
-    }
+    text = rewritePublicAssetReferences(
+      text,
+      publicDirectories,
+      assetBasePlaceholder,
+    );
+    text = rewriteRootPublicDirectoryLiterals(
+      text,
+      publicDirectories,
+      assetBasePlaceholder,
+    );
+    text = rewriteKnownPublicAssetLiterals(
+      text,
+      publicPaths,
+      assetBasePlaceholder,
+    );
     await writeFile(path, text, "utf8");
   }
 }

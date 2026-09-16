@@ -10,6 +10,7 @@ import {
   buildMiaobiSpa,
   injectMiaobiRuntime,
   replaceDirectory,
+  rewritePublicAssetReferences,
 } from "../scripts/miaobi/build-spa";
 
 const ASSET_BASE_PLACEHOLDER = "https://miaobi.invalid/__ASSET_BASE__/";
@@ -55,6 +56,41 @@ async function readFilesRecursively(directory: string): Promise<string[]> {
   );
   return files.flat();
 }
+
+test("public asset rewriting only changes real relative or root resource references", () => {
+  const input = [
+    'url("../fonts/a.ttf")',
+    'url("./fonts/a.ttf")',
+    'url("/fonts/a.ttf")',
+    'src="../fonts/a.ttf"',
+    'src="./fonts/a.ttf"',
+    'src="/fonts/a.ttf"',
+    'url("https://cdn.example.com/fonts/a.ttf")',
+    'url("//cdn.example.com/fonts/a.ttf")',
+    'url("data:font/ttf;base64,Li4vZm9udHMvYS50dGY=")',
+    'href="https://example.com/?next=../fonts/a.ttf"',
+    'const message = "../fonts/a.ttf";',
+    'const rootMessage = "/fonts/a.ttf";',
+    'const config = { asset: "../fonts/a.ttf" };',
+  ].join("\n");
+
+  const rewritten = rewritePublicAssetReferences(
+    input,
+    ["fonts"],
+    ASSET_BASE_PLACEHOLDER,
+  );
+  const expected = `${ASSET_BASE_PLACEHOLDER}fonts/a.ttf`;
+
+  assert.equal(rewritten.match(new RegExp(expected, "g"))?.length, 6);
+  assert.match(rewritten, /https:\/\/cdn\.example\.com\/fonts\/a\.ttf/);
+  assert.match(rewritten, /\/\/cdn\.example\.com\/fonts\/a\.ttf/);
+  assert.match(rewritten, /data:font\/ttf;base64,Li4vZm9udHMvYS50dGY=/);
+  assert.match(rewritten, /\?next=\.\.\/fonts\/a\.ttf/);
+  assert.match(rewritten, /const message = "\.\.\/fonts\/a\.ttf";/);
+  assert.match(rewritten, /const rootMessage = "\/fonts\/a\.ttf";/);
+  assert.match(rewritten, /asset: "\.\.\/fonts\/a\.ttf"/);
+  assert.doesNotMatch(rewritten, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/https:\/\//);
+});
 
 test("runtime injection precedes application scripts with canonical production URLs", () => {
   const html = '<!doctype html><html><body><script type="module" src="/entry.js"></script></body></html>';
@@ -230,6 +266,10 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
     assert.match(
       stylesheets,
       /url\(https:\/\/miaobi\.invalid\/__ASSET_BASE__\/fonts\/AlibabaPuHuiTi-3-55-Regular\.ttf\)/,
+    );
+    assert.match(
+      stylesheets,
+      /url\(https:\/\/miaobi\.invalid\/__ASSET_BASE__\/fonts\/AlibabaPuHuiTi-3-85-Bold\.ttf\)/,
     );
     const javascript = (
       await Promise.all(
