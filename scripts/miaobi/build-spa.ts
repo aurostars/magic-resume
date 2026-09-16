@@ -44,7 +44,10 @@ async function rewriteBuiltAssetReferences(
   for (const path of files) {
     if (!REWRITABLE_BUILD_EXTENSIONS.has(extname(path).toLowerCase())) continue;
     let text = await readFile(path, "utf8");
-    text = text.replaceAll("/assets/", `${assetBasePlaceholder}assets/`);
+    text = text.replace(
+      /(?:\/\.\/|\.\/|\/)assets\//g,
+      `${assetBasePlaceholder}assets/`,
+    );
     for (const directory of publicDirectories) {
       text = text.replaceAll(`/${directory}/`, `${assetBasePlaceholder}${directory}/`);
     }

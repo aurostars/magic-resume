@@ -7,6 +7,7 @@ export const MIAOBI_ASSET_BASE_PLACEHOLDER =
   "https://miaobi.invalid/__ASSET_BASE__/";
 
 export default defineConfig({
+  base: "./",
   build: {
     outDir: process.env.MAGIC_RESUME_MIAOBI_BUILD_ROOT ?? "dist/miaobi",
   },
