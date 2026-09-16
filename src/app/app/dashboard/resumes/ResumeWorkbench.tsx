@@ -449,17 +449,19 @@ export const ResumeWorkbench = () => {
                 />
 
                 <PdfImportPreview resume={pendingPdfResume} onCancel={() => setPendingPdfResume(null)} onConfirm={confirmPdfImport} />
-                <ImportResumeDialog
-                    modelLabel={pdfConnection?.model || t("common.notConfigured")}
-                    onConfigure={() => router.push("/app/dashboard/ai")}
-                    open={isImportDialogOpen}
-                    isImporting={isImporting}
-                    onOpenChange={setIsImportDialogOpen}
-                    jsonFileInputRef={jsonFileInputRef}
-                    pdfFileInputRef={pdfFileInputRef}
-                    onJsonFileChange={handleJsonFileChange}
-                    onPdfFileChange={handlePdfFileChange}
-                />
+                {isImportDialogOpen && (
+                    <ImportResumeDialog
+                        modelLabel={pdfConnection?.model || t("common.notConfigured")}
+                        onConfigure={() => router.push("/app/dashboard/ai")}
+                        open={isImportDialogOpen}
+                        isImporting={isImporting}
+                        onOpenChange={setIsImportDialogOpen}
+                        jsonFileInputRef={jsonFileInputRef}
+                        pdfFileInputRef={pdfFileInputRef}
+                        onJsonFileChange={handleJsonFileChange}
+                        onPdfFileChange={handlePdfFileChange}
+                    />
+                )}
             </motion.div>
         </ScrollArea>
     );
