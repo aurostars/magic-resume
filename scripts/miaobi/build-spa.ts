@@ -94,6 +94,48 @@ function rewriteCssAssetReferences(
   );
 }
 
+function rewriteAssetReferenceValue(
+  value: string,
+  directories: string[],
+  assetBasePlaceholder: string,
+): string {
+  for (const directory of directories) {
+    const resourcePath = new RegExp(
+      `^(?:\\.\\./|\\./|/\\./|/)${escapeRegularExpression(directory)}/`,
+    );
+    if (resourcePath.test(value)) {
+      return value.replace(resourcePath, `${assetBasePlaceholder}${directory}/`);
+    }
+  }
+  return value;
+}
+
+function rewriteSerializedRouterManifest(
+  script: string,
+  directories: string[],
+  assetBasePlaceholder: string,
+): string {
+  const rewriteValue = (value: string) =>
+    rewriteAssetReferenceValue(value, directories, assetBasePlaceholder);
+
+  return script
+    .replace(
+      /(preloads:\$R\[\d+\]=\[)([^\]]*)(\])/g,
+      (_, prefix: string, values: string, suffix: string) =>
+        `${prefix}${values.replace(/"([^"\\]*)"/g, (_literal, value: string) => `"${rewriteValue(value)}"`)}${suffix}`,
+    )
+    .replace(
+      /(tag:"link",attrs:\$R\[\d+\]=\{[^}]*?\bhref:")([^"\\]+)(")/g,
+      (_, prefix: string, value: string, suffix: string) =>
+        `${prefix}${rewriteValue(value)}${suffix}`,
+    )
+    .replace(
+      /(tag:"script",attrs:\$R\[\d+\]=\{[^}]*\},children:"import\(\\")([^"\\]+)(\\"\)")/g,
+      (_, prefix: string, value: string, suffix: string) =>
+        `${prefix}${rewriteValue(value)}${suffix}`,
+    );
+}
+
 function rewriteStandaloneModuleImport(
   script: string,
   directories: string[],
@@ -130,9 +172,16 @@ function rewriteHtmlAssetReferences(
               assetBasePlaceholder,
               "html",
             );
-            const rewrittenScript = /\btype\s*=\s*["']module["']/i.test(openingTag)
-              ? rewriteStandaloneModuleImport(script, directories, assetBasePlaceholder)
+            const routerManifestScript = /\bid\s*=\s*["']\$tsr-stream-barrier["']/i.test(openingTag)
+              ? rewriteSerializedRouterManifest(script, directories, assetBasePlaceholder)
               : script;
+            const rewrittenScript = /\btype\s*=\s*["']module["']/i.test(openingTag)
+              ? rewriteStandaloneModuleImport(
+                routerManifestScript,
+                directories,
+                assetBasePlaceholder,
+              )
+              : routerManifestScript;
             return `${rewrittenOpeningTag}${rewrittenScript}${closingTag}`;
           },
         );

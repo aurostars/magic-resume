@@ -306,6 +306,37 @@ test("the isolated Miaobi build emits a placeholder-based hash-history client on
       shell,
       /<script[^>]+type="module"[^>]*>import\("https:\/\/miaobi\.invalid\/__ASSET_BASE__\//,
     );
+    const shellDocument = new JSDOM(shell).window.document;
+    const routerManifestScript = shellDocument.getElementById(
+      "$tsr-stream-barrier",
+    );
+    assert.ok(routerManifestScript);
+    assert.doesNotMatch(routerManifestScript.textContent, /\/\.\/assets\//);
+    assert.match(
+      routerManifestScript.textContent,
+      /tag:"link",attrs:\$R\[\d+\]=\{[^}]*href:"https:\/\/miaobi\.invalid\/__ASSET_BASE__\/assets\//,
+    );
+    const serializedEntryImport = routerManifestScript.textContent.match(
+      /children:"import\(\\"([^"\\]+)\\"\)"/,
+    )?.[1];
+    const serializedEntryPreload = routerManifestScript.textContent.match(
+      /preloads:\$R\[\d+\]=\["([^"]+)"/,
+    )?.[1];
+    assert.ok(serializedEntryImport);
+    assert.ok(serializedEntryPreload);
+    for (const entryUrl of [serializedEntryImport, serializedEntryPreload]) {
+      const browserRequest = new URL(
+        entryUrl,
+        "https://magic.solutionsuite.cn/api/faas/web-id",
+      );
+      assert.notEqual(
+        browserRequest.origin,
+        "https://magic.solutionsuite.cn",
+        `hydrated router asset would load from the Magic host: ${browserRequest.href}`,
+      );
+      assert.equal(browserRequest.origin, "https://miaobi.invalid");
+      assert.match(browserRequest.pathname, /^\/__ASSET_BASE__\/assets\/main-/);
+    }
     assert.match(shell, /<link[^>]+rel="stylesheet"[^>]+href="https:\/\/miaobi\.invalid\/__ASSET_BASE__\/assets\//);
     assert.match(shell, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/fonts\/AlibabaPuHuiTi-3-55-Regular\.ttf/);
     assert.match(shell, /https:\/\/miaobi\.invalid\/__ASSET_BASE__\/favicon\.ico\?v=2/);
